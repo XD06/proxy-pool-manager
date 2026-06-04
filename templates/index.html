@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Bind proxy nodes to fixed local SOCKS5 ports and verify each route.">
+  <title>Proxy Pool Manager</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260605-perf-1">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">local proxy control</p>
+        <h1>Proxy Pool Manager</h1>
+        <p class="summary">导入节点，测速验证出口 IP，按端口固定绑定给不同账户使用。</p>
+      </div>
+      <div class="status-grid">
+        <article>
+          <span>引擎</span>
+          <strong id="engineState">读取中</strong>
+        </article>
+        <article>
+          <span>节点</span>
+          <strong id="nodeCount">0</strong>
+        </article>
+        <article>
+          <span>映射</span>
+          <strong id="mappingCount">0</strong>
+        </article>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="main sections">
+      <button class="tab active" data-tab="import">导入</button>
+      <button class="tab" data-tab="test">测试</button>
+      <button class="tab" data-tab="assign">分配</button>
+      <button class="tab" data-tab="dashboard">运行</button>
+    </nav>
+
+    <section id="notice" class="notice hidden"></section>
+
+    <section id="import" class="panel active">
+      <div class="split">
+        <div>
+          <h2>导入节点</h2>
+          <p class="panel-copy">支持订阅 URL、Clash YAML、Base64 订阅和单节点链接。导入后先去“测试”页验证可用性。</p>
+        </div>
+        <div class="form-stack">
+          <label>
+            <span>订阅 URL</span>
+            <div class="input-row">
+              <input id="urlInput" type="url" placeholder="https://example.com/sub">
+              <button id="importUrlBtn">导入</button>
+            </div>
+          </label>
+          <label>
+            <span>配置文本</span>
+            <textarea id="textInput" rows="8" placeholder="vless://..."></textarea>
+          </label>
+          <button id="importTextBtn" class="primary">解析文本</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="test" class="panel">
+      <div class="section-head">
+        <div>
+          <h2>节点测试</h2>
+          <p class="panel-copy">临时启动 sing-box，逐个节点验证延迟和出口 IP。同一个出口 IP 可自动只保留最快可用节点。</p>
+        </div>
+        <div class="actions">
+          <label class="inline-field wide">
+            测试目标 URL
+            <input id="nodeTestUrl" type="url" placeholder="留空则测出口 IP；填入则只测这个 URL">
+          </label>
+          <button id="selectAliveBtn">只选可用</button>
+          <button id="testSelectedBtn" class="primary">测速选中节点</button>
+          <button id="testUntestedBtn">测试未测速</button>
+          <button id="testPruneBtn">测速并按 IP 去重</button>
+          <button id="deleteSelectedBtn">删除选中</button>
+          <button id="deleteFailedBtn">删除失败</button>
+          <button id="clearNodesBtn">清空节点</button>
+        </div>
+      </div>
+      <div id="nodeTable" class="table-card"></div>
+    </section>
+
+    <section id="assign" class="panel">
+      <div class="section-head">
+        <div>
+          <h2>端口分配</h2>
+          <p class="panel-copy">建议只分配测试通过的节点。每个端口固定对应一个节点。</p>
+        </div>
+        <div class="actions">
+          <label class="inline-field">
+            起始端口
+            <input id="startPort" type="number" value="8001" min="1024" max="65535">
+          </label>
+          <button id="autoAssignBtn">自动分配</button>
+          <button id="saveAssignBtn" class="primary">保存映射</button>
+        </div>
+      </div>
+      <div id="assignTable" class="table-card"></div>
+    </section>
+
+    <section id="dashboard" class="panel">
+      <div class="section-head">
+        <div>
+          <h2>运行验证</h2>
+          <p class="panel-copy">启动引擎后，在这里验证每个端口是否真正可用，并查看对应出口 IP。端口支持 HTTP 和 SOCKS 代理。</p>
+        </div>
+        <div class="actions">
+          <button id="startBtn" class="primary">启动引擎</button>
+          <button id="stopBtn">停止引擎</button>
+          <label class="inline-field wide">
+            自定义 URL
+            <input id="customTestUrl" type="url" placeholder="https://example.com/">
+          </label>
+          <button id="testPortsBtn">验证全部端口</button>
+          <label class="inline-field">
+            导出
+            <select id="exportFormat">
+              <option value="proxy-list">代理列表</option>
+              <option value="csv">CSV</option>
+              <option value="json">JSON</option>
+              <option value="curl">curl 命令</option>
+            </select>
+          </label>
+          <button id="exportBtn">生成导出</button>
+          <button id="refreshBtn">刷新</button>
+        </div>
+      </div>
+      <div id="quickResult" class="quick-result hidden"></div>
+      <div id="portsTable" class="table-card"></div>
+      <textarea id="exportOutput" class="export-output hidden" rows="8" readonly></textarea>
+      <div id="validationResults" class="validation-results"></div>
+    </section>
+  </main>
+  <script src="/static/app.js?v=20260605-perf-1"></script>
+</body>
+</html>

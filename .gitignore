@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+tmp/
+config/*.json
+!config/app.example.json
+config/*.log
+config/*.db
+config/*.tmp
+bin/*
+!bin/.gitkeep
