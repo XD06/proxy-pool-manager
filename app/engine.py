@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shutil
+import socket
 import subprocess
 import tarfile
 import time
@@ -29,6 +31,7 @@ class EngineManager:
         self.started_at: float | None = None
         self.last_error: str | None = None
         self.fatal = False
+        self._lock = asyncio.Lock()
 
     def _binary_name(self) -> str:
         return "sing-box.exe" if platform.system().lower() == "windows" else "sing-box"
@@ -173,32 +176,48 @@ class EngineManager:
             output = (stderr or stdout).decode(errors="replace")[-4000:]
             raise EngineError(f"sing-box check failed: {output}")
 
-    async def start(self, config_path: Path, *, check: bool = True, settle_seconds: float = 1.0) -> None:
-        if check:
-            await self.check_config(config_path)
-        await self.stop(config_path=config_path)
-        self.managed_config_path = config_path
-        binary = await self.ensure_binary()
-        self.process = subprocess.Popen(
-            [str(binary), "run", "-c", str(config_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(config_path.parent.parent),
-            creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
-        )
-        self.started_at = time.time()
-        await asyncio.sleep(settle_seconds)
-        if self.process.poll() is not None:
-            err = ""
-            if self.process.stderr:
-                err = self.process.stderr.read().decode(errors="replace")[-4000:]
-            self.last_error = err or "sing-box exited immediately"
-            self.process = None
-            raise EngineError(self.last_error)
-        self.fatal = False
-        self.last_error = None
+    async def start(
+        self,
+        config_path: Path,
+        *,
+        check: bool = True,
+        settle_seconds: float = 1.0,
+        port_wait_timeout: float = 6.0,
+    ) -> None:
+        async with self._lock:
+            if check:
+                await self.check_config(config_path)
+            await self._stop_unlocked(config_path=config_path)
+            await self._wait_for_config_ports_available(config_path, timeout_seconds=port_wait_timeout)
+            self.managed_config_path = config_path
+            binary = await self.ensure_binary()
+            proc = subprocess.Popen(
+                [str(binary), "run", "-c", str(config_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(config_path.parent.parent),
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
+            )
+            self.process = proc
+            self.started_at = time.time()
+            await asyncio.sleep(settle_seconds)
+            if proc.poll() is not None:
+                err = ""
+                if proc.stderr:
+                    err = proc.stderr.read().decode(errors="replace")[-4000:]
+                self.last_error = err or "sing-box exited immediately"
+                if self.process is proc:
+                    self.process = None
+                raise EngineError(self.last_error)
+            if self.process is proc:
+                self.fatal = False
+                self.last_error = None
 
     async def stop(self, config_path: Path | None = None) -> None:
+        async with self._lock:
+            await self._stop_unlocked(config_path=config_path)
+
+    async def _stop_unlocked(self, config_path: Path | None = None) -> None:
         if not self.process:
             self._kill_managed_orphans(config_path=config_path)
             return
@@ -215,6 +234,22 @@ class EngineManager:
             await asyncio.to_thread(proc.wait, 1)
         self._kill_managed_orphans(config_path=config_path)
 
+    async def _wait_for_config_ports_available(self, config_path: Path, timeout_seconds: float = 6.0) -> None:
+        ports = _config_listen_ports(config_path)
+        if not ports:
+            return
+        deadline = time.monotonic() + timeout_seconds
+        unavailable = _unavailable_ports(ports)
+        while unavailable and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+            unavailable = _unavailable_ports(ports)
+        if unavailable:
+            joined = ", ".join(str(port) for port in unavailable)
+            raise EngineError(
+                f"Ports are not available: {joined}. "
+                "Stop the process using them, wait a few seconds, or change the port mapping."
+            )
+
     def status(self) -> EngineStatus:
         running = self.process is not None and self.process.poll() is None
         if not running:
@@ -225,7 +260,7 @@ class EngineManager:
                     pid=managed[0].get("ProcessId"),
                     uptime_seconds=None,
                     fatal=self.fatal,
-                    last_error="project sing-box process detected",
+                    last_error=None,
                 )
         return EngineStatus(
             running=running,
@@ -258,3 +293,34 @@ class EngineManager:
 
 def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _config_listen_ports(config_path: Path) -> list[int]:
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    ports: set[int] = set()
+    for inbound in config.get("inbounds", []):
+        if isinstance(inbound, dict) and isinstance(inbound.get("listen_port"), int):
+            ports.add(inbound["listen_port"])
+    clash_api = config.get("experimental", {}).get("clash_api", {})
+    if isinstance(clash_api, dict):
+        controller = str(clash_api.get("external_controller") or "")
+        match = re.search(r":(\d+)$", controller)
+        if match:
+            ports.add(int(match.group(1)))
+    return sorted(ports)
+
+
+def _unavailable_ports(ports: list[int]) -> list[int]:
+    return [port for port in ports if not _can_bind_tcp_port(port)]
+
+
+def _can_bind_tcp_port(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError:
+            return False
+        return True

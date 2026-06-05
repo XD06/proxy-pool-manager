@@ -1,7 +1,11 @@
 import asyncio
+import io
+import json
 from pathlib import Path
 
-from app.engine import EngineManager
+import pytest
+
+from app.engine import EngineError, EngineManager, _config_listen_ports
 
 
 def test_status_detects_managed_sing_box_process(monkeypatch):
@@ -16,7 +20,7 @@ def test_status_detects_managed_sing_box_process(monkeypatch):
 
     assert status.running is True
     assert status.pid == 1234
-    assert status.last_error == "project sing-box process detected"
+    assert status.last_error is None
 
 
 def test_stop_cleans_managed_orphans_when_no_tracked_process(monkeypatch):
@@ -38,3 +42,86 @@ def test_stop_can_target_config_specific_orphans(monkeypatch):
     asyncio.run(manager.stop(config_path=test_config))
 
     assert calls == [(None, test_config)]
+
+
+def test_concurrent_start_stop_does_not_corrupt_process(monkeypatch):
+    manager = EngineManager()
+    test_config = Path("config/sing-box.json")
+
+    class FakeProc:
+        pid = 4321
+
+        def __init__(self):
+            self.returncode = None
+            self.stderr = io.BytesIO()
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    async def run():
+        monkeypatch.setattr(manager, "ensure_binary", lambda: asyncio.sleep(0, result=Path("sing-box.exe")))
+        monkeypatch.setattr(manager, "_kill_managed_orphans", lambda keep_pid=None, config_path=None: None)
+        monkeypatch.setattr("app.engine._unavailable_ports", lambda ports: [])
+        monkeypatch.setattr("app.engine.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+        await asyncio.gather(
+            manager.start(test_config, check=False, settle_seconds=0.01),
+            manager.stop(config_path=test_config),
+        )
+
+    asyncio.run(run())
+    assert manager.process is None
+
+
+def test_config_listen_ports_includes_inbounds_and_clash_api(tmp_path):
+    config_path = tmp_path / "sing-box.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "inbounds": [
+                    {"type": "mixed", "listen_port": 8001},
+                    {"type": "mixed", "listen_port": 8002},
+                ],
+                "experimental": {
+                    "clash_api": {
+                        "external_controller": "127.0.0.1:10000",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _config_listen_ports(config_path) == [8001, 8002, 10000]
+
+
+def test_start_fails_before_popen_when_config_ports_are_unavailable(monkeypatch, tmp_path):
+    manager = EngineManager()
+    config_path = tmp_path / "sing-box.json"
+    config_path.write_text(json.dumps({"inbounds": [{"listen_port": 8001}]}), encoding="utf-8")
+    popen_called = False
+
+    def fake_popen(*args, **kwargs):
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("Popen should not be called when ports are unavailable")
+
+    async def run():
+        monkeypatch.setattr(manager, "ensure_binary", lambda: asyncio.sleep(0, result=Path("sing-box.exe")))
+        monkeypatch.setattr(manager, "_kill_managed_orphans", lambda keep_pid=None, config_path=None: None)
+        monkeypatch.setattr("app.engine._unavailable_ports", lambda ports: ports)
+        monkeypatch.setattr("app.engine.subprocess.Popen", fake_popen)
+        with pytest.raises(EngineError, match="Ports are not available: 8001"):
+            await manager.start(config_path, check=False, settle_seconds=0, port_wait_timeout=0)
+
+    asyncio.run(run())
+    assert not popen_called

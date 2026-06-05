@@ -11,16 +11,20 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+import httpx
 from pydantic import BaseModel
 
 from .engine import EngineError, EngineManager
+from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping
 from .parser import import_nodes
 from .settings import (
+    APP_CONFIG_PATH,
     SING_BOX_CONFIG_PATH,
     STATIC_DIR,
     TEMPLATES_DIR,
+    current_clash_api_addr,
     current_proxy_listen_host,
     current_proxy_public_host,
 )
@@ -61,6 +65,43 @@ class PortTestRequest(BaseModel):
     urls: list[str] | None = None
 
 
+class PortAvailabilityRequest(BaseModel):
+    ports: list[int]
+
+
+class PortAllocateRequest(BaseModel):
+    start_port: int = 8001
+    count: int
+    exclude: list[int] = []
+
+
+class ProxyAdminRequest(BaseModel):
+    base_url: str
+    token: str
+    proxy_host: str | None = None
+    replace_from: str | None = None
+    replace_to: str | None = None
+    ports: list[int] | None = None
+    concurrency: int = 10
+
+
+class ProxyAdminRemoveRequest(BaseModel):
+    base_url: str
+    token: str
+    ids: list[int] | None = None
+    unused: bool = False
+    concurrency: int = 5
+
+
+class ProxyAdminConfig(BaseModel):
+    base_url: str = ""
+    token: str = ""
+    proxy_host: str = ""
+    replace_from: str = "127.0.0.1"
+    replace_to: str = ""
+    concurrency: int = 10
+
+
 class TestJob(BaseModel):
     id: str
     status: str = "running"
@@ -81,6 +122,16 @@ class PortTestJob(BaseModel):
     error: str | None = None
 
 
+class ProxyAdminJob(BaseModel):
+    id: str
+    status: str = "running"
+    total: int = 0
+    completed: int = 0
+    imported: list[dict] = []
+    results: dict[str, dict] = {}
+    error: str | None = None
+
+
 def create_app(store: StateStore | None = None, engine: EngineManager | None = None) -> FastAPI:
     state_store = store or StateStore()
     app_state = state_store.load()
@@ -91,6 +142,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     port_test_jobs: dict[str, PortTestJob] = {}
     port_test_job_lock = asyncio.Lock()
     active_port_test_job: dict[str, str | None] = {"id": None}
+    proxy_admin_jobs: dict[str, ProxyAdminJob] = {}
+    proxy_admin_job_lock = asyncio.Lock()
+    active_proxy_admin_job: dict[str, str | None] = {"id": None}
 
     monitor_task: asyncio.Task | None = None
 
@@ -113,6 +167,22 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     def save() -> None:
         state_store.save(app_state)
+
+    def load_app_config() -> dict:
+        if not APP_CONFIG_PATH.exists():
+            return {}
+        try:
+            return json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def save_app_config(config: dict) -> None:
+        APP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        APP_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def proxy_admin_config_payload() -> dict:
+        config = load_app_config().get("proxy_admin") or {}
+        return ProxyAdminConfig.model_validate(config).model_dump()
 
     def node_by_tag():
         return {node.tag: node for node in app_state.nodes}
@@ -148,7 +218,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     def engine_status_payload(request: Request | None = None) -> dict:
         payload = engine_manager.status().model_dump()
         expected = mapped_ports()
-        config_ports = configured_ports()
+        config_ports = [] if not expected and not payload["running"] else configured_ports()
         listening = _listening_local_ports(expected) if payload["running"] else []
         payload["expected_ports"] = expected
         payload["config_ports"] = config_ports
@@ -159,6 +229,214 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         payload["proxy_public_host"] = current_proxy_public_host()
         payload["proxy_connect_host"] = proxy_connect_host(request)
         return payload
+
+    def node_test_running() -> bool:
+        return active_test_job["id"] is not None or test_job_lock.locked()
+
+    def include_clash_api_for_next_start() -> bool:
+        if engine_manager.status().running:
+            return True
+        port = configured_clash_api_port()
+        if port is None:
+            return False
+        return _can_bind_tcp_port(port)
+
+    def configured_clash_api_port() -> int | None:
+        controller = current_clash_api_addr()
+        match = re.search(r":(\d+)$", controller)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def port_diagnostic(
+        port: int,
+        *,
+        clash_port: int | None = None,
+        engine_running: bool | None = None,
+        project_listening: set[int] | None = None,
+    ) -> dict:
+        if port < 1024 or port > 65535:
+            return {"available": False, "reason": "invalid", "label": "端口无效"}
+        if clash_port is None:
+            clash_port = configured_clash_api_port()
+        if clash_port == port:
+            return {
+                "available": False,
+                "reason": "reserved-clash-api",
+                "label": "Clash API 控制端口",
+            }
+        if engine_running is None:
+            engine_running = engine_manager.status().running
+        if project_listening is None:
+            project_listening = set(_listening_local_ports([port])) if engine_running else set()
+        if engine_running:
+            if port in project_listening:
+                return {
+                    "available": False,
+                    "reason": "project-listening",
+                    "label": "本项目正在监听",
+                }
+        available = _can_bind_tcp_port(port)
+        return {
+            "available": available,
+            "reason": "available" if available else "busy",
+            "label": "可用" if available else "系统不可绑定",
+        }
+
+    def allocate_available_ports(start_port: int, count: int, exclude: list[int]) -> dict:
+        if count < 0 or count > 1000:
+            raise HTTPException(status_code=400, detail="Invalid allocation count")
+        if start_port < 1024 or start_port > 65535:
+            raise HTTPException(status_code=400, detail=f"Invalid start port: {start_port}")
+        excluded = {int(port) for port in exclude}
+        clash_port = configured_clash_api_port()
+        engine_running = engine_manager.status().running
+        project_listening = set(_listening_local_ports(mapped_ports())) if engine_running else set()
+        ports: list[int] = []
+        skipped: dict[str, dict] = {}
+        port = start_port
+        while len(ports) < count and port <= 65535:
+            if port in excluded:
+                port += 1
+                continue
+            diagnostic = port_diagnostic(
+                port,
+                clash_port=clash_port,
+                engine_running=engine_running,
+                project_listening=project_listening,
+            )
+            if diagnostic["available"]:
+                ports.append(port)
+            else:
+                skipped[str(port)] = diagnostic
+            port += 1
+        if len(ports) < count:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Could not allocate {count} ports from {start_port}; found {len(ports)} available ports.",
+            )
+        return {"ports": ports, "skipped": skipped}
+
+    def proxy_urls_for_ports(payload: ProxyAdminRequest, request: Request) -> list[dict]:
+        selected_ports = payload.ports or mapped_ports()
+        host = (payload.proxy_host or proxy_connect_host(request)).strip()
+        replace_from = (payload.replace_from or "").strip()
+        replace_to = (payload.replace_to or "").strip()
+        items = []
+        for port in selected_ports:
+            export_host = replace_to if replace_from and replace_to and host == replace_from else host
+            items.append(
+                {
+                    "url": f"http://{host}:{port}",
+                    "host": export_host,
+                    "port": int(port),
+                }
+            )
+        return items
+
+    async def proxy_admin_api(payload: ProxyAdminRequest | ProxyAdminRemoveRequest, method: str, path: str, body=None):
+        base_url = payload.base_url.rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {payload.token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.request(method, f"{base_url}{path}", headers=headers, json=body)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict) and data.get("code") not in (None, 0):
+                raise RuntimeError(data.get("message") or f"ProxyAdmin returned code {data.get('code')}")
+            return data
+
+    async def proxy_admin_list_all(payload: ProxyAdminRequest | ProxyAdminRemoveRequest) -> dict[str, dict]:
+        page = 1
+        page_size = 200
+        result = {}
+        while True:
+            data = await proxy_admin_api(
+                payload,
+                "GET",
+                f"/api/v1/admin/proxies?page={page}&page_size={page_size}&sort_by=id&sort_order=desc",
+            )
+            page_data = data.get("data") or {}
+            for item in page_data.get("items") or []:
+                result[f"{item.get('host')}:{item.get('port')}"] = item
+            if page >= int(page_data.get("pages") or 1):
+                break
+            page += 1
+        return result
+
+    async def proxy_admin_import(payload: ProxyAdminRequest, items: list[dict]) -> list[dict]:
+        if not items:
+            return []
+        await proxy_admin_api(
+            payload,
+            "POST",
+            "/api/v1/admin/proxies/batch",
+            {
+                "proxies": [
+                    {
+                        "protocol": "http",
+                        "host": item["host"],
+                        "port": item["port"],
+                        "username": "",
+                        "password": "",
+                    }
+                    for item in items
+                ]
+            },
+        )
+        proxy_map = await proxy_admin_list_all(payload)
+        imported = []
+        for item in items:
+            proxy = proxy_map.get(f"{item['host']}:{item['port']}") or {}
+            imported.append({**item, "id": int(proxy.get("id") or 0)})
+        return imported
+
+    async def proxy_admin_quality_check(payload: ProxyAdminRequest, proxy_id: int) -> dict:
+        data = await proxy_admin_api(payload, "POST", f"/api/v1/admin/proxies/{proxy_id}/quality-check")
+        raw = data.get("data") or {}
+        return {
+            "id": int(raw.get("proxy_id") or proxy_id),
+            "exit_ip": raw.get("exit_ip") or "",
+            "country": raw.get("country") or "",
+            "score": raw.get("score") or 0,
+            "grade": raw.get("grade") or "",
+            "items": [
+                {
+                    "target": item.get("target") or "",
+                    "status": item.get("status") or "",
+                    "http_status": item.get("http_status"),
+                    "latency_ms": item.get("latency_ms"),
+                    "message": item.get("message") or "",
+                }
+                for item in raw.get("items") or []
+            ],
+        }
+
+    async def proxy_admin_remove_ids(payload: ProxyAdminRemoveRequest, ids: list[int]) -> list[dict]:
+        results: list[dict] = []
+        idx = 0
+        concurrency = max(1, min(payload.concurrency, 20, len(ids) or 1))
+
+        async def worker():
+            nonlocal idx
+            while idx < len(ids):
+                proxy_id = ids[idx]
+                idx += 1
+                try:
+                    data = await proxy_admin_api(payload, "DELETE", f"/api/v1/admin/proxies/{proxy_id}")
+                    success = data.get("code") == 0
+                    item = {"id": proxy_id, "success": success}
+                    if not success:
+                        item["message"] = data.get("message")
+                    results.append(item)
+                except Exception as exc:
+                    results.append({"id": proxy_id, "success": False, "message": str(exc)})
+
+        await asyncio.gather(*(worker() for _ in range(concurrency)))
+        return results
 
     async def wait_for_mapped_ports(timeout_seconds: float = 8.0) -> None:
         expected = mapped_ports()
@@ -323,7 +601,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         missing = [tag for tag in tags if tag not in by_tag]
         results = {tag: {"alive": False, "error": "node not found", "delay": None} for tag in missing}
         try:
-            tested = await test_nodes_with_temporary_engine(selected, target_url=payload.target_url)
+            tested = await test_nodes_with_temporary_engine(
+                selected,
+                target_url=payload.target_url,
+                include_exit_ip=payload.prune_same_ip,
+            )
         except EngineError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         for tag, result in tested.items():
@@ -380,7 +662,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     job.results[tag] = result.model_dump()
                     job.completed += 1
 
-                await test_nodes_with_temporary_engine(selected, on_result=update, target_url=target_url)
+                await test_nodes_with_temporary_engine(
+                    selected,
+                    on_result=update,
+                    target_url=target_url,
+                    include_exit_ip=prune_same_ip,
+                )
                 if prune_same_ip:
                     app_state.nodes, job.removed = prune_same_exit_ip(app_state.nodes, app_state.latency_cache)
                     kept_tags = {node.tag for node in app_state.nodes}
@@ -489,9 +776,18 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         restarted = False
         stopped = False
         if engine_manager.status().running:
+            if node_test_running():
+                raise HTTPException(
+                    status_code=409,
+                    detail="A node test is running. Wait for it to finish before restarting the engine.",
+                )
             if app_state.port_mappings:
                 try:
-                    config = generate_config(app_state.nodes, app_state.port_mappings)
+                    config = generate_config(
+                        app_state.nodes,
+                        app_state.port_mappings,
+                        include_clash_api=include_clash_api_for_next_start(),
+                    )
                     SING_BOX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
                     SING_BOX_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
                     await engine_manager.start(SING_BOX_CONFIG_PATH)
@@ -526,6 +822,113 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             }
         return {"ports": response}
 
+    @app.post("/api/ports/check")
+    async def check_ports(payload: PortAvailabilityRequest):
+        checked = {}
+        clash_port = configured_clash_api_port()
+        engine_running = engine_manager.status().running
+        project_listening = set(_listening_local_ports(mapped_ports())) if engine_running else set()
+        for port in payload.ports:
+            checked[str(port)] = port_diagnostic(
+                port,
+                clash_port=clash_port,
+                engine_running=engine_running,
+                project_listening=project_listening,
+            )
+        return {"ports": checked}
+
+    @app.post("/api/ports/allocate")
+    async def allocate_ports(payload: PortAllocateRequest):
+        return allocate_available_ports(payload.start_port, payload.count, payload.exclude)
+
+    @app.post("/api/proxy-admin/check/start")
+    async def start_proxy_admin_check(payload: ProxyAdminRequest, request: Request):
+        if active_proxy_admin_job["id"] is not None or proxy_admin_job_lock.locked():
+            raise HTTPException(status_code=409, detail="A ProxyAdmin check job is already running")
+        proxy_items = proxy_urls_for_ports(payload, request)
+        job = ProxyAdminJob(id=str(uuid.uuid4()))
+        job.total = len(proxy_items)
+        proxy_admin_jobs[job.id] = job
+        active_proxy_admin_job["id"] = job.id
+        asyncio.create_task(run_proxy_admin_job(job.id, payload, proxy_items))
+        return job.model_dump()
+
+    @app.get("/api/proxy-admin/config")
+    async def get_proxy_admin_config():
+        return proxy_admin_config_payload()
+
+    @app.put("/api/proxy-admin/config")
+    async def save_proxy_admin_config(payload: ProxyAdminConfig):
+        config = load_app_config()
+        config["proxy_admin"] = payload.model_dump()
+        save_app_config(config)
+        return {"ok": True, "config": proxy_admin_config_payload()}
+
+    @app.get("/api/proxy-admin/jobs/{job_id}")
+    async def get_proxy_admin_job(job_id: str):
+        job = proxy_admin_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="ProxyAdmin job not found")
+        return job.model_dump()
+
+    async def run_proxy_admin_job(job_id: str, payload: ProxyAdminRequest, proxy_items: list[dict]) -> None:
+        job = proxy_admin_jobs[job_id]
+        async with proxy_admin_job_lock:
+            try:
+                imported = await proxy_admin_import(payload, proxy_items)
+                job.imported = imported
+                ids = [item["id"] for item in imported if item.get("id")]
+                job.total = len(ids)
+                if not ids:
+                    job.status = "done"
+                    return
+                idx = 0
+                concurrency = max(1, min(payload.concurrency, 30, len(ids)))
+
+                async def worker():
+                    nonlocal idx
+                    while idx < len(ids):
+                        proxy_id = ids[idx]
+                        idx += 1
+                        try:
+                            result = await proxy_admin_quality_check(payload, proxy_id)
+                        except Exception as exc:
+                            result = {
+                                "id": proxy_id,
+                                "exit_ip": "",
+                                "country": "",
+                                "score": 0,
+                                "grade": "ERR",
+                                "items": [],
+                                "error": str(exc),
+                            }
+                        job.results[str(proxy_id)] = result
+                        job.completed += 1
+
+                await asyncio.gather(*(worker() for _ in range(concurrency)))
+                job.status = "done"
+            except Exception as exc:
+                job.status = "error"
+                job.error = str(exc)
+            finally:
+                if active_proxy_admin_job["id"] == job_id:
+                    active_proxy_admin_job["id"] = None
+
+    @app.post("/api/proxy-admin/remove")
+    async def remove_proxy_admin_items(payload: ProxyAdminRemoveRequest):
+        ids = list(payload.ids or [])
+        if payload.unused:
+            proxy_map = await proxy_admin_list_all(payload)
+            ids = [
+                int(item.get("id"))
+                for item in proxy_map.values()
+                if int(item.get("account_count") or 0) == 0 and item.get("id")
+            ]
+        if not ids:
+            return {"removed": [], "count": 0}
+        results = await proxy_admin_remove_ids(payload, ids)
+        return {"removed": results, "count": len(results)}
+
     @app.get("/api/ports/{port}/ip")
     async def port_ip(port: int):
         if str(port) not in app_state.port_mappings:
@@ -544,8 +947,17 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def start():
         if not app_state.port_mappings:
             raise HTTPException(status_code=400, detail="No port mappings configured")
+        if node_test_running():
+            raise HTTPException(
+                status_code=409,
+                detail="A node test is running. Wait for it to finish before starting the engine.",
+            )
         try:
-            config = generate_config(app_state.nodes, app_state.port_mappings)
+            config = generate_config(
+                app_state.nodes,
+                app_state.port_mappings,
+                include_clash_api=include_clash_api_for_next_start(),
+            )
             SING_BOX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             SING_BOX_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
             await engine_manager.start(SING_BOX_CONFIG_PATH)

@@ -106,82 +106,52 @@ async def validate_proxy_targets(port: int, urls: list[str] | None = None) -> li
         return await asyncio.gather(*(fetch_target(client, url) for url in targets))
 
 
-async def validate_proxy_port(port: int, target_url: str | None = None) -> LatencyResult:
-    proxy = f"socks5://127.0.0.1:{port}"
-    if target_url:
-        started = time.perf_counter()
-        try:
-            async with httpx.AsyncClient(proxy=proxy, timeout=12, follow_redirects=False) as client:
-                response = await client.get(target_url)
-                elapsed = int((time.perf_counter() - started) * 1000)
-                body = response.text.strip().replace("\r", "")[:160]
-                return LatencyResult(
-                    alive=200 <= response.status_code < 400,
-                    delay=max(elapsed, 1),
-                    test_port=port,
-                    target_url=target_url,
-                    status_code=response.status_code,
-                    body_preview=body,
-                    error=None if 200 <= response.status_code < 400 else f"HTTP {response.status_code}",
-                )
-        except Exception as exc:
+async def validate_proxy_port(
+    port: int,
+    target_url: str | None = None,
+    *,
+    include_exit_ip: bool = False,
+) -> LatencyResult:
+    proxy = f"http://127.0.0.1:{port}"
+    test_url = target_url or "https://www.gstatic.com/generate_204"
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(proxy=proxy, timeout=5, follow_redirects=False) as client:
+            response = await client.get(test_url)
+            elapsed = int((time.perf_counter() - started) * 1000)
+            body = response.text.strip().replace("\r", "")[:160]
+            alive = 200 <= response.status_code < 400
+            exit_ip = None
+            exit_error = None
+            if alive and include_exit_ip:
+                for url in EXIT_IP_URLS:
+                    try:
+                        candidate = await client.get(url)
+                        candidate.raise_for_status()
+                        exit_ip = candidate.text.strip()
+                        break
+                    except Exception as exc:
+                        exit_error = str(exc)
             return LatencyResult(
-                alive=False,
-                delay=None,
+                alive=alive,
+                delay=max(elapsed, 1) if alive else None,
+                exit_ip=exit_ip,
                 test_port=port,
                 target_url=target_url,
-                error=str(exc),
-            )
-
-    started = time.perf_counter()
-    last_error = None
-    try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=8) as client:
-            response = await client.get("https://www.gstatic.com/generate_204")
-            response.raise_for_status()
-            delay = int((time.perf_counter() - started) * 1000)
-            ip_response = None
-            for url in EXIT_IP_URLS:
-                try:
-                    candidate = await client.get(url)
-                    candidate.raise_for_status()
-                    ip_response = candidate
-                    break
-                except Exception as exc:
-                    last_error = str(exc)
-            if not ip_response:
-                raise RuntimeError(last_error or "exit IP query failed")
-            return LatencyResult(
-                alive=True,
-                delay=max(delay, 1),
-                exit_ip=ip_response.text.strip(),
-                test_port=port,
+                status_code=response.status_code,
+                body_preview=body if target_url else None,
+                error=(exit_error if include_exit_ip and alive and not exit_ip else None)
+                if alive
+                else f"HTTP {response.status_code}",
             )
     except Exception as exc:
-        last_error = str(exc)
-
-    started = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=8) as client:
-            response = None
-            for url in EXIT_IP_URLS:
-                try:
-                    candidate = await client.get(url)
-                    candidate.raise_for_status()
-                    response = candidate
-                    break
-                except Exception as exc:
-                    last_error = str(exc)
-            if not response:
-                raise RuntimeError(last_error or "exit IP query failed")
-            return LatencyResult(
-                alive=True,
-                delay=max(int((time.perf_counter() - started) * 1000), 1),
-                exit_ip=response.text.strip(),
-                test_port=port,
-            )
-    except Exception as exc:
-        return LatencyResult(alive=False, delay=None, test_port=port, error=str(exc) or last_error)
+        return LatencyResult(
+            alive=False,
+            delay=None,
+            test_port=port,
+            target_url=target_url,
+            error=str(exc),
+        )
 
 
 def _port_is_free(port: int) -> bool:
@@ -210,6 +180,7 @@ async def test_nodes_with_temporary_engine(
     nodes: list[ProxyNode],
     on_result=None,
     target_url: str | None = None,
+    include_exit_ip: bool = False,
 ) -> dict[str, LatencyResult]:
     if not nodes:
         return {}
@@ -232,8 +203,11 @@ async def test_nodes_with_temporary_engine(
         await engine.start(SING_BOX_TEST_CONFIG_PATH, check=False, settle_seconds=0.35)
         async def run_one(tag: str, port: int):
             try:
-                timeout = 18 if not target_url else 14
-                result = await asyncio.wait_for(validate_proxy_port(port, target_url=target_url), timeout=timeout)
+                timeout = 10 if include_exit_ip else 6
+                result = await asyncio.wait_for(
+                    validate_proxy_port(port, target_url=target_url, include_exit_ip=include_exit_ip),
+                    timeout=timeout,
+                )
             except asyncio.TimeoutError:
                 result = LatencyResult(
                     alive=False,
@@ -244,10 +218,13 @@ async def test_nodes_with_temporary_engine(
                 )
             return tag, result
 
-        tasks = [
-            run_one(node.tag, ports[index])
-            for index, node in enumerate(nodes)
-        ]
+        semaphore = asyncio.Semaphore(12)
+
+        async def limited_run_one(tag: str, port: int):
+            async with semaphore:
+                return await run_one(tag, port)
+
+        tasks = [limited_run_one(node.tag, ports[index]) for index, node in enumerate(nodes)]
         results: dict[str, LatencyResult] = {}
         for completed in asyncio.as_completed(tasks):
             tag, result = await completed

@@ -1289,3 +1289,515 @@ node --check static/app.js -> passed
 python -m pytest -q -> 35 passed
 测试前后 config/sing-box.json SHA256 一致 -> 测试不污染真实配置
 ```
+
+## 自定义 URL 后 curl 验证命令仍固定为出口 IP URL
+
+用户反馈：
+
+```text
+自定义url填入后，curl验证不会改变，还是固定为
+curl --proxy "http://127.0.0.1:8006/" https://ipv4.webshare.io/
+```
+
+根因：
+
+- 之前为了让“查出口”始终使用 `https://ipv4.webshare.io/`，新增了 `EXIT_IP_CHECK_URL`。
+- 但表格里的“curl 验证”和导出 curl 也误用了这个固定常量。
+- 导致自定义验证 URL 只影响实际验证请求，不影响 UI 中展示/复制/导出的 curl 命令。
+
+处理：
+
+- `renderPortsTable()` 中的 curl 验证命令改为使用 `activeValidationUrl()`。
+- `exportRows()` 中的 curl 导出也改为使用 `activeValidationUrl()`。
+- “查出口”仍保留固定出口 IP 查询目标。
+- 静态资源版本更新到 `20260605-curl-target-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 35 passed
+```
+
+## 代理列表导出格式去除注释并增加 SOCKS5 列表
+
+用户反馈：
+
+```text
+优化一下订阅导出的格式，不要在后面加一些奇奇怪怪的东西
+socks5://user:pass@192.168.1.1:1080
+http://192.168.1.1:8080
+这种标准格式每行一个
+```
+
+处理：
+
+- “HTTP 列表”导出改为每行一个标准 URI：
+  - `http://host:port`
+- 新增 “SOCKS5 列表”：
+  - `socks5://host:port`
+- 新增 “HTTP+SOCKS5”：
+  - 每个端口输出两行，分别是 HTTP 和 SOCKS5。
+- 去掉原来的尾部注释：
+  - 不再输出 `# 节点名 出口IP`。
+- CSV/JSON/curl 导出保留结构化字段。
+- 静态资源版本更新到 `20260605-export-clean-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 35 passed
+```
+
+## 分配界面增加一键清空端口分配
+
+用户反馈：
+
+```text
+分配界面需要有一个一键清空的按钮，清空原有的端口分配
+```
+
+处理：
+
+- “分配”页新增 `清空分配` 按钮。
+- 点击后：
+  - 清空所有端口输入框。
+  - 取消所有分配勾选。
+  - 调用 `PUT /api/assign` 保存空映射。
+  - 运行页端口表同步变为空。
+  - 状态栏刷新映射数量。
+- 清空后禁用分配表的“自动勾选可用节点”行为，避免刚清空又被 UI 自动勾回。
+- 静态资源版本更新到 `20260605-clear-assign-1`。
+- 新增测试：`test_api_assign_can_clear_mappings`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 36 passed
+```
+
+## 测试/分配/运行界面联动细节修复
+
+用户反馈：
+
+```text
+1. 测试界面只选可用按钮失灵，应让没通过的节点不出现在分配界面。
+2. 测试界面新增一键测试失败节点。
+3. 分配界面保存新映射后应自动重启引擎。
+4. 运行界面测试自定义 URL，刚点击有绿色，测完全部红色。
+5. 运行界面自定义 URL 验证结果太详细，破坏布局；需要能移除不想要的映射并重启引擎。
+```
+
+处理：
+
+- 测试页 `只选可用`：
+  - 选中测试通过节点。
+  - 设置分配页过滤器，只显示可用节点。
+  - 自动切换到分配页。
+- 测试页新增 `测试失败节点`：
+  - 只重新测速已有失败结果的节点。
+  - 不再需要重新测试全部节点。
+- 分配页保存映射：
+  - 继续复用后端 `PUT /api/assign` 的自动重启逻辑。
+  - 前端完成提示会明确显示 `已自动重启引擎` 或 `已停止引擎`。
+- 运行页验证状态：
+  - 增加 `validatingPorts` 状态。
+  - 验证中端口显示 `验证中`，不再沿用旧的绿色可用状态造成误解。
+- 运行页验证结果：
+  - 由大表格改成紧凑 chip 摘要。
+  - 只显示目标、成功/失败、状态码、耗时。
+  - 不再展示长响应体/错误文本撑破布局。
+- 运行页新增 `移除映射`：
+  - 端口行和验证结果卡片都可移除当前端口映射。
+  - 调用 `PUT /api/assign` 保存剩余映射。
+  - 如果引擎运行中，后端自动重启引擎。
+- 静态资源版本更新到 `20260605-flow-polish-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 36 passed
+```
+
+## curl 验证命令恢复简洁出口 IP 查询
+
+用户要求：
+
+```text
+把 curl --proxy "http://127.0.0.1:8006/" https://ipv4.webshare.io/ 恢复简洁模式
+```
+
+处理：
+
+- 前端新增固定常量：
+  - `EXIT_IP_CHECK_URL = "https://ipv4.webshare.io/"`
+- 运行页“curl 验证”列固定生成：
+  - `curl --proxy "http://host:port/" https://ipv4.webshare.io/`
+- 导出格式中的 curl 命令也固定使用 `https://ipv4.webshare.io/`。
+- 自定义验证 URL 仍只影响“验证”按钮和“验证全部端口”，不再影响表格里的简洁 curl。
+- 静态资源版本更新为 `20260605-curl-simple-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 35 passed
+测试前后 config/sing-box.json SHA256 一致 -> 测试不污染真实配置
+```
+
+## 启动引擎时报端口占用并伴随测速临时进程残留
+
+用户反馈：
+
+```text
+FATAL start service: start inbound/mixed[port-8001]:
+listen tcp4 0.0.0.0:8001: bind: Only one usage of each socket address...
+
+运行界面验证端口全部失败，提示引擎没开，然后打开不了。
+初步判断是上面几个功能修改造成的。
+```
+
+诊断：
+
+- 日志中先发现 `EngineManager.start()` 并发 `start/stop` 时出现：
+  - `AttributeError: 'NoneType' object has no attribute 'poll'`
+- 这是后端生命周期竞态：
+  - 前端新增“保存映射自动重启”“运行页移除映射”“测速失败节点”“验证任务”等功能后，请求更容易交错。
+  - 一个请求正在 `start()` 的 settle 阶段，另一个请求可能执行 `stop()` 并把 `self.process` 清空。
+- 现场还发现本项目 `config/sing-box-test.json` 的测速临时 sing-box 进程残留。
+- 同时 Windows 上 `8001-8004` 和 `10000` 没有显示监听进程，但 Python 直接 bind 也失败，说明端口已处于系统不可绑定状态。
+
+处理：
+
+- `EngineManager` 增加 `asyncio.Lock`：
+  - 串行化 `start()` / `stop()`。
+  - `start()` 使用局部 `proc` 检查进程状态，避免 `self.process` 被并发清空。
+- `EngineManager.start()` 新增启动前端口预检查：
+  - 解析 sing-box 配置中的 inbound `listen_port`。
+  - 同时解析 `experimental.clash_api.external_controller` 端口。
+  - 启动前最多等待 6 秒，直到端口可 bind。
+  - 如果仍不可用，返回明确错误：
+    - `Ports are not available: ...`
+  - 不再让 sing-box 半启动后抛 FATAL。
+- 正式引擎启动/运行中保存映射重启时，若节点测速任务正在运行，返回 409：
+  - 避免测速临时引擎与正式引擎生命周期互相踩。
+- 增加回归测试：
+  - 并发 `start/stop` 不再污染 `self.process`。
+  - 配置端口解析包含 inbound 和 clash API。
+  - 端口不可用时不会调用 `Popen` 拉起 sing-box。
+  - 节点测速运行中启动正式引擎会返回 409。
+
+验证：
+
+```text
+python -m pytest -q -> 40 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 端口容错增强与节点快速测速
+
+用户反馈：
+
+```text
+确实增加更多容错，比如端口是否占用等等问题。
+测速的我觉得有点问题，我在 v2ray 中测速很快，控制台测速慢的要死，测出来的速度也不准确。
+```
+
+诊断：
+
+- 原节点测速同时做了两件事：
+  - 访问 `https://www.gstatic.com/generate_204` 测响应。
+  - 继续访问多个出口 IP 查询站点。
+- 出口 IP 查询会被远端限流、超时或重置，导致普通测速被拖慢。
+- 节点多时原实现同时发起所有测试，容易造成本机 sing-box、系统端口和远端节点拥塞。
+- 原节点测速使用 SOCKS 代理路径，而运行页和用户 curl 主要使用 HTTP mixed 代理路径，测试路径不一致。
+
+处理：
+
+- 普通节点测速改为“快速 URL 延迟”：
+  - 默认只测 `https://www.gstatic.com/generate_204`。
+  - 自定义 URL 存在时只测自定义 URL。
+  - 不再默认查询出口 IP。
+  - 改用 HTTP mixed 代理路径：`http://127.0.0.1:port`。
+  - 单节点超时缩短到 5-6 秒。
+  - 并发限制为 12，避免大量节点同时压垮本地临时 sing-box。
+- `测速并按 IP 去重` 才额外查询出口 IP：
+  - 只有需要同出口 IP 去重时才付出出口 IP 查询成本。
+- 新增端口可用性 API：
+  - `POST /api/ports/check`
+  - 返回每个端口 `available/busy/invalid`。
+- 正式引擎未运行时，如果 Clash API 端口已被占用：
+  - 自动生成不带 `experimental.clash_api` 的 sing-box 配置。
+  - 代理端口优先启动，不再因为非核心控制端口被占用而整体失败。
+- 分配页“自动分配”改为异步分配可用端口：
+  - 调用 `/api/ports/check`。
+  - 自动跳过当前系统不可绑定端口。
+  - 可用端口不足时给出明确提示。
+- 静态资源版本更新为：
+  - `20260605-speed-port-guard-1`
+
+验证：
+
+```text
+python -m pytest -q -> 43 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 端口分配深度容错与状态语义整理
+
+用户反馈：
+
+```text
+10000 原来就是配置文件中的值，现在说它忙碌？
+状态太混乱，bug 太多，尤其是端口分配上：
+一不能清楚，二不能自己避让，需要深刻优化。
+```
+
+问题：
+
+- `10000` 是 `config/app.json` 中的 Clash API 控制端口，不是代理映射端口。
+- Windows 返回 `10000` 不可绑定时，旧 UI 只显示 busy，未解释它是控制端口。
+- 前端原“自动分配”只是从起始端口递增，无法真正知道系统是否可绑定。
+- 清空分配后，前端仍可能保留分配筛选、验证结果、验证中状态，造成“看起来没清干净”。
+
+处理：
+
+- `/api/ports/check` 的状态语义细化：
+  - `available`：可绑定。
+  - `busy`：系统不可绑定。
+  - `reserved-clash-api`：配置中的 Clash API 控制端口，不能分配给代理。
+  - `project-listening`：本项目引擎正在监听。
+  - `invalid`：端口非法。
+- 新增 `/api/ports/allocate`：
+  - 后端从起始端口开始扫描。
+  - 自动跳过已使用端口。
+  - 自动跳过 `reserved-clash-api`。
+  - 自动跳过系统不可绑定端口。
+  - 返回实际分配端口和被避让端口详情。
+- 前端“自动分配”改为调用 `/api/ports/allocate`：
+  - 不再自己猜端口。
+  - 成功后提示避让了多少不可用端口。
+- 前端“清空分配”增强：
+  - 清空端口输入。
+  - 清空端口映射。
+  - 清空验证结果。
+  - 清空验证中状态。
+  - 解除“只显示可用节点”的分配过滤。
+- Web 后端重启后，如果检测到已有本项目 sing-box 进程：
+  - 状态仍显示运行中。
+  - 不再把 `project sing-box process detected` 塞进 `last_error`，避免误导为异常。
+- 静态资源版本更新为：
+  - `20260605-port-allocator-1`
+
+验证：
+
+```text
+python -m pytest -q -> 44 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 清空分配后无法再次自动分配
+
+用户反馈：
+
+```text
+分配界面，点击清除分配后，无法再分配端口
+```
+
+根因：
+
+- 清空分配时前端会取消所有节点勾选。
+- 自动分配只处理已勾选且没有端口的节点。
+- 所以清空后再点自动分配，会出现没有目标节点可分配的状态。
+
+处理：
+
+- 自动分配增强：
+  - 如果当前没有已勾选目标，自动选择当前分配表中的可用节点。
+  - 如果没有可用节点，则选择当前分配表中的全部节点。
+  - 再调用后端 `/api/ports/allocate` 分配可用端口。
+- 静态资源版本更新为：
+  - `20260605-auto-assign-after-clear-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 44 passed
+```
+
+## 集成 ProxyAdmin 质量检测 API
+
+用户要求：
+
+```text
+了解 proxy-port-api 的接口，内容可靠。
+集成到运行界面，参数暴露给用户填写，并把返回结果好好展示。
+```
+
+文档确认：
+
+- `import(urls, replace?)`
+  - 导入 HTTP 代理端口。
+  - 返回 `url / host / port / id`。
+- `query(ids, concurrency?)`
+  - 对 ID 做质量检测。
+  - 逐个返回检测结果。
+  - 包含 `exit_ip / country / score / grade / items[]`。
+- `remove(options, concurrency?)`
+  - 删除指定 ID、失败节点或未使用节点。
+
+处理：
+
+- 后端新增 ProxyAdmin 集成接口：
+  - `POST /api/proxy-admin/check/start`
+  - `GET /api/proxy-admin/jobs/{job_id}`
+  - `POST /api/proxy-admin/remove`
+- 后端直接用 Python `httpx` 调用 ProxyAdmin HTTP API，不依赖 Node 运行时。
+- 运行界面新增 ProxyAdmin 检测区域，暴露参数：
+  - API 地址
+  - Bearer Token
+  - 代理 Host
+  - 替换 From
+  - 替换 To
+  - 并发数
+- 支持操作：
+  - 导入并检测
+  - 重试失败
+  - 删除失败
+  - 删除未使用
+- 检测结果展示：
+  - ID
+  - host:port
+  - 出口 IP
+  - 国家
+  - score
+  - grade
+  - 每个 target 的 `pass / warn / fail`、HTTP 状态码、延迟、message
+- 结果按 job 轮询更新，一个结果返回一个结果展示。
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-1`
+
+验证：
+
+```text
+python -m pytest -q -> 46 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 结果合并到端口表
+
+用户反馈：
+
+```text
+功能可以，显示不行。
+需要将 proxyAdminResults 集成到 id="portsTable"，集成到它们自己对应的行。
+现在太乱了，错误折叠展开破坏布局。
+```
+
+处理：
+
+- 前端新增端口级索引：
+  - 根据 `proxyAdminImported[].port` 与 `proxyAdminResults[id]` 建立映射。
+- `portsTable` 新增 `ProxyAdmin` 列：
+  - 每个端口行直接展示对应质量检测结果。
+  - 展示 `grade / score / exit_ip / country`。
+  - 目标检测以短标签展示：
+    - `base`
+    - `oa`
+    - `claude`
+    - `gemini`
+  - `pass / warn / fail` 用颜色区分。
+- 详细错误不再展开成大块内容：
+  - 放入行内 `title` tooltip。
+  - 避免撑破表格和移动端布局。
+- 原独立结果区改成紧凑摘要：
+  - 通过数量
+  - 失败数量
+  - 提示“详细结果已合并到端口表”
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-inline-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 46 passed
+```
+
+## 保存 ProxyAdmin 检测配置
+
+用户反馈：
+
+```text
+优化一下保存配置，ProxyAdmin 检测的配置，api，token 等，不然每次都要重新输入
+```
+
+处理：
+
+- 后端新增配置接口：
+  - `GET /api/proxy-admin/config`
+  - `PUT /api/proxy-admin/config`
+- 配置保存到 `config/app.json` 的 `proxy_admin` 子对象。
+- 保存内容：
+  - `base_url`
+  - `token`
+  - `proxy_host`
+  - `replace_from`
+  - `replace_to`
+  - `concurrency`
+- 写入时保留 `app.json` 原有字段，例如：
+  - `host`
+  - `port`
+  - `proxy_listen_host`
+  - `clash_api_addr`
+- 前端运行页：
+  - 页面加载自动读取并回填 ProxyAdmin 配置。
+  - 新增 `保存配置` 按钮。
+  - 执行导入检测、重试失败、删除失败、删除未使用前会自动保存当前配置。
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-config-1`
+
+验证：
+
+```text
+python -m pytest -q -> 47 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 配置与结果展示细节优化
+
+处理：
+
+- CSS 静态资源版本从旧的 `20260605-flow-polish-1` 更新到：
+  - `20260606-proxy-admin-config-1`
+  - 避免浏览器继续缓存旧样式。
+- 删除失败节点后：
+  - 前端同步移除已删除 ID 对应的 ProxyAdmin 结果。
+  - 端口表立即刷新，不再残留旧失败状态。
+- 删除未使用节点后：
+  - 如果返回 ID 命中当前展示结果，也同步清理。
+- ProxyAdmin 配置区新增提示：
+  - 配置保存到本机 `config/app.json`。
+  - 如果 Web 面板暴露到公网，不建议保存长期有效 Token。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 47 passed
+python -m compileall -q main.py app tests -> passed
+```

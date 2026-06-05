@@ -3,6 +3,12 @@ let ports = {};
 let statusSnapshot = {};
 let testingTags = new Set();
 let validationDetails = {};
+let autoSelectAliveForAssign = true;
+let assignFilterTags = null;
+let validatingPorts = new Set();
+let proxyAdminResults = {};
+let proxyAdminImported = [];
+let proxyAdminConfigLoaded = false;
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 
 const DEFAULT_VALIDATION_URLS = [
@@ -11,6 +17,7 @@ const DEFAULT_VALIDATION_URLS = [
   "https://www.gstatic.com/generate_204",
   "https://www.cloudflare.com/cdn-cgi/trace"
 ];
+const EXIT_IP_CHECK_URL = "https://ipv4.webshare.io/";
 
 const $ = (id) => document.getElementById(id);
 
@@ -151,7 +158,8 @@ function renderNodeTable() {
 }
 
 function renderAssignTable() {
-  if (!nodes.length) {
+  const assignNodes = assignFilterTags ? nodes.filter((node) => assignFilterTags.has(node.tag)) : nodes;
+  if (!assignNodes.length) {
     $("assignTable").innerHTML = `<div class="empty">没有可分配节点。</div>`;
     return;
   }
@@ -166,9 +174,9 @@ function renderAssignTable() {
           <th>状态</th>
         </tr>
       </thead>
-      <tbody>${nodes.map((node) => {
+      <tbody>${assignNodes.map((node) => {
         const assignedPort = Object.entries(ports).find(([, item]) => item.node_tag === node.tag)?.[0] || "";
-        const checked = assignedPort || node.latency?.alive ? "checked" : "";
+        const checked = assignedPort || (autoSelectAliveForAssign && node.latency?.alive) ? "checked" : "";
         return `<tr>
           <td data-label="使用"><input type="checkbox" class="assign-check" data-tag="${escapeHtml(node.tag)}" ${checked}></td>
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
@@ -197,6 +205,7 @@ function renderPortsTable() {
           <th>状态</th>
           <th>延迟</th>
           <th>验证结果</th>
+          <th>ProxyAdmin</th>
           <th>出口 IP</th>
           <th>curl 验证</th>
           <th>操作</th>
@@ -213,14 +222,16 @@ function renderPortsTable() {
           <td data-label="端口" class="mono copyable" data-copy="${escapeHtml(httpProxy)}" data-copy-label="HTTP 代理" title="copy ${escapeHtml(httpProxy)}">${port}</td>
           <td data-label="节点">${escapeHtml(item.node_name || item.node_tag)}</td>
           <td data-label="协议">${escapeHtml(item.type || "-")}</td>
-          <td data-label="状态">${statusBadge(item.latency)}</td>
+          <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}">${escapeHtml(latencyText(item.latency))}</span></td>
           <td data-label="验证结果" class="result-preview">${escapeHtml(targetResponseText(item.latency))}</td>
+          <td data-label="ProxyAdmin">${proxyAdminPortSummary(port)}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
           <td data-label="操作">
             <button data-ip-port="${port}">查出口</button>
             <button data-validate-port="${port}">验证</button>
+            <button data-remove-port="${port}">移除映射</button>
             <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5">复制 SOCKS</button>
             <button data-copy="${escapeHtml(socksCurlProxy)}" data-copy-label="curl SOCKS5H">curl SOCKS</button>
           </td>
@@ -244,12 +255,59 @@ function renderPortsTable() {
       await runSinglePortValidation(port);
     });
   });
+  document.querySelectorAll("[data-remove-port]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const port = button.dataset.removePort;
+      await removePortMapping(port);
+    });
+  });
   document.querySelectorAll("[data-copy]").forEach((item) => {
     item.addEventListener("click", () => {
       copyText(item.dataset.copy, item.dataset.copyLabel || "内容");
     });
   });
   renderValidationResults();
+}
+
+function proxyAdminResultByPort() {
+  const resultById = new Map(Object.values(proxyAdminResults).map((result) => [String(result.id), result]));
+  const byPort = new Map();
+  proxyAdminImported.forEach((item) => {
+    const result = resultById.get(String(item.id));
+    if (result) byPort.set(String(item.port), { imported: item, result });
+  });
+  return byPort;
+}
+
+function proxyAdminPortSummary(port) {
+  const entry = proxyAdminResultByPort().get(String(port));
+  if (!entry) return '<span class="muted">-</span>';
+  const { result } = entry;
+  const failed = result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail");
+  const targets = (result.items || []).slice(0, 4);
+  const title = (result.items || [])
+    .map((item) => `${item.target}: ${item.status} ${item.http_status || "-"} ${item.latency_ms || "-"}ms ${item.message || ""}`)
+    .join("\n");
+  return `
+    <div class="proxy-admin-inline" title="${escapeHtml(title || result.error || "")}">
+      <span class="badge ${failed ? "bad" : "ok"}">${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")}</span>
+      <span class="mono">${escapeHtml(result.exit_ip || "-")}</span>
+      <span>${escapeHtml(result.country || "-")}</span>
+      <span class="proxy-admin-mini-targets">
+        ${targets.map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`).join("")}
+      </span>
+    </div>
+  `;
+}
+
+function shortTargetName(target) {
+  const names = {
+    base_connectivity: "base",
+    openai: "gpt",
+    anthropic: "claude",
+    gemini: "gemini"
+  };
+  return names[target] || target || "-";
 }
 
 function sortedPortEntries() {
@@ -304,32 +362,96 @@ function renderValidationResults() {
       <header>
         <strong>端口 ${port}</strong>
         <span class="mono">${escapeHtml(detail.exit_ip || "-")}</span>
+        <button data-remove-port="${port}">移除映射</button>
       </header>
-      <table>
-        <thead>
-          <tr>
-            <th>目标</th>
-            <th>结果</th>
-            <th>状态</th>
-            <th>耗时</th>
-            <th>响应 / 错误</th>
-          </tr>
-        </thead>
-        <tbody>${(detail.targets || []).map((target) => `
-          <tr>
-            <td data-label="目标" class="mono">${escapeHtml(target.url)}</td>
-            <td data-label="结果">${target.ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad">失败</span>'}</td>
-            <td data-label="状态">${escapeHtml(target.status_code || "-")}</td>
-            <td data-label="耗时">${escapeHtml(target.elapsed_ms || "-")}ms</td>
-            <td data-label="响应 / 错误" class="result-preview">${escapeHtml(target.body_preview || target.error || "-")}</td>
-          </tr>
-        `).join("")}</tbody>
-      </table>
+      <div class="validation-chips">${(detail.targets || []).map((target) => `
+        <span class="target-chip ${target.ok ? "ok" : "bad"}">
+          ${escapeHtml(compactUrl(target.url))}
+          <b>${target.ok ? "成功" : "失败"}</b>
+          <small>${escapeHtml(target.status_code || "-")} · ${escapeHtml(target.elapsed_ms || "-")}ms</small>
+        </span>
+      `).join("")}</div>
     </article>
   `).join("");
+  document.querySelectorAll("#validationResults [data-remove-port]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await removePortMapping(button.dataset.removePort);
+    });
+  });
+}
+
+function proxyAdminPayload(extra = {}) {
+  const baseUrl = $("proxyAdminBaseUrl").value.trim();
+  const token = $("proxyAdminToken").value.trim();
+  if (!baseUrl) throw new Error("请填写 ProxyAdmin API 地址");
+  if (!token) throw new Error("请填写 Bearer Token");
+  return {
+    base_url: baseUrl,
+    token,
+    proxy_host: $("proxyAdminHost").value.trim() || null,
+    replace_from: $("proxyAdminReplaceFrom").value.trim() || null,
+    replace_to: $("proxyAdminReplaceTo").value.trim() || null,
+    concurrency: Number($("proxyAdminConcurrency").value || 10),
+    ...extra
+  };
+}
+
+function renderProxyAdminResults() {
+  const results = Object.values(proxyAdminResults).sort((a, b) => {
+    const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
+    if (scoreDiff) return scoreDiff;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  $("proxyAdminSummary").textContent = results.length
+    ? `已返回 ${results.length}/${proxyAdminImported.filter((item) => item.id).length}`
+    : proxyAdminImported.length
+      ? `已导入 ${proxyAdminImported.length} 个，等待检测`
+      : "未检测";
+  if (!proxyAdminImported.length && !results.length) {
+    $("proxyAdminResults").innerHTML = "";
+    return;
+  }
+  const failed = results.filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail")).length;
+  const passed = results.length - failed;
+  $("proxyAdminResults").innerHTML = `
+    <div class="proxy-admin-compact">
+      <span class="badge ok">通过 ${passed}</span>
+      <span class="badge bad">失败 ${failed}</span>
+      <span class="muted">详细结果已合并到下方端口表对应行。</span>
+    </div>
+  `;
+}
+
+async function pollProxyAdminJob(jobId) {
+  for (;;) {
+    const job = await request(`/api/proxy-admin/jobs/${jobId}`);
+    proxyAdminImported = job.imported || proxyAdminImported;
+    proxyAdminResults = job.results || proxyAdminResults;
+    renderProxyAdminResults();
+    renderPortsTable();
+    if (job.status === "done") {
+      showQuickResult("ProxyAdmin 检测", `完成 ${job.completed}/${job.total}`, true);
+      return;
+    }
+    if (job.status === "error") {
+      showQuickResult("ProxyAdmin 检测", job.error || "检测失败", false);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+}
+
+function compactUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+  } catch {
+    return url;
+  }
 }
 
 async function refresh() {
+  await loadProxyAdminConfig();
   const [status, nodeData, portData] = await Promise.all([
     request("/api/status"),
     request("/api/nodes"),
@@ -344,6 +466,38 @@ async function refresh() {
   renderPortsTable();
 }
 
+async function loadProxyAdminConfig() {
+  if (proxyAdminConfigLoaded) return;
+  proxyAdminConfigLoaded = true;
+  try {
+    const config = await request("/api/proxy-admin/config");
+    $("proxyAdminBaseUrl").value = config.base_url || "";
+    $("proxyAdminToken").value = config.token || "";
+    $("proxyAdminHost").value = config.proxy_host || "";
+    $("proxyAdminReplaceFrom").value = config.replace_from || "127.0.0.1";
+    $("proxyAdminReplaceTo").value = config.replace_to || "";
+    $("proxyAdminConcurrency").value = config.concurrency || 10;
+  } catch {
+    proxyAdminConfigLoaded = false;
+  }
+}
+
+async function saveProxyAdminConfig() {
+  const payload = proxyAdminPayload();
+  const config = {
+    base_url: payload.base_url,
+    token: payload.token,
+    proxy_host: payload.proxy_host || "",
+    replace_from: payload.replace_from || "127.0.0.1",
+    replace_to: payload.replace_to || "",
+    concurrency: payload.concurrency || 10
+  };
+  await request("/api/proxy-admin/config", {
+    method: "PUT",
+    body: JSON.stringify(config)
+  });
+}
+
 async function refreshStatusOnly() {
   statusSnapshot = await request("/api/status");
   renderSummary();
@@ -352,8 +506,8 @@ async function refreshStatusOnly() {
 async function runTask(label, task) {
   showNotice(`${label}...`);
   try {
-    await task();
-    showNotice(`${label}完成`, "ok");
+    const message = await task();
+    showNotice(message || `${label}完成`, "ok");
   } catch (error) {
     showNotice(error.message, "bad");
   }
@@ -361,6 +515,10 @@ async function runTask(label, task) {
 
 async function runNodeTest(pruneSameIp, overrideTags = null) {
   const tags = overrideTags || selectedNodeTags();
+  if (!tags.length) {
+    showNotice("没有需要测速的节点", "ok");
+    return;
+  }
   const targetUrl = $("nodeTestUrl").value.trim() || null;
   testingTags = new Set(tags);
   renderNodeTable();
@@ -423,6 +581,27 @@ function collectMappings() {
   return mappings;
 }
 
+async function saveMappings(mappings) {
+  return request("/api/assign", { method: "PUT", body: JSON.stringify({ mappings }) });
+}
+
+async function removePortMapping(port) {
+  await runTask(`移除端口 ${port} 映射`, async () => {
+    const mappings = {};
+    Object.entries(ports).forEach(([existingPort, item]) => {
+      if (String(existingPort) !== String(port)) mappings[existingPort] = item.node_tag;
+    });
+    const result = await saveMappings(mappings);
+    delete ports[String(port)];
+    delete validationDetails[String(port)];
+    validatingPorts.delete(String(port));
+    await refresh();
+    if (result.engine_restarted) return `端口 ${port} 已移除，已自动重启引擎`;
+    if (result.engine_stopped) return `端口 ${port} 已移除，已停止引擎`;
+    return `端口 ${port} 已移除`;
+  });
+}
+
 function validationUrls() {
   const custom = $("customTestUrl").value.trim();
   if (custom) return [custom];
@@ -435,6 +614,8 @@ function activeValidationUrl() {
 
 async function runSinglePortValidation(port) {
   showQuickResult(`端口 ${port}`, "验证中...");
+  validatingPorts = new Set([String(port)]);
+  renderPortsTable();
   try {
     const result = await request("/api/test-ports", {
       method: "POST",
@@ -446,9 +627,12 @@ async function runSinglePortValidation(port) {
     const total = (detail?.targets || []).length;
     const exitIp = detail?.exit_ip || "-";
     showQuickResult(`端口 ${port}`, `出口 IP：${exitIp}；目标成功 ${okCount}/${total}`, okCount > 0);
+    validatingPorts.delete(String(port));
     renderPortsTable();
     renderValidationResults();
   } catch (error) {
+    validatingPorts.delete(String(port));
+    renderPortsTable();
     showQuickResult(`端口 ${port}`, error.message, false);
   }
 }
@@ -460,6 +644,7 @@ function applyPortValidationResults(result) {
     if (entry) entry.latency = latency;
   });
   Object.entries(result.details || {}).forEach(([port, detail]) => {
+    validatingPorts.delete(String(port));
     if (ports[port] && detail.exit_ip) ports[port].exit_ip = detail.exit_ip;
   });
 }
@@ -469,6 +654,7 @@ async function runAllPortValidation() {
   try {
     validationDetails = {};
     renderValidationResults();
+    validatingPorts = new Set(Object.keys(ports));
     renderPortsTable();
     const urls = validationUrls();
     showQuickResult("验证全部端口", `验证中；目标：${urls.join("，")}；进度 0/${Object.keys(ports).length}`);
@@ -490,6 +676,7 @@ async function pollPortTestJob(jobId, urls) {
     renderValidationResults();
     showQuickResult("验证全部端口", `验证中；目标：${urls.join("，")}；进度 ${job.completed}/${job.total}`);
     if (job.status === "done") {
+      validatingPorts.clear();
       const details = Object.values(validationDetails);
       const total = job.total || details.length;
       const ok = details.filter((detail) => (detail.targets || []).some((target) => target.ok)).length;
@@ -499,6 +686,8 @@ async function pollPortTestJob(jobId, urls) {
       return;
     }
     if (job.status === "error") {
+      validatingPorts.clear();
+      renderPortsTable();
       showQuickResult("验证全部端口", job.error || "验证失败", false);
       return;
     }
@@ -520,7 +709,7 @@ function exportRows() {
     node: item.node_name || item.node_tag,
     type: item.type || "",
     exit_ip: item.exit_ip || item.latency?.exit_ip || "",
-    http_proxy: `http://${proxyAuthority(port)}/`,
+    http_proxy: `http://${proxyAuthority(port)}`,
     socks5_proxy: `socks5://${proxyAuthority(port)}`,
     socks5h_proxy: `socks5h://${proxyAuthority(port)}`,
     curl: `curl --proxy "http://${proxyAuthority(port)}/" ${target}`
@@ -533,12 +722,16 @@ function generateExport() {
   if (!rows.length) throw new Error("没有可导出的端口映射");
   if (format === "json") return JSON.stringify(rows, null, 2);
   if (format === "curl") return rows.map((row) => row.curl).join("\n");
+  if (format === "socks-list") return rows.map((row) => row.socks5_proxy).join("\n");
+  if (format === "mixed-list") {
+    return rows.flatMap((row) => [row.http_proxy, row.socks5_proxy]).join("\n");
+  }
   if (format === "csv") {
     const header = ["host", "port", "node", "type", "exit_ip", "http_proxy", "socks5_proxy", "socks5h_proxy"];
     const lines = rows.map((row) => header.map((key) => `"${String(row[key]).replace(/"/g, '""')}"`).join(","));
     return [header.join(","), ...lines].join("\n");
   }
-  return rows.map((row) => `${row.http_proxy} # ${row.node} ${row.exit_ip}`).join("\n");
+  return rows.map((row) => row.http_proxy).join("\n");
 }
 
 function activateTab(tabId, persist = true) {
@@ -582,13 +775,28 @@ $("testUntestedBtn").addEventListener("click", () => {
   runNodeTest(false, tags);
 });
 
+$("testFailedOnlyBtn").addEventListener("click", () => {
+  const tags = nodes.filter((node) => node.latency && !node.latency.alive).map((node) => node.tag);
+  if (!tags.length) {
+    showNotice("没有测试失败节点", "ok");
+    return;
+  }
+  runNodeTest(false, tags);
+});
+
 $("testPruneBtn").addEventListener("click", () => runNodeTest(true));
 
 $("selectAliveBtn").addEventListener("click", () => {
+  const aliveTags = nodes.filter((node) => node.latency?.alive).map((node) => node.tag);
   document.querySelectorAll(".node-check").forEach((box) => {
     const node = nodes.find((item) => item.tag === box.dataset.tag);
     box.checked = Boolean(node?.latency?.alive);
   });
+  assignFilterTags = new Set(aliveTags);
+  autoSelectAliveForAssign = true;
+  renderAssignTable();
+  activateTab("assign");
+  showNotice(`已筛选可用节点：${aliveTags.length} 个`, aliveTags.length ? "ok" : "bad");
 });
 
 $("deleteSelectedBtn").addEventListener("click", () => runTask("删除选中节点", async () => {
@@ -619,26 +827,77 @@ $("clearNodesBtn").addEventListener("click", () => runTask("清空节点", async
   await refresh();
 }));
 
-$("autoAssignBtn").addEventListener("click", () => {
+$("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用端口", async () => {
   let nextPort = Number($("startPort").value || 8001);
   const usedPorts = new Set();
   document.querySelectorAll(".port-input").forEach((input) => {
     if (input.value) usedPorts.add(Number(input.value));
   });
-  document.querySelectorAll(".assign-check").forEach((box) => {
-    if (!box.checked) return;
+  let targets = [...document.querySelectorAll(".assign-check")].filter((box) => {
+    if (!box.checked) return false;
     const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
-    if (input.value) return;
-    while (usedPorts.has(nextPort)) nextPort++;
-    input.value = nextPort;
-    usedPorts.add(nextPort);
-    nextPort++;
+    return !input.value;
   });
-});
+  if (!targets.length) {
+    const visibleBoxes = [...document.querySelectorAll(".assign-check")];
+    const aliveBoxes = visibleBoxes.filter((box) => {
+      const node = nodes.find((item) => item.tag === box.dataset.tag);
+      return Boolean(node?.latency?.alive);
+    });
+    targets = aliveBoxes.length ? aliveBoxes : visibleBoxes;
+    targets.forEach((box) => {
+      const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
+      if (!input.value) box.checked = true;
+    });
+    targets = targets.filter((box) => {
+      const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
+      return !input.value;
+    });
+  }
+  if (!targets.length) return "没有需要分配的新节点";
+  const allocation = await request("/api/ports/allocate", {
+    method: "POST",
+    body: JSON.stringify({
+      start_port: nextPort,
+      count: targets.length,
+      exclude: [...usedPorts]
+    })
+  });
+  targets.forEach((box, index) => {
+    const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
+    input.value = allocation.ports[index];
+    usedPorts.add(allocation.ports[index]);
+  });
+  const skippedCount = Object.keys(allocation.skipped || {}).length;
+  return `已分配 ${targets.length} 个可用端口${skippedCount ? `，已避让 ${skippedCount} 个不可用端口` : ""}`;
+}));
+
+$("clearAssignBtn").addEventListener("click", () => runTask("清空端口分配", async () => {
+  autoSelectAliveForAssign = false;
+  assignFilterTags = null;
+  document.querySelectorAll(".assign-check").forEach((box) => {
+    box.checked = false;
+  });
+  document.querySelectorAll(".port-input").forEach((input) => {
+    input.value = "";
+  });
+  await request("/api/assign", { method: "PUT", body: JSON.stringify({ mappings: {} }) });
+  ports = {};
+  validationDetails = {};
+  validatingPorts.clear();
+  renderAssignTable();
+  renderPortsTable();
+  renderValidationResults();
+  await refreshStatusOnly();
+  return "端口分配已清空";
+}));
 
 $("saveAssignBtn").addEventListener("click", () => runTask("保存端口映射", async () => {
-  await request("/api/assign", { method: "PUT", body: JSON.stringify({ mappings: collectMappings() }) });
+  const result = await saveMappings(collectMappings());
   await refresh();
+  if (result.engine_restarted) return "保存端口映射完成，已自动重启引擎";
+  if (result.engine_stopped) return "保存端口映射完成，已停止引擎";
+  return "保存端口映射完成";
 }));
 
 $("startBtn").addEventListener("click", () => runTask("启动引擎", async () => {
@@ -668,6 +927,84 @@ $("exportBtn").addEventListener("click", () => {
     showQuickResult("导出失败", error.message, false);
   }
 });
+
+$("proxyAdminCheckBtn").addEventListener("click", () => runTask("ProxyAdmin 导入并检测", async () => {
+  await saveProxyAdminConfig();
+  proxyAdminResults = {};
+  proxyAdminImported = [];
+  renderProxyAdminResults();
+  const started = await request("/api/proxy-admin/check/start", {
+    method: "POST",
+    body: JSON.stringify(proxyAdminPayload())
+  });
+  $("proxyAdminSummary").textContent = `任务已启动：${started.id}`;
+  await pollProxyAdminJob(started.id);
+  return "ProxyAdmin 检测完成";
+}));
+
+$("proxyAdminSaveConfigBtn").addEventListener("click", () => runTask("保存 ProxyAdmin 配置", async () => {
+  await saveProxyAdminConfig();
+  return "ProxyAdmin 配置已保存";
+}));
+
+$("proxyAdminRetryFailedBtn").addEventListener("click", () => runTask("ProxyAdmin 重试失败", async () => {
+  await saveProxyAdminConfig();
+  const failedIds = Object.values(proxyAdminResults)
+    .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
+    .map((result) => Number(result.id))
+    .filter(Boolean);
+  if (!failedIds.length) throw new Error("没有失败结果可重试");
+  const retryPorts = proxyAdminImported
+    .filter((item) => failedIds.includes(Number(item.id)))
+    .map((item) => Number(item.port));
+  const started = await request("/api/proxy-admin/check/start", {
+    method: "POST",
+    body: JSON.stringify(proxyAdminPayload({ ports: retryPorts }))
+  });
+  await pollProxyAdminJob(started.id);
+  return "ProxyAdmin 失败项已重试";
+}));
+
+$("proxyAdminDeleteFailedBtn").addEventListener("click", () => runTask("ProxyAdmin 删除失败", async () => {
+  await saveProxyAdminConfig();
+  const ids = Object.values(proxyAdminResults)
+    .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
+    .map((result) => Number(result.id))
+    .filter(Boolean);
+  if (!ids.length) throw new Error("没有失败节点可删除");
+  const result = await request("/api/proxy-admin/remove", {
+    method: "POST",
+    body: JSON.stringify(proxyAdminPayload({ ids, concurrency: Number($("proxyAdminConcurrency").value || 5) }))
+  });
+  (result.removed || []).forEach((item) => {
+    if (item.success) {
+      delete proxyAdminResults[String(item.id)];
+      proxyAdminImported = proxyAdminImported.filter((imported) => Number(imported.id) !== Number(item.id));
+    }
+  });
+  renderProxyAdminResults();
+  renderPortsTable();
+  showQuickResult("ProxyAdmin 删除失败", `处理 ${result.count} 个`, true);
+  return `ProxyAdmin 删除失败完成：${result.count} 个`;
+}));
+
+$("proxyAdminDeleteUnusedBtn").addEventListener("click", () => runTask("ProxyAdmin 删除未使用", async () => {
+  await saveProxyAdminConfig();
+  const result = await request("/api/proxy-admin/remove", {
+    method: "POST",
+    body: JSON.stringify(proxyAdminPayload({ unused: true, concurrency: Number($("proxyAdminConcurrency").value || 5) }))
+  });
+  (result.removed || []).forEach((item) => {
+    if (item.success) {
+      delete proxyAdminResults[String(item.id)];
+      proxyAdminImported = proxyAdminImported.filter((imported) => Number(imported.id) !== Number(item.id));
+    }
+  });
+  renderProxyAdminResults();
+  renderPortsTable();
+  showQuickResult("ProxyAdmin 删除未使用", `处理 ${result.count} 个`, true);
+  return `ProxyAdmin 删除未使用完成：${result.count} 个`;
+}));
 
 $("refreshBtn").addEventListener("click", () => runTask("刷新", refresh));
 
