@@ -215,7 +215,6 @@ function renderPortsTable() {
         const authority = proxyAuthority(port);
         const httpProxy = `http://${authority}/`;
         const socksProxy = `socks5://${authority}`;
-        const socksCurlProxy = `socks5h://${authority}`;
         const curlCommand = `curl --proxy "http://${authority}/" ${curlTarget}`;
         return `
         <tr>
@@ -233,7 +232,7 @@ function renderPortsTable() {
             <button data-validate-port="${port}">验证</button>
             <button data-remove-port="${port}">移除映射</button>
             <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5">复制 SOCKS</button>
-            <button data-copy="${escapeHtml(socksCurlProxy)}" data-copy-label="curl SOCKS5H">curl SOCKS</button>
+            <button data-remove-proxy-admin-port="${port}">移除代理</button>
           </td>
         </tr>`;
       }).join("")}</tbody>
@@ -259,6 +258,11 @@ function renderPortsTable() {
     button.addEventListener("click", async () => {
       const port = button.dataset.removePort;
       await removePortMapping(port);
+    });
+  });
+  document.querySelectorAll("[data-remove-proxy-admin-port]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await removeProxyAdminProxyForPort(button.dataset.removeProxyAdminPort);
     });
   });
   document.querySelectorAll("[data-copy]").forEach((item) => {
@@ -310,17 +314,64 @@ function shortTargetName(target) {
   return names[target] || target || "-";
 }
 
+function proxyAdminResultFailed(result) {
+  return result?.grade === "ERR" || (result?.items || []).some((item) => item.status === "fail");
+}
+
+function proxyAdminQuality(entry) {
+  if (!entry?.result) return { bucket: 1, gradeRank: 99, score: -1 };
+  const result = entry.result;
+  if (proxyAdminResultFailed(result)) return { bucket: 2, gradeRank: 99, score: Number(result.score || 0) };
+  const gradeOrder = { A: 0, B: 1, C: 2, D: 3, F: 4 };
+  return {
+    bucket: 0,
+    gradeRank: gradeOrder[String(result.grade || "").toUpperCase()] ?? 50,
+    score: Number(result.score || 0)
+  };
+}
+
+function latencySortValue(latency) {
+  const rank = !latency ? 2 : (latency.alive ? 0 : 1);
+  const delay = latency?.delay ?? Number.MAX_SAFE_INTEGER;
+  return { rank, delay };
+}
+
 function sortedPortEntries() {
+  const proxyAdminByPort = proxyAdminResultByPort();
+  const hasProxyAdminResults = proxyAdminByPort.size > 0;
   return Object.entries(ports).sort(([leftPort, left], [rightPort, right]) => {
-    const leftLatency = left.latency;
-    const rightLatency = right.latency;
-    const leftRank = !leftLatency ? 2 : (leftLatency.alive ? 0 : 1);
-    const rightRank = !rightLatency ? 2 : (rightLatency.alive ? 0 : 1);
-    if (leftRank !== rightRank) return leftRank - rightRank;
-    const leftDelay = leftLatency?.delay ?? Number.MAX_SAFE_INTEGER;
-    const rightDelay = rightLatency?.delay ?? Number.MAX_SAFE_INTEGER;
-    if (leftDelay !== rightDelay) return leftDelay - rightDelay;
+    if (hasProxyAdminResults) {
+      const leftQuality = proxyAdminQuality(proxyAdminByPort.get(String(leftPort)));
+      const rightQuality = proxyAdminQuality(proxyAdminByPort.get(String(rightPort)));
+      if (leftQuality.bucket !== rightQuality.bucket) return leftQuality.bucket - rightQuality.bucket;
+      if (leftQuality.gradeRank !== rightQuality.gradeRank) return leftQuality.gradeRank - rightQuality.gradeRank;
+      if (leftQuality.score !== rightQuality.score) return rightQuality.score - leftQuality.score;
+    }
+    const leftLatency = latencySortValue(left.latency);
+    const rightLatency = latencySortValue(right.latency);
+    if (leftLatency.rank !== rightLatency.rank) return leftLatency.rank - rightLatency.rank;
+    if (leftLatency.delay !== rightLatency.delay) return leftLatency.delay - rightLatency.delay;
     return Number(leftPort) - Number(rightPort);
+  });
+}
+
+async function removeProxyAdminProxyForPort(port) {
+  await runTask(`移除端口 ${port} 远端代理`, async () => {
+    await saveProxyAdminConfig();
+    const entry = proxyAdminResultByPort().get(String(port));
+    const id = Number(entry?.imported?.id || entry?.result?.id);
+    if (!id) throw new Error("这个端口还没有 ProxyAdmin 记录，请先导入并检测");
+    const result = await request("/api/proxy-admin/remove", {
+      method: "POST",
+      body: JSON.stringify(proxyAdminPayload({ ids: [id], concurrency: 1 }))
+    });
+    const removed = (result.removed || []).find((item) => Number(item.id) === id);
+    if (removed && !removed.success) throw new Error(removed.error || "远端删除失败");
+    delete proxyAdminResults[String(id)];
+    proxyAdminImported = proxyAdminImported.filter((item) => Number(item.id) !== id);
+    renderProxyAdminResults();
+    renderPortsTable();
+    return `端口 ${port} 的远端代理已移除`;
   });
 }
 

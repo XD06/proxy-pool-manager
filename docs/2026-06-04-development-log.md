@@ -1801,3 +1801,35 @@ node --check static/app.js -> passed
 python -m pytest -q -> 47 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## ProxyAdmin 运行表排序与行内删除
+
+用户反馈：
+
+```text
+运行界面 ProxyAdmin 检测测试后，等级和分数高的，能通过的，放前面，fail 的放后面。
+curl SOCKS 按钮去掉，换成移除代理，点击会删除远端的数据，调用删除接口。
+```
+
+处理：
+
+- 运行页端口表排序新增 ProxyAdmin 优先级：
+  - 已通过检测的端口排最前。
+  - 同为通过时按等级 `A/B/C/D/F` 排序。
+  - 同等级按分数高低排序。
+  - 失败或包含失败目标的结果排最后。
+  - 没有 ProxyAdmin 检测结果的端口放在通过和失败之间，并继续按本地延迟排序。
+- 移除端口表里的 `curl SOCKS` / `socks5h://...` 复制按钮。
+- 新增 `移除代理` 按钮：
+  - 按当前端口找到对应 ProxyAdmin 导入 ID。
+  - 调用 `/api/proxy-admin/remove` 删除远端代理。
+  - 成功后同步清理当前页面中的 ProxyAdmin 检测结果和导入记录。
+  - 不删除本地端口映射，避免误伤本地分配。
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-actions-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+```
