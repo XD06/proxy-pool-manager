@@ -9,7 +9,6 @@ SERVICE_NAME="proxy-pool-manager"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_SRC="${SCRIPT_DIR}/${SERVICE_NAME}.service"
-INSTALL_DIR="/opt/${SERVICE_NAME}"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # --- 检查 root ---
@@ -18,39 +17,49 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# --- 检查 service 文件 ---
-if [[ ! -f "$SERVICE_SRC" ]]; then
-  echo "❌ 未找到 $SERVICE_SRC"
-  exit 1
-fi
-
 echo "=== 安装 Proxy Pool Manager systemd 服务 ==="
 
-# 1. 创建目标目录并复制项目文件（排除运行时文件）
-mkdir -p "$INSTALL_DIR"
-rsync -a --exclude='.venv' --exclude='tmp' --exclude='config/*.json' \
-  --exclude='config/*.log' --exclude='config/*.db' \
-  "$PROJECT_DIR"/* "$INSTALL_DIR/"
-echo "✔ 项目文件已复制到 $INSTALL_DIR"
-
-# 2. 调用基础安装脚本（venv + 依赖 + sing-box）
-cd "$INSTALL_DIR"
-bash "$INSTALL_DIR/scripts/install-linux.sh"
+# 1. 安装依赖（venv + pip + sing-box）
+echo "✔ 安装基础依赖..."
+cd "$PROJECT_DIR"
+bash "$SCRIPT_DIR/install-linux.sh"
 echo "✔ 基础安装完成"
 
-# 3. 注册 systemd 服务
-cp "$SERVICE_SRC" "${SYSTEMD_DIR}/${SERVICE_NAME}.service"
+# 2. 修复权限（服务以 dsk 用户运行，确保能读写项目文件）
+chown -R dsk:dsk "$PROJECT_DIR"
+
+# 3. 写入 systemd 服务文件（指向项目当前目录）
+cat > "${SYSTEMD_DIR}/${SERVICE_NAME}.service" << EOF
+[Unit]
+Description=Proxy Pool Manager
+Documentation=https://github.com/XD06/proxy-pool-manager
+After=network.target
+
+[Service]
+Type=simple
+User=dsk
+WorkingDirectory=${PROJECT_DIR}
+ExecStart=${PROJECT_DIR}/.venv/bin/python3 main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PPM_HOST=0.0.0.0
+Environment=PPM_PORT=9100
+Environment=PPM_PROXY_LISTEN_HOST=0.0.0.0
+
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
 echo "✔ systemd 服务已注册"
 
 echo ""
 echo "=== 安装完成 ==="
 echo ""
-echo "接下来:"
-echo "  1. 编辑配置: vi ${INSTALL_DIR}/config/app.json"
-echo "  2. 启动服务: sudo systemctl start ${SERVICE_NAME}"
-echo "  3. 查看状态: sudo systemctl status ${SERVICE_NAME}"
-echo "  4. 开机自启: sudo systemctl enable ${SERVICE_NAME}"
-echo "  5. 查看日志: journalctl -u ${SERVICE_NAME} -f"
+echo "启动服务: sudo systemctl start ${SERVICE_NAME}"
+echo "查看状态: sudo systemctl status ${SERVICE_NAME}"
+echo "开机自启: sudo systemctl enable ${SERVICE_NAME}"
+echo "查看日志: journalctl -u ${SERVICE_NAME} -f"
 echo ""
-echo "管理界面: http://<VPS_IP>:9100"
+echo "管理界面: http://<本机IP>:9100"
