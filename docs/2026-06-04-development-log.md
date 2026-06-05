@@ -1833,3 +1833,38 @@ curl SOCKS 按钮去掉，换成移除代理，点击会删除远端的数据，
 ```text
 node --check static/app.js -> passed
 ```
+
+## GeoIP 地区检测
+
+用户希望在测试阶段兼顾性能和准确性地检测地区。
+
+处理：
+
+- 新增 `app/geoip.py`：
+  - 使用在线 `ip-api.com` 查询国家、城市、ASN、运营商。
+  - 跳过内网、保留地址等非公网 IPv4。
+  - 结果缓存到状态文件，默认 TTL 为 168 小时。
+  - 查询失败只记录错误，不影响测速主流程。
+- 状态模型新增：
+  - `LatencyResult.geoip`
+  - `ExitIpCache.geoip`
+  - `AppState.geoip_cache`
+- 后端接入：
+  - 节点测速拿到出口 IP 后调度后台 GeoIP 查询。
+  - 端口验证拿到出口 IP 后附带已缓存地区，并触发后台查询。
+  - 单独“查出口”接口会同步查询 GeoIP，方便立即看到地区。
+- 前端展示：
+  - 节点测试表新增地区列。
+  - 分配表新增地区列。
+  - 运行端口表新增地区列。
+  - 导出 JSON/CSV 增加 `geoip` 字段。
+- 静态资源版本更新为：
+  - `20260606-geoip-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 51 passed
+python -m compileall -q main.py app tests -> passed
+```

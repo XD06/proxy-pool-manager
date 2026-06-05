@@ -78,6 +78,25 @@ function targetResponseText(latency) {
   return latency.error || "-";
 }
 
+function geoIpSummary(geoip) {
+  if (!geoip) return "";
+  if (geoip.error) return "地区未知";
+  return [
+    geoip.country_code || geoip.country,
+    geoip.city || geoip.region,
+    geoip.asn,
+    geoip.org || geoip.isp
+  ].filter(Boolean).join(" · ");
+}
+
+function geoIpForItem(item) {
+  return item?.geoip || item?.latency?.geoip || null;
+}
+
+function geoIpText(item) {
+  return geoIpSummary(geoIpForItem(item)) || "-";
+}
+
 function statusBadge(latency) {
   if (!latency) return `<span class="badge idle">未测</span>`;
   if (latency.alive) return `<span class="badge ok">可用</span>`;
@@ -132,6 +151,7 @@ function renderNodeTable() {
           <th>服务器</th>
           <th>状态</th>
           <th>延迟</th>
+          <th>地区</th>
           <th>目标结果</th>
         </tr>
       </thead>
@@ -146,6 +166,7 @@ function renderNodeTable() {
           <td data-label="服务器"><span class="mono">${escapeHtml(node.server)}:${node.server_port}</span></td>
           <td data-label="状态">${nodeStatusBadge(node)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(node.latency)}">${escapeHtml(latencyText(node.latency))}</span></td>
+          <td data-label="地区">${escapeHtml(geoIpText(node.latency))}</td>
           <td data-label="目标结果" class="result-preview">${escapeHtml(targetResponseText(node.latency))}</td>
         </tr>`).join("")}
       </tbody>
@@ -171,6 +192,7 @@ function renderAssignTable() {
           <th>端口</th>
           <th>节点</th>
           <th>出口 IP</th>
+          <th>地区</th>
           <th>状态</th>
         </tr>
       </thead>
@@ -182,6 +204,7 @@ function renderAssignTable() {
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
           <td data-label="节点">${escapeHtml(node.name)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
+          <td data-label="地区">${escapeHtml(geoIpText(node.latency))}</td>
           <td data-label="状态">${statusBadge(node.latency)}</td>
         </tr>`;
       }).join("")}</tbody>
@@ -207,6 +230,7 @@ function renderPortsTable() {
           <th>验证结果</th>
           <th>ProxyAdmin</th>
           <th>出口 IP</th>
+          <th>地区</th>
           <th>curl 验证</th>
           <th>操作</th>
         </tr>
@@ -226,6 +250,7 @@ function renderPortsTable() {
           <td data-label="验证结果" class="result-preview">${escapeHtml(targetResponseText(item.latency))}</td>
           <td data-label="ProxyAdmin">${proxyAdminPortSummary(port)}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
+          <td data-label="地区" id="geo-${port}">${escapeHtml(geoIpText(item))}</td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
           <td data-label="操作">
             <button data-ip-port="${port}">查出口</button>
@@ -243,7 +268,13 @@ function renderPortsTable() {
       await runTask(`查询端口 ${port} 出口 IP`, async () => {
         const result = await request(`/api/ports/${port}/ip`);
         $("ip-" + port).textContent = result.exit_ip || result.error || "失败";
-        showQuickResult(`端口 ${port}`, result.exit_ip ? `出口 IP：${result.exit_ip}` : `失败：${result.error || "未知错误"}`, Boolean(result.exit_ip));
+        const geoCell = $("geo-" + port);
+        if (geoCell) geoCell.textContent = result.geoip_summary || geoIpSummary(result.geoip) || "-";
+        showQuickResult(
+          `端口 ${port}`,
+          result.exit_ip ? `出口 IP：${result.exit_ip}；地区：${result.geoip_summary || geoIpSummary(result.geoip) || "-"}` : `失败：${result.error || "未知错误"}`,
+          Boolean(result.exit_ip)
+        );
         await refresh();
       });
     });
@@ -697,6 +728,7 @@ function applyPortValidationResults(result) {
   Object.entries(result.details || {}).forEach(([port, detail]) => {
     validatingPorts.delete(String(port));
     if (ports[port] && detail.exit_ip) ports[port].exit_ip = detail.exit_ip;
+    if (ports[port] && detail.geoip) ports[port].geoip = detail.geoip;
   });
 }
 
@@ -760,6 +792,7 @@ function exportRows() {
     node: item.node_name || item.node_tag,
     type: item.type || "",
     exit_ip: item.exit_ip || item.latency?.exit_ip || "",
+    geoip: geoIpText(item),
     http_proxy: `http://${proxyAuthority(port)}`,
     socks5_proxy: `socks5://${proxyAuthority(port)}`,
     socks5h_proxy: `socks5h://${proxyAuthority(port)}`,
@@ -778,7 +811,7 @@ function generateExport() {
     return rows.flatMap((row) => [row.http_proxy, row.socks5_proxy]).join("\n");
   }
   if (format === "csv") {
-    const header = ["host", "port", "node", "type", "exit_ip", "http_proxy", "socks5_proxy", "socks5h_proxy"];
+    const header = ["host", "port", "node", "type", "exit_ip", "geoip", "http_proxy", "socks5_proxy", "socks5h_proxy"];
     const lines = rows.map((row) => header.map((key) => `"${String(row[key]).replace(/"/g, '""')}"`).join(","));
     return [header.join(","), ...lines].join("\n");
   }

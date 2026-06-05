@@ -7,7 +7,7 @@ import time
 
 from app import api as api_module
 from app.api import create_app
-from app.models import EngineStatus, LatencyResult
+from app.models import EngineStatus, ExitIpCache, GeoIpResult, LatencyResult
 from app.store import StateStore
 
 
@@ -222,6 +222,90 @@ def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
         time.sleep(0.05)
     assert job.json()["status"] == "done"
     assert seen == [True]
+
+
+def test_api_node_test_attaches_geoip_cache(tmp_path, monkeypatch):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, include_exit_ip=False):
+        for node in nodes:
+            result = LatencyResult(alive=True, delay=123, exit_ip="8.8.8.8", test_port=19001)
+            if on_result:
+                on_result(node.tag, result)
+        return {}
+
+    async def fake_lookup_geoip(ip, state, **kwargs):
+        result = GeoIpResult(ip=ip, country="United States", country_code="US", city="Mountain View", asn="AS15169", org="Google")
+        state.geoip_cache[ip] = result
+        return result
+
+    monkeypatch.setattr(api_module, "test_nodes_with_temporary_engine", fake_test_nodes)
+    monkeypatch.setattr(api_module, "lookup_geoip", fake_lookup_geoip)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store)
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#US"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+
+    started = client.post("/api/test/start", json={"node_tags": [tag], "prune_same_ip": True})
+    job_id = started.json()["id"]
+    for _ in range(20):
+        job = client.get(f"/api/test/jobs/{job_id}")
+        if job.json()["status"] == "done":
+            break
+        time.sleep(0.05)
+
+    for _ in range(20):
+        nodes = client.get("/api/nodes").json()["nodes"]
+        geoip = nodes[0]["latency"].get("geoip")
+        if geoip:
+            break
+        time.sleep(0.05)
+    assert geoip["country_code"] == "US"
+    assert geoip["asn"] == "AS15169"
+
+
+def test_api_port_ip_returns_geoip(tmp_path, monkeypatch):
+    async def fake_query_exit_ip(port, state, engine):
+        return ExitIpCache(ip="8.8.4.4")
+
+    async def fake_lookup_geoip(ip, state, **kwargs):
+        result = GeoIpResult(ip=ip, country="United States", country_code="US", city="Mountain View", asn="AS15169", org="Google")
+        state.geoip_cache[ip] = result
+        return result
+
+    monkeypatch.setattr(api_module, "query_exit_ip", fake_query_exit_ip)
+    monkeypatch.setattr(api_module, "lookup_geoip", fake_lookup_geoip)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#US"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+    client.put("/api/assign", json={"mappings": {"8001": tag}})
+
+    response = client.get("/api/ports/8001/ip")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["exit_ip"] == "8.8.4.4"
+    assert payload["geoip"]["country_code"] == "US"
+    assert "AS15169" in payload["geoip_summary"]
 
 
 def test_api_port_check_reports_availability(tmp_path, monkeypatch):

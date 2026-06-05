@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from .engine import EngineError, EngineManager
 from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config
+from .geoip import geoip_summary, lookup_geoip
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping
 from .parser import import_nodes
 from .settings import (
@@ -102,6 +103,12 @@ class ProxyAdminConfig(BaseModel):
     concurrency: int = 10
 
 
+class GeoIpConfig(BaseModel):
+    enabled: bool = True
+    cache_ttl_hours: int = 168
+    concurrency: int = 4
+
+
 class TestJob(BaseModel):
     id: str
     status: str = "running"
@@ -145,6 +152,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     proxy_admin_jobs: dict[str, ProxyAdminJob] = {}
     proxy_admin_job_lock = asyncio.Lock()
     active_proxy_admin_job: dict[str, str | None] = {"id": None}
+    geoip_tasks: dict[str, asyncio.Task] = {}
+    geoip_semaphore = asyncio.Semaphore(4)
 
     monitor_task: asyncio.Task | None = None
 
@@ -183,6 +192,79 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     def proxy_admin_config_payload() -> dict:
         config = load_app_config().get("proxy_admin") or {}
         return ProxyAdminConfig.model_validate(config).model_dump()
+
+    def geoip_config() -> GeoIpConfig:
+        config = load_app_config().get("geoip") or {}
+        return GeoIpConfig.model_validate(config)
+
+    def geoip_payload(ip: str | None) -> dict | None:
+        if not ip:
+            return None
+        result = app_state.geoip_cache.get(ip)
+        return result.model_dump() if result else None
+
+    def attach_geoip_to_result(result: LatencyResult) -> LatencyResult:
+        if result.exit_ip:
+            cached = geoip_payload(result.exit_ip)
+            if cached:
+                result.geoip = cached
+        return result
+
+    def enrich_result_dict(result: dict) -> dict:
+        exit_ip = result.get("exit_ip")
+        if exit_ip and not result.get("geoip"):
+            cached = geoip_payload(exit_ip)
+            if cached:
+                result["geoip"] = cached
+        return result
+
+    def schedule_geoip_lookup(ip: str | None) -> None:
+        if not ip:
+            return
+        config = geoip_config()
+        if not config.enabled:
+            return
+        cached = app_state.geoip_cache.get(ip)
+        if cached and not cached.error:
+            return
+        existing = geoip_tasks.get(ip)
+        if existing and not existing.done():
+            return
+
+        async def runner():
+            try:
+                async with geoip_semaphore:
+                    await lookup_geoip(
+                        ip,
+                        app_state,
+                        ttl_hours=config.cache_ttl_hours,
+                        enabled=config.enabled,
+                    )
+                for latency in app_state.latency_cache.values():
+                    if latency.exit_ip == ip:
+                        cached_result = geoip_payload(ip)
+                        if cached_result:
+                            latency.geoip = cached_result
+                for cache in app_state.exit_ip_cache.values():
+                    if cache.ip == ip:
+                        cache.geoip = geoip_payload(ip)
+                save()
+            finally:
+                geoip_tasks.pop(ip, None)
+
+        geoip_tasks[ip] = asyncio.create_task(runner())
+
+    async def enrich_geoip_now(ip: str | None) -> dict | None:
+        if not ip:
+            return None
+        config = geoip_config()
+        result = await lookup_geoip(
+            ip,
+            app_state,
+            ttl_hours=config.cache_ttl_hours,
+            enabled=config.enabled,
+        )
+        return result.model_dump() if result else None
 
     def node_by_tag():
         return {node.tag: node for node in app_state.nodes}
@@ -489,10 +571,14 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         first_ok = ok_targets[0] if ok_targets else None
         first_target = first_ok or (target_results[0] if target_results else None)
         exit_ip = _extract_ip_from_targets(target_results)
+        geoip = geoip_payload(exit_ip)
+        if exit_ip and not geoip:
+            schedule_geoip_lookup(exit_ip)
         result = {
             "alive": bool(first_ok),
             "delay": first_ok.get("elapsed_ms") if first_ok else None,
             "exit_ip": exit_ip,
+            "geoip": geoip,
             "test_port": None,
             "target_url": first_target.get("url") if first_target else None,
             "status_code": first_target.get("status_code") if first_target else None,
@@ -502,14 +588,20 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         return tag, port, result, {
             "node_tag": tag,
             "exit_ip": exit_ip,
+            "geoip": geoip,
             "targets": target_results,
         }
 
     def store_port_test_result(tag: str, port: int | None, result: dict, detail: dict | None) -> None:
+        result = enrich_result_dict(result)
         if tag in node_by_tag():
             app_state.latency_cache[tag] = LatencyResult.model_validate(result)
         if port and detail and detail.get("exit_ip"):
-            app_state.exit_ip_cache[str(port)] = ExitIpCache(ip=detail["exit_ip"], error=None)
+            geoip = geoip_payload(detail["exit_ip"])
+            if geoip:
+                detail["geoip"] = geoip
+            app_state.exit_ip_cache[str(port)] = ExitIpCache(ip=detail["exit_ip"], geoip=geoip, error=None)
+            schedule_geoip_lookup(detail["exit_ip"])
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -556,7 +648,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "nodes": [
                 {
                     **node.model_dump(exclude={"outbound"}),
-                    "latency": app_state.latency_cache.get(node.tag).model_dump()
+                    "latency": attach_geoip_to_result(app_state.latency_cache.get(node.tag)).model_dump()
                     if node.tag in app_state.latency_cache
                     else None,
                 }
@@ -609,8 +701,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         except EngineError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         for tag, result in tested.items():
+            attach_geoip_to_result(result)
             app_state.latency_cache[tag] = result
             results[tag] = result.model_dump()
+            schedule_geoip_lookup(result.exit_ip)
         removed = []
         if payload.prune_same_ip:
             app_state.nodes, removed = prune_same_exit_ip(app_state.nodes, app_state.latency_cache)
@@ -658,8 +752,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         async with test_job_lock:
             try:
                 def update(tag, result):
+                    attach_geoip_to_result(result)
                     app_state.latency_cache[tag] = result
                     job.results[tag] = result.model_dump()
+                    schedule_geoip_lookup(result.exit_ip)
                     job.completed += 1
 
                 await test_nodes_with_temporary_engine(
@@ -818,7 +914,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 "node_name": node.name if node else None,
                 "type": node.type if node else None,
                 "exit_ip": app_state.exit_ip_cache.get(port).ip if port in app_state.exit_ip_cache else None,
-                "latency": latency.model_dump() if latency else None,
+                "geoip": app_state.exit_ip_cache.get(port).geoip if port in app_state.exit_ip_cache else None,
+                "latency": attach_geoip_to_result(latency).model_dump() if latency else None,
             }
         return {"ports": response}
 
@@ -934,12 +1031,16 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if str(port) not in app_state.port_mappings:
             raise HTTPException(status_code=404, detail="Port mapping not found")
         result = await query_exit_ip(port, app_state, engine_manager)
+        geoip = await enrich_geoip_now(result.ip) if result.ip else None
+        result.geoip = geoip
         app_state.exit_ip_cache[str(port)] = result
         save()
         return {
             "port": port,
             "node_tag": app_state.port_mappings[str(port)].node_tag,
             "exit_ip": result.ip,
+            "geoip": geoip,
+            "geoip_summary": geoip_summary(geoip),
             "error": result.error,
         }
 
