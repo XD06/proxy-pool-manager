@@ -2,6 +2,8 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .venv/
+node_modules/
+proxy-port-api/node_modules/
 tmp/
 config/*.json
 !config/app.example.json
