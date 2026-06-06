@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-import httpx
 from pydantic import BaseModel
 
 from .engine import EngineError, EngineManager
@@ -20,6 +19,12 @@ from .generator import ConfigError, generate_config
 from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping
 from .parser import import_nodes
+from .proxy_admin import (
+    proxy_admin_import,
+    proxy_admin_list_all,
+    proxy_admin_quality_check,
+    proxy_admin_remove_ids,
+)
 from .settings import (
     APP_CONFIG_PATH,
     SING_BOX_CONFIG_PATH,
@@ -456,119 +461,6 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 }
             )
         return items
-
-    async def proxy_admin_api(payload: ProxyAdminRequest | ProxyAdminRemoveRequest, method: str, path: str, body=None):
-        base_url = payload.base_url.rstrip("/")
-        headers = {
-            "Authorization": f"Bearer {payload.token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*",
-        }
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.request(method, f"{base_url}{path}", headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, dict) and data.get("code") not in (None, 0):
-                raise RuntimeError(data.get("message") or f"ProxyAdmin returned code {data.get('code')}")
-            return data
-
-    async def proxy_admin_list_all(payload: ProxyAdminRequest | ProxyAdminRemoveRequest) -> dict[str, dict]:
-        page = 1
-        page_size = 200
-        result = {}
-        while True:
-            data = await proxy_admin_api(
-                payload,
-                "GET",
-                f"/api/v1/admin/proxies?page={page}&page_size={page_size}&sort_by=id&sort_order=desc",
-            )
-            page_data = data.get("data") or {}
-            for item in page_data.get("items") or []:
-                result[f"{item.get('host')}:{item.get('port')}"] = item
-            if page >= int(page_data.get("pages") or 1):
-                break
-            page += 1
-        return result
-
-    async def proxy_admin_import(payload: ProxyAdminRequest, items: list[dict]) -> list[dict]:
-        if not items:
-            return []
-        results: list[dict | None] = [None] * len(items)
-        idx = 0
-        concurrency = max(1, min(payload.concurrency, 10, len(items)))
-
-        async def worker():
-            nonlocal idx
-            while idx < len(items):
-                current = idx
-                idx += 1
-                item = items[current]
-                data = await proxy_admin_api(
-                    payload,
-                    "POST",
-                    "/api/v1/admin/proxies",
-                    {
-                        "name": item["name"],
-                        "protocol": "http",
-                        "host": item["host"],
-                        "port": item["port"],
-                        "username": "",
-                        "password": "",
-                    },
-                )
-                proxy = data.get("data") or {}
-                results[current] = {
-                    **item,
-                    "id": int(proxy.get("id") or 0),
-                    "name": proxy.get("name") or item["name"],
-                }
-
-        await asyncio.gather(*(worker() for _ in range(concurrency)))
-        return [item for item in results if item is not None]
-
-    async def proxy_admin_quality_check(payload: ProxyAdminRequest, proxy_id: int) -> dict:
-        data = await proxy_admin_api(payload, "POST", f"/api/v1/admin/proxies/{proxy_id}/quality-check")
-        raw = data.get("data") or {}
-        return {
-            "id": int(raw.get("proxy_id") or proxy_id),
-            "exit_ip": raw.get("exit_ip") or "",
-            "country": raw.get("country") or "",
-            "score": raw.get("score") or 0,
-            "grade": raw.get("grade") or "",
-            "items": [
-                {
-                    "target": item.get("target") or "",
-                    "status": item.get("status") or "",
-                    "http_status": item.get("http_status"),
-                    "latency_ms": item.get("latency_ms"),
-                    "message": item.get("message") or "",
-                }
-                for item in raw.get("items") or []
-            ],
-        }
-
-    async def proxy_admin_remove_ids(payload: ProxyAdminRemoveRequest, ids: list[int]) -> list[dict]:
-        results: list[dict] = []
-        idx = 0
-        concurrency = max(1, min(payload.concurrency, 20, len(ids) or 1))
-
-        async def worker():
-            nonlocal idx
-            while idx < len(ids):
-                proxy_id = ids[idx]
-                idx += 1
-                try:
-                    data = await proxy_admin_api(payload, "DELETE", f"/api/v1/admin/proxies/{proxy_id}")
-                    success = data.get("code") == 0
-                    item = {"id": proxy_id, "success": success}
-                    if not success:
-                        item["message"] = data.get("message")
-                    results.append(item)
-                except Exception as exc:
-                    results.append({"id": proxy_id, "success": False, "message": str(exc)})
-
-        await asyncio.gather(*(worker() for _ in range(concurrency)))
-        return results
 
     async def wait_for_mapped_ports(timeout_seconds: float = 8.0) -> None:
         expected = mapped_ports()
@@ -1044,8 +936,21 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             try:
                 imported = await proxy_admin_import(payload, proxy_items)
                 job.imported = imported
-                ids = [item["id"] for item in imported if item.get("id")]
-                job.total = len(ids)
+                ids = [item["id"] for item in imported if int(item.get("id") or 0) > 0]
+                upload_failures = [item for item in imported if int(item.get("id") or 0) <= 0]
+                job.total = len(imported)
+                for item in upload_failures:
+                    result = {
+                        "id": item.get("id") or 0,
+                        "exit_ip": "",
+                        "country": "",
+                        "score": 0,
+                        "grade": "ERR",
+                        "items": [],
+                        "error": item.get("upload_error") or "ProxyAdmin upload failed",
+                    }
+                    job.results[str(result["id"])] = result
+                    job.completed += 1
                 if not ids:
                     job.status = "done"
                     return
@@ -1116,7 +1021,13 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         }
 
     @app.get("/api/proxy/fastest")
-    async def fastest_proxy(request: Request, scheme: str = "http", require_running: bool = True):
+    async def fastest_proxy(
+        request: Request,
+        scheme: str = "http",
+        require_running: bool = True,
+        check: bool = False,
+        target_url: str | None = None,
+    ):
         refreshed = refresh_state_from_disk()
         scheme = scheme.lower().strip()
         if scheme not in {"http", "socks5"}:
@@ -1139,9 +1050,27 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 success_count = 1
             delay = latency.delay if latency.delay is not None else 10**9
             candidates.append((success_count, delay, port, mapping, latency))
+        candidates = sorted(candidates, key=lambda item: (-item[0], item[1], item[2]))
         if not candidates:
             raise HTTPException(status_code=404, detail="No tested alive proxy mapping is available")
-        success_count, delay, port, mapping, latency = sorted(candidates, key=lambda item: (-item[0], item[1], item[2]))[0]
+        if check:
+            checked_candidates = []
+            urls = [target_url] if target_url else None
+            for _, _, port, mapping, _ in candidates:
+                tag, checked_port, result, detail = await validate_assigned_tag(mapping.node_tag, port, urls)
+                store_port_test_result(tag, checked_port, result, detail)
+                latency = app_state.latency_cache.get(mapping.node_tag)
+                if latency and latency.alive:
+                    success_count = sum(1 for item in latency.target_results or [] if item.get("ok"))
+                    if not latency.target_results:
+                        success_count = 1
+                    delay = latency.delay if latency.delay is not None else 10**9
+                    checked_candidates.append((success_count, delay, port, mapping, latency))
+            save()
+            candidates = sorted(checked_candidates, key=lambda item: (-item[0], item[1], item[2]))
+            if not candidates:
+                raise HTTPException(status_code=404, detail="No live proxy mapping passed real-time validation")
+        success_count, delay, port, mapping, latency = candidates[0]
         authority = proxy_authority(port, request)
         node = by_tag.get(mapping.node_tag)
         exit_cache = app_state.exit_ip_cache.get(str(port))
@@ -1159,6 +1088,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "node": node.model_dump(exclude={"outbound"}) if node else None,
             "delay": delay,
             "target_success_count": success_count,
+            "real_time_checked": check,
+            "check_target_url": target_url,
             "exit_ip": exit_cache.ip if exit_cache else latency.exit_ip,
             "geoip": exit_cache.geoip if exit_cache else latency.geoip,
             "latency": attach_geoip_to_result(latency).model_dump(),

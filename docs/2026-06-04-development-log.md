@@ -2167,6 +2167,44 @@ python -m pytest tests/test_api.py -q -> 29 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
+
+处理内容：
+
+- ProxyAdmin 调用拆到 `app/proxy_admin.py`，减少 `app/api.py` 里直接堆叠外部 API 细节。
+- ProxyAdmin 单个代理上传失败时：
+  - 失败端口会产生对应错误结果。
+  - 其他端口继续上传和质量检测。
+  - 任务最终仍可完成，不会因为一个端口失败中断整批。
+- 运行界面处理无效 ProxyAdmin ID：
+  - 上传失败的本地错误项不会再被拿去远端重试或删除。
+- `/api/proxy/fastest` 增加实时验证参数：
+  - `check=true`
+  - `target_url=https://example.com/ping`
+  - 开启后会按缓存排序逐个验证候选端口，返回第一个实时可用代理。
+- 顶部状态区新增 `监听`：
+  - 显示 `实际监听端口数/期望映射端口数`。
+  - 如果有缺失端口，鼠标悬停可看到异常端口列表。
+- Linux/systemd 安装整理：
+  - `install-systemd.sh` 不再硬编码 `User=dsk`。
+  - 默认使用 `sudo` 发起用户，也可通过 `SERVICE_USER=xxx` 指定。
+  - systemd 环境变量补齐 `PPM_CLASH_API_ADDR` 和 `PPM_DOMAIN_RESOLVE_STRATEGY`。
+  - `install-linux.sh` 默认配置补齐 `domain_resolve_strategy`。
+
+示例：
+
+```text
+GET /api/proxy/fastest?check=true&target_url=https://www.google.com/generate_204
+```
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest tests/test_api.py -q -> 31 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## ProxyAdmin 命名上传优化
 
 问题：

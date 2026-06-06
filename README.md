@@ -221,6 +221,7 @@ curl.exe --proxy "http://127.0.0.1:8001/" https://ipv4.webshare.io/
 | `PUT` | `/api/assign` | 保存端口映射 |
 | `GET` | `/api/ports` | 查询端口映射 |
 | `GET` | `/api/ports/{port}/ip` | 查询端口出口 IP |
+| `GET` | `/api/proxy/fastest` | 返回最快可用代理；可加 `check=true` 做实时验证 |
 | `POST` | `/api/start` | 启动 sing-box |
 | `POST` | `/api/stop` | 停止 sing-box |
 

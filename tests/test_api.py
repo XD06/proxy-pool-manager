@@ -6,6 +6,7 @@ import socket
 import time
 
 from app import api as api_module
+from app import proxy_admin as proxy_admin_module
 from app.api import create_app
 from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, LatencyResult, PortMapping, ProxyNode
 from app.store import StateStore
@@ -510,6 +511,43 @@ def test_api_fastest_proxy_requires_ready_engine_by_default(tmp_path):
     assert response.status_code == 409
 
 
+def test_api_fastest_proxy_realtime_check_skips_failed_candidate(tmp_path, monkeypatch):
+    async def fake_validate_proxy_targets(port, urls=None):
+        if port == 8001:
+            return [{"url": urls[0], "ok": False, "elapsed_ms": 20, "error": "failed"}]
+        return [{"url": urls[0], "ok": True, "elapsed_ms": 77, "status_code": 204, "body_preview": "", "error": None}]
+
+    monkeypatch.setattr(api_module, "validate_proxy_targets", fake_validate_proxy_targets)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app, base_url="http://proxy.example.com:9000")
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": "\n".join(
+                [
+                    "vless://00000000-0000-0000-0000-000000000001@a.example.com:443?security=tls#A",
+                    "vless://00000000-0000-0000-0000-000000000002@b.example.com:443?security=tls#B",
+                ]
+            )
+        },
+    )
+    tags = [node["tag"] for node in imported.json()["nodes"]]
+    client.put("/api/assign", json={"mappings": {"8001": tags[0], "8002": tags[1]}})
+    state = app.state.proxy_pool_state
+    state.latency_cache[tags[0]] = LatencyResult(alive=True, delay=10)
+    state.latency_cache[tags[1]] = LatencyResult(alive=True, delay=100)
+
+    response = client.get("/api/proxy/fastest?require_running=false&check=true&target_url=https://example.com/ping")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["port"] == 8002
+    assert payload["real_time_checked"] is True
+    assert payload["latency"]["delay"] == 77
+
+
 def test_api_port_check_reports_availability(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: port == 18001)
     monkeypatch.setattr(api_module, "current_clash_api_addr", lambda: "127.0.0.1:10000")
@@ -619,7 +657,7 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
                 )
             raise AssertionError(url)
 
-    monkeypatch.setattr(api_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())
 
@@ -665,6 +703,78 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
         assert {item["name"] for item in created} == {"代理1", "代理2"}
 
 
+def test_api_proxy_admin_upload_failure_does_not_stop_batch(tmp_path, monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def request(self, method, url, headers=None, json=None):
+            if method == "POST" and url.endswith("/api/v1/admin/proxies"):
+                if json["port"] == 18001:
+                    raise RuntimeError("upload failed")
+                return FakeResponse({"code": 0, "message": "ok", "data": {"id": 502, "name": json["name"], "port": json["port"]}})
+            if url.endswith("/quality-check"):
+                return FakeResponse(
+                    {
+                        "code": 0,
+                        "message": "ok",
+                        "data": {
+                            "proxy_id": 502,
+                            "exit_ip": "203.0.113.2",
+                            "country": "TEST",
+                            "score": 80,
+                            "grade": "B",
+                            "items": [{"target": "openai", "status": "pass", "latency_ms": 123, "message": "ok"}],
+                        },
+                    }
+                )
+            raise AssertionError(url)
+
+    monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/proxy-admin/check/start",
+            json={
+                "base_url": "http://127.0.0.1:8081",
+                "token": "token",
+                "proxy_host": "127.0.0.1",
+                "ports": [18001, 18002],
+                "concurrency": 2,
+            },
+        )
+        job_id = started.json()["id"]
+        for _ in range(20):
+            job = client.get(f"/api/proxy-admin/jobs/{job_id}")
+            if job.json()["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        payload = job.json()
+        assert payload["status"] == "done"
+        assert payload["completed"] == 2
+        assert payload["results"]["-18001"]["grade"] == "ERR"
+        assert payload["results"]["502"]["grade"] == "B"
+
+
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
     class FakeResponse:
         def __init__(self, payload):
@@ -705,7 +815,7 @@ def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
                 return FakeResponse({"code": 0, "message": "ok", "data": {}})
             raise AssertionError(url)
 
-    monkeypatch.setattr(api_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())
     client = TestClient(app)

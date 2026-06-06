@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_SRC="${SCRIPT_DIR}/${SERVICE_NAME}.service"
 SYSTEMD_DIR="/etc/systemd/system"
+SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-}}"
+if [[ -z "$SERVICE_USER" || "$SERVICE_USER" == "root" ]]; then
+  SERVICE_USER="$(logname 2>/dev/null || echo root)"
+fi
 
 # --- 检查 root ---
 if [[ $EUID -ne 0 ]]; then
@@ -25,8 +29,8 @@ cd "$PROJECT_DIR"
 bash "$SCRIPT_DIR/install-linux.sh"
 echo "✔ 基础安装完成"
 
-# 2. 修复权限（服务以 dsk 用户运行，确保能读写项目文件）
-chown -R dsk:dsk "$PROJECT_DIR"
+# 2. 修复权限（服务以安装用户运行，确保能读写项目文件）
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "$PROJECT_DIR"
 
 # 3. 写入 systemd 服务文件（指向项目当前目录）
 cat > "${SYSTEMD_DIR}/${SERVICE_NAME}.service" << EOF
@@ -37,7 +41,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=dsk
+User=${SERVICE_USER}
 WorkingDirectory=${PROJECT_DIR}
 ExecStart=${PROJECT_DIR}/.venv/bin/python3 main.py
 Restart=always
@@ -47,6 +51,8 @@ StandardError=journal
 Environment=PPM_HOST=0.0.0.0
 Environment=PPM_PORT=9100
 Environment=PPM_PROXY_LISTEN_HOST=0.0.0.0
+Environment=PPM_CLASH_API_ADDR=127.0.0.1:9090
+Environment=PPM_DOMAIN_RESOLVE_STRATEGY=
 
 [Install]
 WantedBy=multi-user.target

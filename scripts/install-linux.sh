@@ -84,7 +84,8 @@ if [ ! -f config/app.json ]; then
   "port": 9100,
   "proxy_listen_host": "127.0.0.1",
   "proxy_public_host": "",
-  "clash_api_addr": "127.0.0.1:9090"
+  "clash_api_addr": "127.0.0.1:9090",
+  "domain_resolve_strategy": ""
 }
 JSON
 fi

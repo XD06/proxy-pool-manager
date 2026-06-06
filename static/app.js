@@ -220,6 +220,9 @@ function renderNodeTestOverview() {
 
 
 function renderSummary() {
+  const expectedPorts = statusSnapshot.expected_ports || [];
+  const listeningPorts = statusSnapshot.listening_ports || [];
+  const missingPorts = expectedPorts.filter((port) => !listeningPorts.includes(port));
   if (!statusSnapshot.running) {
     $("engineState").textContent = "未运行";
     $("engineState").style.color = "#999";              // 灰色
@@ -241,6 +244,11 @@ function renderSummary() {
   $("nodeCount").style.color = $("engineState").style.color; // 节点数大于0显示绿色，否则红色
   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
   $("mappingCount").style.color = $("engineState").style.color; // 映射数大于0显示绿色，否则红色
+  $("listeningCount").textContent = `${listeningPorts.length}/${expectedPorts.length}`;
+  $("listeningCount").style.color = missingPorts.length ? "#e74c3c" : $("engineState").style.color;
+  $("listeningCount").title = missingPorts.length
+    ? `异常端口：${missingPorts.join(", ")}`
+    : "所有映射端口均在监听";
 }
 
 function proxyConnectHost() {
@@ -522,7 +530,7 @@ async function removeProxyAdminProxyForPort(port) {
     await saveProxyAdminConfig();
     const entry = proxyAdminResultByPort().get(String(port));
     const id = Number(entry?.imported?.id || entry?.result?.id);
-    if (!id) throw new Error("这个端口还没有 ProxyAdmin 记录，请先导入并检测");
+    if (!id || id <= 0) throw new Error("这个端口还没有有效的 ProxyAdmin 远端记录");
     const result = await request("/api/proxy-admin/remove", {
       method: "POST",
       body: JSON.stringify(proxyAdminPayload({ ids: [id], concurrency: 1 }))
@@ -1194,7 +1202,7 @@ $("proxyAdminRetryFailedBtn").addEventListener("click", () => runTask("ProxyAdmi
   const failedIds = Object.values(proxyAdminResults)
     .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
     .map((result) => Number(result.id))
-    .filter(Boolean);
+    .filter((id) => id > 0);
   if (!failedIds.length) throw new Error("没有失败结果可重试");
   const retryPorts = proxyAdminImported
     .filter((item) => failedIds.includes(Number(item.id)))
@@ -1212,7 +1220,7 @@ $("proxyAdminDeleteFailedBtn").addEventListener("click", () => runTask("ProxyAdm
   const ids = Object.values(proxyAdminResults)
     .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
     .map((result) => Number(result.id))
-    .filter(Boolean);
+    .filter((id) => id > 0);
   if (!ids.length) throw new Error("没有失败节点可删除");
   const result = await request("/api/proxy-admin/remove", {
     method: "POST",
