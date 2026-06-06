@@ -909,7 +909,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if tag not in known:
                 raise HTTPException(status_code=400, detail=f"Unknown node tag: {tag}")
             mappings[str(port)] = PortMapping(node_tag=tag)
-        app_state.port_mappings = mappings
+        app_state.port_mappings = dict(sorted(mappings.items(), key=lambda item: int(item[0])))
         app_state.exit_ip_cache = {
             port: cache
             for port, cache in app_state.exit_ip_cache.items()
@@ -943,7 +943,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 stopped = True
         return {
             "ok": True,
-            "mappings": {key: value.model_dump() for key, value in mappings.items()},
+            "mappings": {key: value.model_dump() for key, value in app_state.port_mappings.items()},
             "engine_restarted": restarted,
             "engine_stopped": stopped,
             "engine": engine_status_payload(),

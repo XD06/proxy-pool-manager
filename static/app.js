@@ -297,7 +297,18 @@ function renderNodeTable() {
 }
 
 function renderAssignTable() {
-  const assignNodes = assignFilterTags ? nodes.filter((node) => assignFilterTags.has(node.tag)) : nodes;
+  const sourceNodes = assignFilterTags ? nodes.filter((node) => assignFilterTags.has(node.tag)) : nodes;
+  const assignNodes = sourceNodes
+    .map((node, index) => {
+      const assignedPort = Object.entries(ports).find(([, item]) => item.node_tag === node.tag)?.[0] || "";
+      return { node, index, assignedPort };
+    })
+    .sort((left, right) => {
+      const leftPort = left.assignedPort ? Number(left.assignedPort) : Number.MAX_SAFE_INTEGER;
+      const rightPort = right.assignedPort ? Number(right.assignedPort) : Number.MAX_SAFE_INTEGER;
+      if (leftPort !== rightPort) return leftPort - rightPort;
+      return left.index - right.index;
+    });
   if (!assignNodes.length) {
     $("assignTable").innerHTML = `<div class="empty">没有可分配节点。</div>`;
     return;
@@ -314,8 +325,7 @@ function renderAssignTable() {
           <th>状态</th>
         </tr>
       </thead>
-      <tbody>${assignNodes.map((node) => {
-        const assignedPort = Object.entries(ports).find(([, item]) => item.node_tag === node.tag)?.[0] || "";
+      <tbody>${assignNodes.map(({ node, assignedPort }) => {
         const checked = assignedPort || (autoSelectAliveForAssign && node.latency?.alive) ? "checked" : "";
         return `<tr>
           <td data-label="使用"><input type="checkbox" class="assign-check" data-tag="${escapeHtml(node.tag)}" ${checked}></td>
@@ -783,13 +793,19 @@ function selectedNodeTags() {
 }
 
 function collectMappings() {
-  const mappings = {};
+  const entries = [];
   document.querySelectorAll(".assign-check").forEach((box) => {
     if (!box.checked) return;
     const tag = box.dataset.tag;
     const port = document.querySelector(`[data-port-for="${CSS.escape(tag)}"]`).value;
-    if (port) mappings[port] = tag;
+    if (port) entries.push([String(port), tag]);
   });
+  const mappings = {};
+  entries
+    .sort(([leftPort], [rightPort]) => Number(leftPort) - Number(rightPort))
+    .forEach(([port, tag]) => {
+      mappings[port] = tag;
+    });
   return mappings;
 }
 
@@ -1090,6 +1106,7 @@ $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用�
     input.value = allocation.ports[index];
     usedPorts.add(allocation.ports[index]);
   });
+  renderAssignTable();
   const skippedCount = Object.keys(allocation.skipped || {}).length;
   return `已分配 ${targets.length} 个可用端口${skippedCount ? `，已避让 ${skippedCount} 个不可用端口` : ""}`;
 }));

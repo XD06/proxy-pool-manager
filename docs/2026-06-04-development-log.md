@@ -2142,3 +2142,27 @@ api 能正常运行但是无法拉取最新的引擎和最新节点信息
 python -m pytest tests/test_api.py -q -> 28 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 分配界面端口排序
+
+问题：
+
+```text
+分配界面也需要自动按端口大小排序
+```
+
+处理：
+
+- 分配表渲染时按端口数值升序排序。
+- 已分配端口的节点排在前面，未分配节点排在后面并保持原节点顺序。
+- 自动分配新端口后立即重新渲染分配表，让新增端口顺序马上生效。
+- 前端收集映射时按端口升序提交。
+- 后端 `/api/assign` 保存和返回映射时也按端口升序，保证 API、状态文件和界面顺序一致。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest tests/test_api.py -q -> 29 passed
+python -m compileall -q main.py app tests -> passed
+```

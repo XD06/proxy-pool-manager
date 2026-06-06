@@ -130,6 +130,31 @@ def test_api_assign_can_clear_mappings(tmp_path):
     assert client.get("/api/ports").json()["ports"] == {}
 
 
+def test_api_assign_orders_mappings_by_port(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": "\n".join(
+                [
+                    "vless://00000000-0000-0000-0000-000000000001@example-a.com:443?security=tls#A",
+                    "vless://00000000-0000-0000-0000-000000000002@example-b.com:443?security=tls#B",
+                ]
+            )
+        },
+    )
+    tags = [node["tag"] for node in imported.json()["nodes"]]
+
+    response = client.put("/api/assign", json={"mappings": {"8010": tags[0], "8001": tags[1]}})
+
+    assert response.status_code == 200
+    assert list(response.json()["mappings"].keys()) == ["8001", "8010"]
+    assert list(store.load().port_mappings.keys()) == ["8001", "8010"]
+
+
 def test_api_import_zero_nodes_returns_error(tmp_path):
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store)
