@@ -1117,7 +1117,6 @@ $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用�
     input.value = allocation.ports[index];
     usedPorts.add(allocation.ports[index]);
   });
-  renderAssignTable();
   const skippedCount = Object.keys(allocation.skipped || {}).length;
   return `已分配 ${targets.length} 个可用端口${skippedCount ? `，已避让 ${skippedCount} 个不可用端口` : ""}`;
 }));

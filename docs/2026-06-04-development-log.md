@@ -1869,6 +1869,34 @@ python -m pytest -q -> 51 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## 自动分配端口后输入框被清空修复
+
+问题：
+
+```text
+分配端口提示已分配成功，但分配表里看不见端口。
+```
+
+原因：
+
+- 自动分配端口时，端口先写入当前页面的输入框。
+- 这时映射还没有点击保存，内存里的 `ports` 状态仍是旧状态。
+- 之前为了立即排序，在自动分配后调用了 `renderAssignTable()`。
+- 表格重绘时从旧 `ports` 状态读取端口，导致刚写入输入框的未保存端口被清空。
+
+处理：
+
+- 取消自动分配后的即时重绘。
+- 自动分配结果保留在输入框中，用户点击保存映射后再由后端状态刷新并排序。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 63 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## GeoIP 覆盖率与布局修复
 
 用户反馈：
