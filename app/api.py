@@ -312,6 +312,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             return request.url.hostname
         return "127.0.0.1"
 
+    def proxy_authority(port: int, request: Request | None = None) -> str:
+        host = proxy_connect_host(request)
+        formatted_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        return f"{formatted_host}:{port}"
+
     def engine_status_payload(request: Request | None = None) -> dict:
         payload = engine_manager.status().model_dump()
         expected = mapped_ports()
@@ -1075,6 +1080,53 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "geoip_summary": geoip_summary(geoip),
             "geoip_compact": geoip_compact_summary(geoip),
             "error": result.error,
+        }
+
+    @app.get("/api/proxy/fastest")
+    async def fastest_proxy(request: Request, scheme: str = "http", require_running: bool = True):
+        scheme = scheme.lower().strip()
+        if scheme not in {"http", "socks5"}:
+            raise HTTPException(status_code=400, detail="scheme must be http or socks5")
+        engine_status = engine_status_payload(request)
+        if require_running and not engine_status["ready"]:
+            raise HTTPException(status_code=409, detail="Engine is not running or mapped ports are not ready")
+        by_tag = node_by_tag()
+        candidates = []
+        for port_text, mapping in app_state.port_mappings.items():
+            latency = app_state.latency_cache.get(mapping.node_tag)
+            if not latency or not latency.alive:
+                continue
+            try:
+                port = int(port_text)
+            except ValueError:
+                continue
+            success_count = sum(1 for item in latency.target_results or [] if item.get("ok"))
+            if not latency.target_results and latency.alive:
+                success_count = 1
+            delay = latency.delay if latency.delay is not None else 10**9
+            candidates.append((success_count, delay, port, mapping, latency))
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No tested alive proxy mapping is available")
+        success_count, delay, port, mapping, latency = sorted(candidates, key=lambda item: (-item[0], item[1], item[2]))[0]
+        authority = proxy_authority(port, request)
+        node = by_tag.get(mapping.node_tag)
+        exit_cache = app_state.exit_ip_cache.get(str(port))
+        return {
+            "ok": True,
+            "scheme": scheme,
+            "proxy": f"{scheme}://{authority}",
+            "http_proxy": f"http://{authority}",
+            "socks5_proxy": f"socks5://{authority}",
+            "host": proxy_connect_host(request),
+            "port": port,
+            "node_tag": mapping.node_tag,
+            "node_name": node.name if node else None,
+            "type": node.type if node else None,
+            "delay": delay,
+            "target_success_count": success_count,
+            "exit_ip": exit_cache.ip if exit_cache else latency.exit_ip,
+            "geoip": exit_cache.geoip if exit_cache else latency.geoip,
+            "latency": attach_geoip_to_result(latency).model_dump(),
         }
 
     @app.post("/api/start")

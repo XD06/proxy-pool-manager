@@ -2057,3 +2057,53 @@ node --check static/app.js -> passed
 python -m pytest -q -> 57 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 获取最快可用代理 API
+
+用户需求：
+
+```text
+添加一个 api，访问可以获得一个最快可用的代理
+```
+
+处理：
+
+- 新增接口：
+  - `GET /api/proxy/fastest`
+- 默认只在引擎运行且映射端口 ready 时返回代理，避免返回实际不可连接的端口。
+- 可选参数：
+  - `scheme=http|socks5`，默认 `http`
+  - `require_running=true|false`，默认 `true`
+- 选择规则：
+  - 只从已分配端口里选择。
+  - 只选择最近测速可用的节点。
+  - 多目标测速时，目标成功数量多的优先。
+  - 成功数量相同，延迟低的优先。
+  - 延迟相同，端口小的优先。
+- 返回内容包括：
+  - `proxy`
+  - `http_proxy`
+  - `socks5_proxy`
+  - `host`
+  - `port`
+  - `node_tag`
+  - `node_name`
+  - `delay`
+  - `exit_ip`
+  - `geoip`
+  - `latency`
+
+示例：
+
+```text
+GET /api/proxy/fastest
+GET /api/proxy/fastest?scheme=socks5
+GET /api/proxy/fastest?require_running=false
+```
+
+验证：
+
+```text
+python -m pytest -q -> 59 passed
+python -m compileall -q main.py app tests -> passed
+```

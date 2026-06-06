@@ -397,6 +397,62 @@ def test_api_port_ip_returns_geoip(tmp_path, monkeypatch):
     assert "AS15169" in payload["geoip_summary"]
 
 
+def test_api_fastest_proxy_returns_best_alive_mapping(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app, base_url="http://proxy.example.com:9000")
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": "\n".join(
+                [
+                    "vless://00000000-0000-0000-0000-000000000001@a.example.com:443?security=tls#A",
+                    "vless://00000000-0000-0000-0000-000000000002@b.example.com:443?security=tls#B",
+                ]
+            )
+        },
+    )
+    tags = [node["tag"] for node in imported.json()["nodes"]]
+    client.put("/api/assign", json={"mappings": {"8001": tags[0], "8002": tags[1]}})
+    state = app.state.proxy_pool_state
+    state.latency_cache[tags[0]] = LatencyResult(
+        alive=True,
+        delay=50,
+        target_results=[
+            {"url": "u1", "ok": True, "elapsed_ms": 50},
+            {"url": "u2", "ok": False, "elapsed_ms": 100},
+        ],
+    )
+    state.latency_cache[tags[1]] = LatencyResult(
+        alive=True,
+        delay=180,
+        target_results=[
+            {"url": "u1", "ok": True, "elapsed_ms": 160},
+            {"url": "u2", "ok": True, "elapsed_ms": 200},
+        ],
+    )
+
+    response = client.get("/api/proxy/fastest?require_running=false&scheme=socks5")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["port"] == 8002
+    assert payload["scheme"] == "socks5"
+    assert payload["proxy"] == "socks5://proxy.example.com:8002"
+    assert payload["target_success_count"] == 2
+
+
+def test_api_fastest_proxy_requires_ready_engine_by_default(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.get("/api/proxy/fastest")
+
+    assert response.status_code == 409
+
+
 def test_api_port_check_reports_availability(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: port == 18001)
     monkeypatch.setattr(api_module, "current_clash_api_addr", lambda: "127.0.0.1:10000")
