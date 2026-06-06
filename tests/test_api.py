@@ -639,8 +639,7 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
                         "message": "ok",
                         "data": {
                             "items": [
-                                {"id": 501, "host": "127.0.0.1", "port": 18001, "account_count": 0},
-                                {"id": 502, "host": "127.0.0.1", "port": 18002, "account_count": 0},
+                                {"id": 499, "name": "代理1", "host": "127.0.0.1", "port": 17999, "account_count": 0},
                             ],
                             "pages": 1,
                         },
@@ -683,6 +682,9 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
         tags = [node["tag"] for node in imported.json()["nodes"]]
         assigned = client.put("/api/assign", json={"mappings": {"18001": tags[0], "18002": tags[1]}})
         assert assigned.status_code == 200
+        state = app.state.proxy_pool_state
+        state.latency_cache[tags[0]] = LatencyResult(alive=True, delay=100, geoip={"country_code": "JP", "city": "Tokyo"})
+        state.latency_cache[tags[1]] = LatencyResult(alive=True, delay=120, geoip={"country_code": "US", "city": "Los Angeles"})
 
         started = client.post(
             "/api/proxy-admin/check/start",
@@ -707,7 +709,7 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
         assert payload["status"] == "done"
         assert payload["completed"] == 2
         assert payload["results"]["501"]["items"][0]["status"] == "pass"
-        assert {item["name"] for item in created} == {"代理1", "代理2"}
+        assert {item["name"] for item in created} == {"代理2-JP.Tokyo", "代理3-US.LosAngeles"}
 
 
 def test_api_proxy_admin_upload_failure_does_not_stop_batch(tmp_path, monkeypatch):
@@ -732,6 +734,8 @@ def test_api_proxy_admin_upload_failure_does_not_stop_batch(tmp_path, monkeypatc
             return None
 
         async def request(self, method, url, headers=None, json=None):
+            if "/api/v1/admin/proxies?page=" in url:
+                return FakeResponse({"code": 0, "message": "ok", "data": {"items": [], "pages": 1}})
             if method == "POST" and url.endswith("/api/v1/admin/proxies"):
                 if json["port"] == 18001:
                     raise RuntimeError("upload failed")

@@ -1893,6 +1893,40 @@ node --check static/app.js -> passed
 python -m pytest -q -> 64 passed
 ```
 
+## ProxyAdmin 名称前缀去重和补空位
+
+问题：
+
+```text
+名称前缀不能重复。远端如果已有代理12/代理13，或者删除了代理12，下次新增不能和已有名称冲突。
+```
+
+处理：
+
+- ProxyAdmin 上传前先拉取远端代理列表。
+- 按当前 `名称前缀` 提取已有编号。
+- 新增名称使用最小可用编号，并追加地区后缀：
+  - `代理1-jp.Tokyo`
+  - `代理2-US.LosAngeles`
+  - `代理3-none`
+- 已有名称会按编号占位：
+  - 已有 `代理1-jp.Tokyo, 代理2-US.LosAngeles, 代理4-none` -> 新增先用 `代理3-...`
+  - 已有 `代理12-US.xx, 代理13-JP.xx` -> 不会重复使用 `代理12/代理13`
+  - 删除了 `代理12-...` 但 `代理13-...` 还在 -> 下次可补 `代理12-...`
+- 地区后缀来源：
+  - 优先使用端口对应节点的 GeoIP。
+  - 有国家和城市：`国家.城市`
+  - 只有国家：`国家`
+  - 没有地区：`none`
+- 自定义前缀单独计算，不受其他前缀影响。
+
+验证：
+
+```text
+python -m pytest tests/test_api.py tests/test_proxy_admin.py -q -> 33 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## 节点测速出口 IP 和地区空白修复
 
 问题：

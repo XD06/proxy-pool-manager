@@ -449,6 +449,23 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         replace_from = (payload.replace_from or "").strip()
         replace_to = (payload.replace_to or "").strip()
         name_prefix = (payload.proxy_name_prefix or "代理").strip() or "代理"
+        by_tag = node_by_tag()
+
+        def location_label(port: int) -> str:
+            mapping = app_state.port_mappings.get(str(port))
+            node = by_tag.get(mapping.node_tag) if mapping else None
+            latency = app_state.latency_cache.get(node.tag) if node else None
+            geoip = latency.geoip if latency else None
+            if not geoip:
+                exit_cache = app_state.exit_ip_cache.get(str(port))
+                geoip = exit_cache.geoip if exit_cache else None
+            if not geoip or geoip.get("error"):
+                return "none"
+            country = str(geoip.get("country_code") or geoip.get("country") or "").strip()
+            city = str(geoip.get("city") or geoip.get("region") or "").strip()
+            compact = ".".join(part.replace(" ", "") for part in [country, city] if part)
+            return compact or "none"
+
         items = []
         for index, port in enumerate(selected_ports, start=1):
             export_host = replace_to if replace_from and replace_to and host == replace_from else host
@@ -458,6 +475,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     "host": export_host,
                     "port": int(port),
                     "name": f"{name_prefix}{index}",
+                    "name_suffix": location_label(int(port)),
                 }
             )
         return items
