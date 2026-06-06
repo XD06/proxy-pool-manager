@@ -1085,7 +1085,7 @@ $("clearNodesBtn").addEventListener("click", () => runTask("清空节点", async
 }));
 
 $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用端口", async () => {
-  let nextPort = Number($("startPort").value || 8001);
+  let nextPort = Number($("startPort").value || 9001);
   const usedPorts = new Set();
   document.querySelectorAll(".port-input").forEach((input) => {
     if (input.value) usedPorts.add(Number(input.value));
