@@ -261,7 +261,13 @@ def test_api_node_test_include_geoip_requests_exit_ip(tmp_path, monkeypatch):
                 on_result(node.tag, result)
         return {}
 
+    async def fake_lookup_geoip(ip, state, **kwargs):
+        result = GeoIpResult(ip=ip, country="United States", country_code="US", city="Mountain View", asn="AS15169", org="Google")
+        state.geoip_cache[ip] = result
+        return result
+
     monkeypatch.setattr(api_module, "test_nodes_with_temporary_engine", fake_test_nodes)
+    monkeypatch.setattr(api_module, "lookup_geoip", fake_lookup_geoip)
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store)
     client = TestClient(app)
@@ -288,6 +294,7 @@ def test_api_node_test_include_geoip_requests_exit_ip(tmp_path, monkeypatch):
     assert job.json()["status"] == "done"
     assert seen == [True]
     assert job.json()["results"][tag]["exit_ip"] == "8.8.8.8"
+    assert job.json()["results"][tag]["geoip"]["country_code"] == "US"
 
 
 def test_api_node_test_passes_multiple_target_urls(tmp_path, monkeypatch):

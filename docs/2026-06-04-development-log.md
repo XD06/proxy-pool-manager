@@ -1869,6 +1869,38 @@ python -m pytest -q -> 51 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## 节点测速出口 IP 和地区空白修复
+
+问题：
+
+```text
+测速界面查询地区和出口 IP 没有生效，结果全是空白。
+```
+
+原因：
+
+- 前端已传 `include_geoip=true`，问题不在开关。
+- 出口 IP 查询直接使用响应正文，遇到 `Found`、HTML、空响应或非 IP 文本时，容易得不到有效 IP。
+- GeoIP 查询之前是后台异步补充，测速任务刚完成时前端立即刷新，可能还没写回 `job.results`。
+
+处理：
+
+- 新增 `extract_public_ipv4()`：
+  - 从响应正文中提取 IPv4。
+  - 跳过内网、回环、保留地址和无效文本。
+  - 当前查询服务无有效 IP 时自动尝试下一个出口 IP 服务。
+- 节点测速任务在 `include_geoip=true` 时，会在任务完成前同步补齐 GeoIP，并更新 `job.results`。
+- 前端最终拿到的测速结果会直接包含：
+  - `exit_ip`
+  - `geoip`
+
+验证：
+
+```text
+python -m pytest tests/test_api.py tests/test_tester.py -q -> 40 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## 自动分配端口后输入框被清空修复
 
 问题：

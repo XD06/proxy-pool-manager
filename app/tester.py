@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import re
 import socket
 import time
 from datetime import datetime, timezone
@@ -30,6 +32,8 @@ EXIT_IP_URLS = [
     "https://ident.me/",
 ]
 
+IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
 DEFAULT_VALIDATION_URLS = [
     PRIMARY_TEST_URL,
     "https://ipv4.webshare.io/",
@@ -47,6 +51,17 @@ def _fresh(cache: ExitIpCache, ttl_seconds: int = 60) -> bool:
     return (datetime.now(timezone.utc) - checked).total_seconds() < ttl_seconds
 
 
+def extract_public_ipv4(text: str) -> str | None:
+    for match in IPV4_PATTERN.findall(text or ""):
+        try:
+            ip = ipaddress.ip_address(match)
+        except ValueError:
+            continue
+        if ip.version == 4 and not ip.is_private and not ip.is_loopback and not ip.is_reserved:
+            return match
+    return None
+
+
 async def query_exit_ip(port: int, state: AppState, engine: EngineManager) -> ExitIpCache:
     cached = state.exit_ip_cache.get(str(port))
     if cached and _fresh(cached):
@@ -61,8 +76,10 @@ async def query_exit_ip(port: int, state: AppState, engine: EngineManager) -> Ex
                 async with httpx.AsyncClient(proxy=proxy, timeout=10) as client:
                     response = await client.get(url)
                     response.raise_for_status()
-                    ip = response.text.strip()
-                    return ExitIpCache(ip=ip)
+                    ip = extract_public_ipv4(response.text)
+                    if ip:
+                        return ExitIpCache(ip=ip)
+                    last_error = f"{url}: no public IPv4 in response"
             except Exception as exc:
                 last_error = str(exc)
     return ExitIpCache(ip=None, error=last_error or "exit IP query failed")
@@ -155,8 +172,10 @@ async def validate_proxy_port(
                     try:
                         candidate = await client.get(url)
                         candidate.raise_for_status()
-                        exit_ip = candidate.text.strip()
-                        break
+                        exit_ip = extract_public_ipv4(candidate.text)
+                        if exit_ip:
+                            break
+                        exit_error = f"{url}: no public IPv4 in response"
                     except Exception as exc:
                         exit_error = str(exc)
             return LatencyResult(

@@ -9,6 +9,7 @@ from app.tester import (
     PRIMARY_TEST_URL,
     _fetch_first_test_url,
     allocate_test_ports,
+    extract_public_ipv4,
     prune_same_exit_ip,
     sort_nodes_by_test_result,
 )
@@ -122,6 +123,12 @@ def test_default_validation_urls_include_exit_ip_and_google_targets():
     assert "https://ipv4.webshare.io/" in DEFAULT_VALIDATION_URLS
     assert "https://www.google.com/generate_204" in DEFAULT_VALIDATION_URLS
     assert "https://www.gstatic.com/generate_204" in DEFAULT_VALIDATION_URLS
+
+
+def test_extract_public_ipv4_ignores_empty_or_private_responses():
+    assert extract_public_ipv4("Found") is None
+    assert extract_public_ipv4("<html>127.0.0.1</html>") is None
+    assert extract_public_ipv4("ip=8.8.8.8\n") == "8.8.8.8"
 
 
 @pytest.mark.parametrize("primary_status", [500, 404])

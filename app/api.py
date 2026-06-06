@@ -716,6 +716,17 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     target_urls=target_urls,
                     include_exit_ip=prune_same_ip or include_geoip,
                 )
+                if include_geoip:
+                    ips = sorted({result.exit_ip for result in app_state.latency_cache.values() if result.exit_ip})
+                    for ip in ips:
+                        geoip = await enrich_geoip_now(ip)
+                        if not geoip:
+                            continue
+                        for tag, result in app_state.latency_cache.items():
+                            if result.exit_ip == ip:
+                                result.geoip = geoip
+                                if tag in job.results:
+                                    job.results[tag] = result.model_dump()
                 if prune_same_ip:
                     app_state.nodes, job.removed = prune_same_exit_ip(app_state.nodes, app_state.latency_cache)
                     kept_tags = {node.tag for node in app_state.nodes}
