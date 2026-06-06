@@ -55,8 +55,14 @@ function showNotice(message, tone = "info") {
 
 function latencyText(latency) {
   if (!latency) return "未测";
-  if (!latency.alive) return latency.error || "不可用";
+  if (!latency.alive) return "失败";
   return `${latency.delay ?? "-"}ms`;
+}
+
+function latencyTitle(latency) {
+  if (!latency) return "未测速";
+  if (!latency.alive) return latency.error || "不可用";
+  return targetResponseText(latency);
 }
 
 function latencyClass(latency) {
@@ -277,6 +283,7 @@ function renderNodeTable() {
           <th>服务器</th>
           <th>状态</th>
           <th>延迟</th>
+          <th>出口 IP</th>
           <th>地区</th>
           <th>目标结果</th>
         </tr>
@@ -291,7 +298,8 @@ function renderNodeTable() {
           <td data-label="协议">${escapeHtml(node.type)}</td>
           <td data-label="服务器"><span class="mono">${escapeHtml(node.server)}:${node.server_port}</span></td>
           <td data-label="状态">${nodeStatusBadge(node)}</td>
-          <td data-label="延迟"><span class="latency-pill ${latencyClass(node.latency)}">${escapeHtml(latencyText(node.latency))}</span></td>
+          <td data-label="延迟"><span class="latency-pill ${latencyClass(node.latency)}" title="${escapeHtml(latencyTitle(node.latency))}">${escapeHtml(latencyText(node.latency))}</span></td>
+          <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
           <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
           <td data-label="目标结果" class="result-preview">${escapeHtml(targetResponseText(node.latency))}</td>
         </tr>`).join("")}
@@ -382,7 +390,7 @@ function renderPortsTable() {
           <td data-label="节点">${escapeHtml(item.node_name || item.node_tag)}</td>
           <td data-label="协议">${escapeHtml(item.type || "-")}</td>
           <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
-          <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}">${escapeHtml(latencyText(item.latency))}</span></td>
+          <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}" title="${escapeHtml(latencyTitle(item.latency))}">${escapeHtml(latencyText(item.latency))}</span></td>
           <td data-label="验证结果" class="result-preview">${escapeHtml(targetResponseText(item.latency))}</td>
           <td data-label="ProxyAdmin">${proxyAdminPortSummary(port)}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>

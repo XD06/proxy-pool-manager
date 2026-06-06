@@ -1869,6 +1869,30 @@ python -m pytest -q -> 51 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## 节点测试表长错误和出口 IP 展示优化
+
+问题：
+
+```html
+<span class="latency-pill latency-unknown">http://cp.cloudflare.com/generate_204: HTTP 502; ...</span>
+```
+
+以及节点测试表只显示地区，看不到出口 IP。
+
+处理：
+
+- 延迟列失败时只显示 `失败`，不再把完整错误塞进小标签。
+- 完整错误保留在 `title`，鼠标悬停可查看。
+- 节点测试表新增 `出口 IP` 列。
+- 运行验证表的延迟列也加上相同的 hover 详情。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 64 passed
+```
+
 ## 节点测速出口 IP 和地区空白修复
 
 问题：
