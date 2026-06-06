@@ -2107,3 +2107,38 @@ GET /api/proxy/fastest?require_running=false
 python -m pytest -q -> 59 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 最快代理 API 状态同步修复
+
+问题：
+
+```text
+api 能正常运行但是无法拉取最新的引擎和最新节点信息
+```
+
+原因：
+
+- 服务启动时只加载一次 `config/assignments.json` 到内存。
+- 如果节点、映射、测速缓存被其他流程或重启后的新实例写入文件，当前进程里的 `/api/nodes`、`/api/ports`、`/api/proxy/fastest` 仍可能读取旧快照。
+- `/api/proxy/fastest` 之前只返回代理和简要节点字段，外部调用方无法直接看到本次选择时的引擎状态和完整节点摘要。
+
+处理：
+
+- 增加状态文件热同步：
+  - `GET /api/status`
+  - `GET /api/nodes`
+  - `GET /api/ports`
+  - `GET /api/proxy/fastest`
+- 读取接口执行前检查 `assignments.json` 修改时间；如果文件比内存新，就自动重载到当前进程。
+- `/api/proxy/fastest` 响应新增：
+  - `node`：完整节点摘要，不包含 sing-box outbound 原始配置。
+  - `engine`：当前引擎状态。
+  - `state_updated_at`：状态文件更新时间。
+  - `state_refreshed`：本次请求是否触发了状态文件重载。
+
+验证：
+
+```text
+python -m pytest tests/test_api.py -q -> 28 passed
+python -m compileall -q main.py app tests -> passed
+```

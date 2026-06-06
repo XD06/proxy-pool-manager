@@ -144,6 +144,7 @@ class ProxyAdminJob(BaseModel):
 def create_app(store: StateStore | None = None, engine: EngineManager | None = None) -> FastAPI:
     state_store = store or StateStore()
     app_state = state_store.load()
+    state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
     engine_manager = engine or EngineManager(SING_BOX_CONFIG_PATH)
     test_jobs: dict[str, TestJob] = {}
     test_job_lock = asyncio.Lock()
@@ -177,7 +178,23 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     def save() -> None:
+        nonlocal state_loaded_mtime_ns
         state_store.save(app_state)
+        state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
+
+    def refresh_state_from_disk() -> bool:
+        nonlocal state_loaded_mtime_ns
+        try:
+            mtime_ns = state_store.path.stat().st_mtime_ns
+        except OSError:
+            return False
+        if state_loaded_mtime_ns is not None and mtime_ns <= state_loaded_mtime_ns:
+            return False
+        fresh = state_store.load()
+        for field in AppState.model_fields:
+            setattr(app_state, field, getattr(fresh, field))
+        state_loaded_mtime_ns = mtime_ns
+        return True
 
     def load_app_config() -> dict:
         if not APP_CONFIG_PATH.exists():
@@ -638,6 +655,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.get("/api/status")
     async def status(request: Request):
+        refresh_state_from_disk()
         engine_status = engine_status_payload(request)
         return {
             "service": "ok",
@@ -670,6 +688,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.get("/api/nodes")
     async def nodes():
+        refresh_state_from_disk()
         return {
             "nodes": [
                 {
@@ -932,6 +951,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.get("/api/ports")
     async def ports():
+        refresh_state_from_disk()
         by_tag = node_by_tag()
         response = {}
         for port, mapping in app_state.port_mappings.items():
@@ -1084,6 +1104,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.get("/api/proxy/fastest")
     async def fastest_proxy(request: Request, scheme: str = "http", require_running: bool = True):
+        refreshed = refresh_state_from_disk()
         scheme = scheme.lower().strip()
         if scheme not in {"http", "socks5"}:
             raise HTTPException(status_code=400, detail="scheme must be http or socks5")
@@ -1122,11 +1143,15 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "node_tag": mapping.node_tag,
             "node_name": node.name if node else None,
             "type": node.type if node else None,
+            "node": node.model_dump(exclude={"outbound"}) if node else None,
             "delay": delay,
             "target_success_count": success_count,
             "exit_ip": exit_cache.ip if exit_cache else latency.exit_ip,
             "geoip": exit_cache.geoip if exit_cache else latency.geoip,
             "latency": attach_geoip_to_result(latency).model_dump(),
+            "engine": engine_status,
+            "state_updated_at": app_state.updated_at,
+            "state_refreshed": refreshed,
         }
 
     @app.post("/api/start")

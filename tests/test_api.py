@@ -7,7 +7,7 @@ import time
 
 from app import api as api_module
 from app.api import create_app
-from app.models import EngineStatus, ExitIpCache, GeoIpResult, LatencyResult
+from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, LatencyResult, PortMapping, ProxyNode
 from app.store import StateStore
 
 
@@ -441,6 +441,38 @@ def test_api_fastest_proxy_returns_best_alive_mapping(tmp_path):
     assert payload["scheme"] == "socks5"
     assert payload["proxy"] == "socks5://proxy.example.com:8002"
     assert payload["target_success_count"] == 2
+    assert payload["engine"]["running"] is False
+    assert payload["node"]["name"] == "B"
+
+
+def test_api_fastest_proxy_refreshes_latest_state_from_disk(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app, base_url="http://proxy.example.com:9000")
+    node = ProxyNode(
+        tag="node-vless-latest",
+        name="latest-node",
+        type="vless",
+        server="latest.example.com",
+        server_port=443,
+        outbound={"type": "vless", "tag": "node-vless-latest", "server": "latest.example.com", "server_port": 443},
+    )
+    time.sleep(0.01)
+    store.save(
+        AppState(
+            nodes=[node],
+            port_mappings={"8008": PortMapping(node_tag=node.tag)},
+            latency_cache={node.tag: LatencyResult(alive=True, delay=88)},
+        )
+    )
+
+    response = client.get("/api/proxy/fastest?require_running=false")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["port"] == 8008
+    assert payload["node_name"] == "latest-node"
+    assert payload["state_refreshed"] is True
 
 
 def test_api_fastest_proxy_requires_ready_engine_by_default(tmp_path):
