@@ -1869,6 +1869,40 @@ python -m pytest -q -> 51 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## 临时测速端口占用修复
+
+问题：
+
+```text
+Ports are not available: 19001, 19002, ...
+```
+
+说明：
+
+- `19001+` 不是用户分配给账号使用的映射端口。
+- 它们是节点测速时临时 sing-box 使用的内部端口。
+- 正常情况下测速完成后会自动停止，不应该长期占用。
+
+原因：
+
+- 如果上一次测速的临时 sing-box 残留，下一次测速可能遇到 `19001+` 占用。
+- 原端口探测只检查单一绑定场景，和 sing-box 启动前的端口检查不完全一致，可能误判端口可用。
+
+处理：
+
+- 每次节点测速前，先清理 `sing-box-test.json` 对应的残留临时 sing-box。
+- 测速临时端口分配时同时检查：
+  - `0.0.0.0`
+  - `127.0.0.1`
+- 如果某个 `19001+` 被占用，会自动跳过，不会影响用户映射端口池。
+
+验证：
+
+```text
+python -m pytest tests/test_tester.py tests/test_api.py -q -> 40 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## 节点测试表长错误和出口 IP 展示优化
 
 问题：

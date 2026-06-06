@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .engine import EngineManager
+from .engine import EngineManager, _can_bind_tcp_port
 from .generator import generate_config
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping, ProxyNode
 from .settings import SING_BOX_TEST_CONFIG_PATH, TEST_START_PORT
@@ -271,13 +271,14 @@ async def _fetch_first_test_url(client, urls: list[str]) -> dict:
 
 
 def _port_is_free(port: int) -> bool:
+    if not _can_bind_tcp_port(port):
+        return False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port))
         except OSError:
             return False
-        return True
+    return True
 
 
 def allocate_test_ports(count: int, start_port: int = TEST_START_PORT) -> list[int]:
@@ -301,6 +302,8 @@ async def test_nodes_with_temporary_engine(
 ) -> dict[str, LatencyResult]:
     if not nodes:
         return {}
+    cleanup_engine = EngineManager(SING_BOX_TEST_CONFIG_PATH)
+    await cleanup_engine.stop(SING_BOX_TEST_CONFIG_PATH)
     ports = allocate_test_ports(len(nodes))
     mappings = {
         str(ports[index]): PortMapping(node_tag=node.tag)
@@ -315,7 +318,7 @@ async def test_nodes_with_temporary_engine(
     SING_BOX_TEST_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     SING_BOX_TEST_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    engine = EngineManager()
+    engine = EngineManager(SING_BOX_TEST_CONFIG_PATH)
     try:
         await engine.start(SING_BOX_TEST_CONFIG_PATH, check=False, settle_seconds=0.35)
         async def run_one(tag: str, port: int):
