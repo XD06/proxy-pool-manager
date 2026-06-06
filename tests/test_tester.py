@@ -1,7 +1,17 @@
 from app.models import LatencyResult, ProxyNode
 import socket
 
-from app.tester import DEFAULT_VALIDATION_URLS, allocate_test_ports, prune_same_exit_ip, sort_nodes_by_test_result
+import asyncio
+import pytest
+
+from app.tester import (
+    DEFAULT_VALIDATION_URLS,
+    PRIMARY_TEST_URL,
+    _fetch_first_test_url,
+    allocate_test_ports,
+    prune_same_exit_ip,
+    sort_nodes_by_test_result,
+)
 
 
 def _node(tag, name):
@@ -73,6 +83,31 @@ def test_allocate_test_ports_skips_occupied_port():
 
 
 def test_default_validation_urls_include_exit_ip_and_google_targets():
+    assert DEFAULT_VALIDATION_URLS[0] == PRIMARY_TEST_URL
+    assert "http://cp.cloudflare.com/generate_204" in DEFAULT_VALIDATION_URLS
     assert "https://ipv4.webshare.io/" in DEFAULT_VALIDATION_URLS
     assert "https://www.google.com/generate_204" in DEFAULT_VALIDATION_URLS
     assert "https://www.gstatic.com/generate_204" in DEFAULT_VALIDATION_URLS
+
+
+@pytest.mark.parametrize("primary_status", [500, 404])
+def test_fetch_first_test_url_falls_back(primary_status):
+    class FakeResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.text = ""
+
+    class FakeClient:
+        def __init__(self):
+            self.urls = []
+
+        async def get(self, url):
+            self.urls.append(url)
+            return FakeResponse(primary_status if len(self.urls) == 1 else 204)
+
+    client = FakeClient()
+    result = asyncio.run(_fetch_first_test_url(client, ["https://bad.example", PRIMARY_TEST_URL]))
+
+    assert result["url"] == PRIMARY_TEST_URL
+    assert result["status_code"] == 204
+    assert "switched" in result["fallback_notice"]

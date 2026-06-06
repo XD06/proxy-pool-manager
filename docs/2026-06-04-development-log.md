@@ -1868,3 +1868,81 @@ node --check static/app.js -> passed
 python -m pytest -q -> 51 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## GeoIP 覆盖率与布局修复
+
+用户反馈：
+
+```text
+地区很多没有显示，7 个只有 1 个显示了地区；结果太长破坏布局。
+```
+
+原因：
+
+- 端口验证自定义 URL 时，如果目标页面不是 IP 查询接口，响应体里不会包含出口 IP。
+- 没有出口 IP 就无法查询 GeoIP，所以只有之前查过出口 IP 或命中缓存的少数端口显示地区。
+- 前端直接显示完整地区、ASN、运营商文本，容易撑宽表格。
+
+处理：
+
+- 端口验证成功但没有解析到出口 IP 时，兜底调用已有出口 IP 查询逻辑。
+- 兜底查询增加 3 秒超时，避免某个端口拖慢整个批量验证。
+- `/api/ports` 发现已有出口 IP 但没有 GeoIP 时，会触发后台补查。
+- GeoIP 结果增加：
+  - `summary`：完整说明，用于 hover title。
+  - `compact`：短格式，用于表格显示。
+- 前端地区列改成短标签，例如：
+  - `US · Mountain View · Google`
+  - `JP · Tokyo`
+  - `未知`
+- CSS 限制地区标签最大宽度，超出省略，完整信息放 hover。
+- 静态资源版本更新为：
+  - `20260606-geoip-compact-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 52 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## Cloudflare 204 主测速与自动回退
+
+用户提供新测速命令：
+
+```text
+curl -o /dev/null -s -w "... timing ..." http://cp.cloudflare.com/generate_204
+```
+
+验证：
+
+- 当前机器直连 `http://cp.cloudflare.com/generate_204`：
+  - HTTP 204
+  - total 约 0.44s
+- 当前机器直连旧 `https://www.gstatic.com/generate_204`：
+  - HTTP 000
+  - 该环境下不如 Cloudflare 稳定
+
+处理：
+
+- 新增主测速 URL：
+  - `http://cp.cloudflare.com/generate_204`
+- 节点测速默认顺序改为：
+  - Cloudflare 204
+  - gstatic 204
+  - Google 204
+- 默认端口验证 URL 把 Cloudflare 204 放到第一位。
+- 如果主测速 URL 失败：
+  - 自动尝试备用 URL。
+  - 控制台输出 `[测速] primary test URL failed; switched to ...`。
+  - 返回结果记录 fallback notice，便于排查。
+- 自定义 URL 不使用 fallback，保持用户指定目标的精确验证语义。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 54 passed
+python -m compileall -q main.py app tests -> passed
+```

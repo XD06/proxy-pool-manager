@@ -12,12 +12,14 @@ let proxyAdminConfigLoaded = false;
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 
 const DEFAULT_VALIDATION_URLS = [
+  "http://cp.cloudflare.com/generate_204",
   "https://ipv4.webshare.io/",
   "https://www.google.com/generate_204",
   "https://www.gstatic.com/generate_204",
   "https://www.cloudflare.com/cdn-cgi/trace"
 ];
 const EXIT_IP_CHECK_URL = "https://ipv4.webshare.io/";
+const GEOIP_CHIP_STYLE = "display:inline-block;max-width:150px;overflow:hidden;color:#3f5e52;font-size:12px;text-overflow:ellipsis;vertical-align:middle;white-space:nowrap";
 
 const $ = (id) => document.getElementById(id);
 
@@ -80,6 +82,7 @@ function targetResponseText(latency) {
 
 function geoIpSummary(geoip) {
   if (!geoip) return "";
+  if (geoip.summary) return geoip.summary;
   if (geoip.error) return "地区未知";
   return [
     geoip.country_code || geoip.country,
@@ -89,12 +92,35 @@ function geoIpSummary(geoip) {
   ].filter(Boolean).join(" · ");
 }
 
+function geoIpCompact(geoip) {
+  if (!geoip) return "";
+  if (geoip.compact) return geoip.compact;
+  if (geoip.error) return "未知";
+  const org = String(geoip.org || geoip.isp || "")
+    .replace("Corporation", "")
+    .replace("Limited", "")
+    .replace("Ltd.", "")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .join(" ");
+  return [
+    geoip.country_code || geoip.country,
+    geoip.city || geoip.region,
+    org
+  ].filter(Boolean).join(" · ");
+}
+
 function geoIpForItem(item) {
   return item?.geoip || item?.latency?.geoip || null;
 }
 
 function geoIpText(item) {
-  return geoIpSummary(geoIpForItem(item)) || "-";
+  return geoIpCompact(geoIpForItem(item)) || "-";
+}
+
+function geoIpTitle(item) {
+  return geoIpSummary(geoIpForItem(item)) || geoIpText(item);
 }
 
 function statusBadge(latency) {
@@ -108,22 +134,47 @@ function nodeStatusBadge(node) {
   return statusBadge(node.latency);
 }
 
+// function renderSummary() {
+//   if (!statusSnapshot.running) {
+//     $("engineState").textContent = "未运行";
+//   } else if (statusSnapshot.config_matches_state === false) {
+//     const configured = statusSnapshot.config_ports?.length || 0;
+//     const expected = statusSnapshot.expected_ports?.length || 0;
+//     $("engineState").textContent = `配置不一致 #${statusSnapshot.pid} ${configured}/${expected}`;
+//   } else if (statusSnapshot.ready === false) {
+//     const listening = statusSnapshot.listening_ports?.length || 0;
+//     const expected = statusSnapshot.expected_ports?.length || 0;
+//     $("engineState").textContent = `启动中 #${statusSnapshot.pid} ${listening}/${expected}`;
+//   } else {
+//     $("engineState").textContent = `运行中 #${statusSnapshot.pid}`;
+//   }
+//   $("nodeCount").textContent = String(statusSnapshot.node_count ?? nodes.length);
+//   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
+// }
+
+
 function renderSummary() {
   if (!statusSnapshot.running) {
     $("engineState").textContent = "未运行";
+    $("engineState").style.color = "#999";              // 灰色
   } else if (statusSnapshot.config_matches_state === false) {
     const configured = statusSnapshot.config_ports?.length || 0;
     const expected = statusSnapshot.expected_ports?.length || 0;
-    $("engineState").textContent = `配置不一致 #${statusSnapshot.pid} ${configured}/${expected}`;
+    $("engineState").textContent = `配置不一致restart #${statusSnapshot.pid} ${configured}/${expected}`;
+    $("engineState").style.color = "#e74c3c";            // 红色
   } else if (statusSnapshot.ready === false) {
     const listening = statusSnapshot.listening_ports?.length || 0;
     const expected = statusSnapshot.expected_ports?.length || 0;
     $("engineState").textContent = `启动中 #${statusSnapshot.pid} ${listening}/${expected}`;
+    $("engineState").style.color = "#3498db";            // 蓝色
   } else {
     $("engineState").textContent = `运行中 #${statusSnapshot.pid}`;
+    $("engineState").style.color = "#2ecc71";            // 绿色
   }
   $("nodeCount").textContent = String(statusSnapshot.node_count ?? nodes.length);
+  $("nodeCount").style.color = $("engineState").style.color; // 节点数大于0显示绿色，否则红色
   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
+  $("mappingCount").style.color = $("engineState").style.color; // 映射数大于0显示绿色，否则红色
 }
 
 function proxyConnectHost() {
@@ -166,7 +217,7 @@ function renderNodeTable() {
           <td data-label="服务器"><span class="mono">${escapeHtml(node.server)}:${node.server_port}</span></td>
           <td data-label="状态">${nodeStatusBadge(node)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(node.latency)}">${escapeHtml(latencyText(node.latency))}</span></td>
-          <td data-label="地区">${escapeHtml(geoIpText(node.latency))}</td>
+          <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
           <td data-label="目标结果" class="result-preview">${escapeHtml(targetResponseText(node.latency))}</td>
         </tr>`).join("")}
       </tbody>
@@ -204,7 +255,7 @@ function renderAssignTable() {
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
           <td data-label="节点">${escapeHtml(node.name)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
-          <td data-label="地区">${escapeHtml(geoIpText(node.latency))}</td>
+          <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
           <td data-label="状态">${statusBadge(node.latency)}</td>
         </tr>`;
       }).join("")}</tbody>
@@ -250,7 +301,7 @@ function renderPortsTable() {
           <td data-label="验证结果" class="result-preview">${escapeHtml(targetResponseText(item.latency))}</td>
           <td data-label="ProxyAdmin">${proxyAdminPortSummary(port)}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
-          <td data-label="地区" id="geo-${port}">${escapeHtml(geoIpText(item))}</td>
+          <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" id="geo-${port}" title="${escapeHtml(geoIpTitle(item))}">${escapeHtml(geoIpText(item))}</span></td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
           <td data-label="操作">
             <button data-ip-port="${port}">查出口</button>
@@ -269,10 +320,13 @@ function renderPortsTable() {
         const result = await request(`/api/ports/${port}/ip`);
         $("ip-" + port).textContent = result.exit_ip || result.error || "失败";
         const geoCell = $("geo-" + port);
-        if (geoCell) geoCell.textContent = result.geoip_summary || geoIpSummary(result.geoip) || "-";
+        if (geoCell) {
+          geoCell.textContent = result.geoip_compact || geoIpCompact(result.geoip) || "-";
+          geoCell.title = result.geoip_summary || geoIpSummary(result.geoip) || geoCell.textContent;
+        }
         showQuickResult(
           `端口 ${port}`,
-          result.exit_ip ? `出口 IP：${result.exit_ip}；地区：${result.geoip_summary || geoIpSummary(result.geoip) || "-"}` : `失败：${result.error || "未知错误"}`,
+          result.exit_ip ? `出口 IP：${result.exit_ip}；地区：${result.geoip_compact || geoIpCompact(result.geoip) || "-"}` : `失败：${result.error || "未知错误"}`,
           Boolean(result.exit_ip)
         );
         await refresh();

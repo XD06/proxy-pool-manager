@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from .engine import EngineError, EngineManager
 from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config
-from .geoip import geoip_summary, lookup_geoip
+from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping
 from .parser import import_nodes
 from .settings import (
@@ -203,9 +203,17 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         result = app_state.geoip_cache.get(ip)
         return result.model_dump() if result else None
 
+    def geoip_payload_with_summaries(ip: str | None) -> dict | None:
+        payload = geoip_payload(ip)
+        if not payload:
+            return None
+        payload["summary"] = geoip_summary(payload)
+        payload["compact"] = geoip_compact_summary(payload)
+        return payload
+
     def attach_geoip_to_result(result: LatencyResult) -> LatencyResult:
         if result.exit_ip:
-            cached = geoip_payload(result.exit_ip)
+            cached = geoip_payload_with_summaries(result.exit_ip)
             if cached:
                 result.geoip = cached
         return result
@@ -213,7 +221,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     def enrich_result_dict(result: dict) -> dict:
         exit_ip = result.get("exit_ip")
         if exit_ip and not result.get("geoip"):
-            cached = geoip_payload(exit_ip)
+            cached = geoip_payload_with_summaries(exit_ip)
             if cached:
                 result["geoip"] = cached
         return result
@@ -242,12 +250,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     )
                 for latency in app_state.latency_cache.values():
                     if latency.exit_ip == ip:
-                        cached_result = geoip_payload(ip)
+                        cached_result = geoip_payload_with_summaries(ip)
                         if cached_result:
                             latency.geoip = cached_result
                 for cache in app_state.exit_ip_cache.values():
                     if cache.ip == ip:
-                        cache.geoip = geoip_payload(ip)
+                        cache.geoip = geoip_payload_with_summaries(ip)
                 save()
             finally:
                 geoip_tasks.pop(ip, None)
@@ -264,7 +272,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             ttl_hours=config.cache_ttl_hours,
             enabled=config.enabled,
         )
-        return result.model_dump() if result else None
+        if not result:
+            return None
+        payload = result.model_dump()
+        payload["summary"] = geoip_summary(payload)
+        payload["compact"] = geoip_compact_summary(payload)
+        return payload
 
     def node_by_tag():
         return {node.tag: node for node in app_state.nodes}
@@ -571,9 +584,15 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         first_ok = ok_targets[0] if ok_targets else None
         first_target = first_ok or (target_results[0] if target_results else None)
         exit_ip = _extract_ip_from_targets(target_results)
-        geoip = geoip_payload(exit_ip)
-        if exit_ip and not geoip:
-            schedule_geoip_lookup(exit_ip)
+        if not exit_ip and first_ok:
+            try:
+                exit_result = await asyncio.wait_for(query_exit_ip(port, app_state, engine_manager), timeout=3.0)
+                exit_ip = exit_result.ip
+                if exit_ip:
+                    app_state.exit_ip_cache[str(port)] = exit_result
+            except Exception:
+                exit_ip = None
+        geoip = await enrich_geoip_now(exit_ip) if exit_ip else None
         result = {
             "alive": bool(first_ok),
             "delay": first_ok.get("elapsed_ms") if first_ok else None,
@@ -597,7 +616,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if tag in node_by_tag():
             app_state.latency_cache[tag] = LatencyResult.model_validate(result)
         if port and detail and detail.get("exit_ip"):
-            geoip = geoip_payload(detail["exit_ip"])
+            geoip = geoip_payload_with_summaries(detail["exit_ip"])
             if geoip:
                 detail["geoip"] = geoip
             app_state.exit_ip_cache[str(port)] = ExitIpCache(ip=detail["exit_ip"], geoip=geoip, error=None)
@@ -909,12 +928,21 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         for port, mapping in app_state.port_mappings.items():
             node = by_tag.get(mapping.node_tag)
             latency = app_state.latency_cache.get(mapping.node_tag)
+            exit_cache = app_state.exit_ip_cache.get(port)
+            exit_ip = exit_cache.ip if exit_cache else None
+            geoip = exit_cache.geoip if exit_cache else None
+            if exit_ip and not geoip:
+                geoip = geoip_payload_with_summaries(exit_ip)
+                if geoip and exit_cache:
+                    exit_cache.geoip = geoip
+                else:
+                    schedule_geoip_lookup(exit_ip)
             response[port] = {
                 "node_tag": mapping.node_tag,
                 "node_name": node.name if node else None,
                 "type": node.type if node else None,
-                "exit_ip": app_state.exit_ip_cache.get(port).ip if port in app_state.exit_ip_cache else None,
-                "geoip": app_state.exit_ip_cache.get(port).geoip if port in app_state.exit_ip_cache else None,
+                "exit_ip": exit_ip,
+                "geoip": geoip,
                 "latency": attach_geoip_to_result(latency).model_dump() if latency else None,
             }
         return {"ports": response}
@@ -1041,6 +1069,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "exit_ip": result.ip,
             "geoip": geoip,
             "geoip_summary": geoip_summary(geoip),
+            "geoip_compact": geoip_compact_summary(geoip),
             "error": result.error,
         }
 

@@ -466,7 +466,7 @@ code {
 
 .latency-unknown {
   background: #eef1f0;
-  color: var(--muted);
+  color: red;
   font-weight: 650;
 }
 
@@ -985,4 +985,7 @@ code {
   td[data-label="操作"] {
     grid-template-columns: 1fr;
   }
+}
+th{
+  text-align: center;
 }

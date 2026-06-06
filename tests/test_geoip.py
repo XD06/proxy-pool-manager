@@ -1,6 +1,6 @@
 import asyncio
 
-from app.geoip import geoip_summary, lookup_geoip
+from app.geoip import geoip_compact_summary, geoip_summary, lookup_geoip
 from app.models import AppState, GeoIpResult
 
 
@@ -25,3 +25,4 @@ def test_geoip_summary_prefers_compact_fields():
     )
 
     assert geoip_summary(result) == "US · Mountain View · AS15169 · Google"
+    assert geoip_compact_summary(result) == "US · Mountain View · Google"

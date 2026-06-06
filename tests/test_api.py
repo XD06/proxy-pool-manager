@@ -558,6 +558,56 @@ def test_api_test_ports_uses_only_custom_urls(tmp_path, monkeypatch):
     assert ports["8001"]["latency"]["delay"] == 88
 
 
+def test_api_test_ports_falls_back_to_exit_ip_for_geoip(tmp_path, monkeypatch):
+    async def fake_validate_proxy_targets(port, urls=None):
+        return [
+            {
+                "url": urls[0],
+                "ok": True,
+                "status_code": 204,
+                "elapsed_ms": 88,
+                "body_preview": "",
+                "error": None,
+            }
+        ]
+
+    async def fake_query_exit_ip(port, state, engine):
+        return ExitIpCache(ip="8.8.8.8")
+
+    async def fake_lookup_geoip(ip, state, **kwargs):
+        result = GeoIpResult(ip=ip, country="United States", country_code="US", city="Mountain View", asn="AS15169", org="Google")
+        state.geoip_cache[ip] = result
+        return result
+
+    monkeypatch.setattr(api_module, "validate_proxy_targets", fake_validate_proxy_targets)
+    monkeypatch.setattr(api_module, "query_exit_ip", fake_query_exit_ip)
+    monkeypatch.setattr(api_module, "lookup_geoip", fake_lookup_geoip)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#US"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+    client.put("/api/assign", json={"mappings": {"8001": tag}})
+
+    response = client.post("/api/test-ports", json={"urls": ["https://custom.example.com/check"]})
+
+    assert response.status_code == 200
+    detail = response.json()["details"]["8001"]
+    assert detail["exit_ip"] == "8.8.8.8"
+    assert detail["geoip"]["country_code"] == "US"
+    ports = client.get("/api/ports").json()["ports"]
+    assert ports["8001"]["geoip"]["compact"] == "US · Mountain View · Google"
+
+
 def test_api_assign_restarts_running_engine(tmp_path):
     store = StateStore(tmp_path / "assignments.json")
     engine = RestartingEngine()
@@ -695,7 +745,11 @@ def test_api_progressive_port_test_job(tmp_path, monkeypatch):
             }
         ]
 
+    async def fake_query_exit_ip(port, state, engine):
+        return ExitIpCache(ip=None, error="not checked")
+
     monkeypatch.setattr(api_module, "validate_proxy_targets", fake_validate_proxy_targets)
+    monkeypatch.setattr(api_module, "query_exit_ip", fake_query_exit_ip)
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=RunningEngine())
     client = TestClient(app)

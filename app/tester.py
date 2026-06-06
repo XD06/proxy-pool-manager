@@ -14,6 +14,13 @@ from .models import AppState, ExitIpCache, LatencyResult, PortMapping, ProxyNode
 from .settings import SING_BOX_TEST_CONFIG_PATH, TEST_START_PORT
 
 
+PRIMARY_TEST_URL = "http://cp.cloudflare.com/generate_204"
+FALLBACK_TEST_URLS = [
+    PRIMARY_TEST_URL,
+    "https://www.gstatic.com/generate_204",
+    "https://www.google.com/generate_204",
+]
+
 EXIT_IP_URLS = [
     "https://ipv4.webshare.io/",
     "https://api.ipify.org?format=text",
@@ -24,6 +31,7 @@ EXIT_IP_URLS = [
 ]
 
 DEFAULT_VALIDATION_URLS = [
+    PRIMARY_TEST_URL,
     "https://ipv4.webshare.io/",
     "https://www.google.com/generate_204",
     "https://www.gstatic.com/generate_204",
@@ -61,14 +69,18 @@ async def query_exit_ip(port: int, state: AppState, engine: EngineManager) -> Ex
 
 
 async def measure_port_latency(port: int) -> LatencyResult:
-    started = time.perf_counter()
     proxy = f"socks5://127.0.0.1:{port}"
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=8) as client:
-            response = await client.get("https://www.gstatic.com/generate_204")
-            response.raise_for_status()
-        elapsed = int((time.perf_counter() - started) * 1000)
-        return LatencyResult(alive=True, delay=max(elapsed, 1))
+            result = await _fetch_first_test_url(client, FALLBACK_TEST_URLS)
+        return LatencyResult(
+            alive=True,
+            delay=result["elapsed_ms"],
+            target_url=result["url"],
+            status_code=result["status_code"],
+            body_preview=result["body_preview"],
+            error=result.get("fallback_notice"),
+        )
     except Exception as exc:
         return LatencyResult(alive=False, delay=None, error=str(exc))
 
@@ -113,17 +125,14 @@ async def validate_proxy_port(
     include_exit_ip: bool = False,
 ) -> LatencyResult:
     proxy = f"http://127.0.0.1:{port}"
-    test_url = target_url or "https://www.gstatic.com/generate_204"
+    test_urls = [target_url] if target_url else FALLBACK_TEST_URLS
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=5, follow_redirects=False) as client:
-            response = await client.get(test_url)
-            elapsed = int((time.perf_counter() - started) * 1000)
-            body = response.text.strip().replace("\r", "")[:160]
-            alive = 200 <= response.status_code < 400
+            result = await _fetch_first_test_url(client, test_urls)
             exit_ip = None
             exit_error = None
-            if alive and include_exit_ip:
+            if include_exit_ip:
                 for url in EXIT_IP_URLS:
                     try:
                         candidate = await client.get(url)
@@ -133,16 +142,15 @@ async def validate_proxy_port(
                     except Exception as exc:
                         exit_error = str(exc)
             return LatencyResult(
-                alive=alive,
-                delay=max(elapsed, 1) if alive else None,
+                alive=True,
+                delay=result["elapsed_ms"],
                 exit_ip=exit_ip,
                 test_port=port,
-                target_url=target_url,
-                status_code=response.status_code,
-                body_preview=body if target_url else None,
-                error=(exit_error if include_exit_ip and alive and not exit_ip else None)
-                if alive
-                else f"HTTP {response.status_code}",
+                target_url=result["url"],
+                status_code=result["status_code"],
+                body_preview=result["body_preview"] if target_url else None,
+                error=(exit_error if include_exit_ip and not exit_ip else None)
+                or result.get("fallback_notice"),
             )
     except Exception as exc:
         return LatencyResult(
@@ -152,6 +160,32 @@ async def validate_proxy_port(
             target_url=target_url,
             error=str(exc),
         )
+
+
+async def _fetch_first_test_url(client, urls: list[str]) -> dict:
+    errors: list[str] = []
+    for index, url in enumerate(urls):
+        started = time.perf_counter()
+        try:
+            response = await client.get(url)
+            elapsed = int((time.perf_counter() - started) * 1000)
+            body = response.text.strip().replace("\r", "")[:160]
+            if 200 <= response.status_code < 400:
+                notice = None
+                if index > 0:
+                    notice = f"primary test URL failed; switched to {url}"
+                    print(f"[测速] {notice}")
+                return {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "elapsed_ms": max(elapsed, 1),
+                    "body_preview": body,
+                    "fallback_notice": notice,
+                }
+            errors.append(f"{url}: HTTP {response.status_code}")
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError("; ".join(errors) or "all test URLs failed")
 
 
 def _port_is_free(port: int) -> bool:

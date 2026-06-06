@@ -42,6 +42,23 @@ def geoip_summary(result: GeoIpResult | dict | None) -> str:
     return " · ".join(str(part) for part in parts if part)
 
 
+def geoip_compact_summary(result: GeoIpResult | dict | None) -> str:
+    if not result:
+        return ""
+    data = result.model_dump() if isinstance(result, GeoIpResult) else result
+    if data.get("error"):
+        return "未知"
+    org = data.get("org") or data.get("isp") or ""
+    org = str(org).replace("Corporation", "").replace("Limited", "").replace("Ltd.", "").strip()
+    org = " ".join(org.split()[:2])
+    parts = [
+        data.get("country_code") or data.get("country"),
+        data.get("city") or data.get("region"),
+        org,
+    ]
+    return " · ".join(str(part) for part in parts if part)
+
+
 async def lookup_geoip(
     ip: str | None,
     state: AppState,
