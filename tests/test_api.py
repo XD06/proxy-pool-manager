@@ -548,6 +548,8 @@ def test_api_port_allocate_skips_busy_and_clash_ports(tmp_path, monkeypatch):
 
 
 def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
+    created = []
+
     class FakeResponse:
         def __init__(self, payload):
             self.payload = payload
@@ -569,8 +571,22 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
             return None
 
         async def request(self, method, url, headers=None, json=None):
-            if url.endswith("/api/v1/admin/proxies/batch"):
-                return FakeResponse({"code": 0, "message": "ok", "data": {}})
+            if method == "POST" and url.endswith("/api/v1/admin/proxies"):
+                created.append(json)
+                proxy_id = 500 + len(created)
+                return FakeResponse(
+                    {
+                        "code": 0,
+                        "message": "ok",
+                        "data": {
+                            "id": proxy_id,
+                            "name": json["name"],
+                            "protocol": json["protocol"],
+                            "host": json["host"],
+                            "port": json["port"],
+                        },
+                    }
+                )
             if "/api/v1/admin/proxies?page=" in url:
                 return FakeResponse(
                     {
@@ -608,6 +624,21 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
     app = create_app(store=store, engine=StoppedEngine())
 
     with TestClient(app) as client:
+        imported = client.post(
+            "/api/import",
+            json={
+                "text": "\n".join(
+                    [
+                        "vless://00000000-0000-0000-0000-000000000001@example-a.com:443?security=tls#A",
+                        "vless://00000000-0000-0000-0000-000000000002@example-b.com:443?security=tls#B",
+                    ]
+                )
+            },
+        )
+        tags = [node["tag"] for node in imported.json()["nodes"]]
+        assigned = client.put("/api/assign", json={"mappings": {"18001": tags[0], "18002": tags[1]}})
+        assert assigned.status_code == 200
+
         started = client.post(
             "/api/proxy-admin/check/start",
             json={
@@ -631,6 +662,7 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
         assert payload["status"] == "done"
         assert payload["completed"] == 2
         assert payload["results"]["501"]["items"][0]["status"] == "pass"
+        assert {item["name"] for item in created} == {"代理1", "代理2"}
 
 
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
@@ -704,6 +736,7 @@ def test_api_proxy_admin_config_persists_without_dropping_app_settings(tmp_path)
             "proxy_host": "43.156.235.29",
             "replace_from": "127.0.0.1",
             "replace_to": "172.17.0.1",
+            "proxy_name_prefix": "测试代理",
             "concurrency": 12,
         },
     )
@@ -714,6 +747,7 @@ def test_api_proxy_admin_config_persists_without_dropping_app_settings(tmp_path)
     config = json.loads(api_module.APP_CONFIG_PATH.read_text(encoding="utf-8"))
     assert config["host"] == "0.0.0.0"
     assert config["proxy_admin"]["concurrency"] == 12
+    assert config["proxy_admin"]["proxy_name_prefix"] == "测试代理"
 
 
 def test_api_test_ports_uses_only_custom_urls(tmp_path, monkeypatch):

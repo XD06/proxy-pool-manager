@@ -604,6 +604,7 @@ function proxyAdminPayload(extra = {}) {
     proxy_host: $("proxyAdminHost").value.trim() || null,
     replace_from: $("proxyAdminReplaceFrom").value.trim() || null,
     replace_to: $("proxyAdminReplaceTo").value.trim() || null,
+    proxy_name_prefix: $("proxyAdminNamePrefix").value.trim() || "代理",
     concurrency: Number($("proxyAdminConcurrency").value || 10),
     ...extra
   };
@@ -689,6 +690,7 @@ async function loadProxyAdminConfig() {
     $("proxyAdminHost").value = config.proxy_host || "";
     $("proxyAdminReplaceFrom").value = config.replace_from || "127.0.0.1";
     $("proxyAdminReplaceTo").value = config.replace_to || "";
+    $("proxyAdminNamePrefix").value = config.proxy_name_prefix || "代理";
     $("proxyAdminConcurrency").value = config.concurrency || 10;
   } catch {
     proxyAdminConfigLoaded = false;
@@ -703,6 +705,7 @@ async function saveProxyAdminConfig() {
     proxy_host: payload.proxy_host || "",
     replace_from: payload.replace_from || "127.0.0.1",
     replace_to: payload.replace_to || "",
+    proxy_name_prefix: payload.proxy_name_prefix || "代理",
     concurrency: payload.concurrency || 10
   };
   await request("/api/proxy-admin/config", {

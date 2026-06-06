@@ -84,6 +84,7 @@ class ProxyAdminRequest(BaseModel):
     proxy_host: str | None = None
     replace_from: str | None = None
     replace_to: str | None = None
+    proxy_name_prefix: str | None = "代理"
     ports: list[int] | None = None
     concurrency: int = 10
 
@@ -102,6 +103,7 @@ class ProxyAdminConfig(BaseModel):
     proxy_host: str = ""
     replace_from: str = "127.0.0.1"
     replace_to: str = ""
+    proxy_name_prefix: str = "代理"
     concurrency: int = 10
 
 
@@ -441,14 +443,16 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         host = (payload.proxy_host or proxy_connect_host(request)).strip()
         replace_from = (payload.replace_from or "").strip()
         replace_to = (payload.replace_to or "").strip()
+        name_prefix = (payload.proxy_name_prefix or "代理").strip() or "代理"
         items = []
-        for port in selected_ports:
+        for index, port in enumerate(selected_ports, start=1):
             export_host = replace_to if replace_from and replace_to and host == replace_from else host
             items.append(
                 {
                     "url": f"http://{host}:{port}",
                     "host": export_host,
                     "port": int(port),
+                    "name": f"{name_prefix}{index}",
                 }
             )
         return items
@@ -489,29 +493,38 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def proxy_admin_import(payload: ProxyAdminRequest, items: list[dict]) -> list[dict]:
         if not items:
             return []
-        await proxy_admin_api(
-            payload,
-            "POST",
-            "/api/v1/admin/proxies/batch",
-            {
-                "proxies": [
+        results: list[dict | None] = [None] * len(items)
+        idx = 0
+        concurrency = max(1, min(payload.concurrency, 10, len(items)))
+
+        async def worker():
+            nonlocal idx
+            while idx < len(items):
+                current = idx
+                idx += 1
+                item = items[current]
+                data = await proxy_admin_api(
+                    payload,
+                    "POST",
+                    "/api/v1/admin/proxies",
                     {
+                        "name": item["name"],
                         "protocol": "http",
                         "host": item["host"],
                         "port": item["port"],
                         "username": "",
                         "password": "",
-                    }
-                    for item in items
-                ]
-            },
-        )
-        proxy_map = await proxy_admin_list_all(payload)
-        imported = []
-        for item in items:
-            proxy = proxy_map.get(f"{item['host']}:{item['port']}") or {}
-            imported.append({**item, "id": int(proxy.get("id") or 0)})
-        return imported
+                    },
+                )
+                proxy = data.get("data") or {}
+                results[current] = {
+                    **item,
+                    "id": int(proxy.get("id") or 0),
+                    "name": proxy.get("name") or item["name"],
+                }
+
+        await asyncio.gather(*(worker() for _ in range(concurrency)))
+        return [item for item in results if item is not None]
 
     async def proxy_admin_quality_check(payload: ProxyAdminRequest, proxy_id: int) -> dict:
         data = await proxy_admin_api(payload, "POST", f"/api/v1/admin/proxies/{proxy_id}/quality-check")

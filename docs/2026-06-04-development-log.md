@@ -2166,3 +2166,47 @@ node --check static/app.js -> passed
 python -m pytest tests/test_api.py -q -> 29 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## ProxyAdmin 命名上传优化
+
+问题：
+
+```text
+批量上传有个问题，上传无法命名，导致上传后 name 都叫 default。
+```
+
+原因：
+
+- 原实现参考 `proxy-port-api` 使用 `POST /api/v1/admin/proxies/batch`。
+- batch 接口适合一次上传多个代理，但无法传每个代理的 `name`。
+- 上传后还需要再拉列表反查 `host:port -> id`，链路更绕。
+
+处理：
+
+- ProxyAdmin 导入改为逐个调用：
+  - `POST /api/v1/admin/proxies`
+- 每个代理创建时传入：
+  - `name`
+  - `protocol`
+  - `host`
+  - `port`
+  - `username`
+  - `password`
+- `name` 默认使用顺序名称：
+  - `代理1`
+  - `代理2`
+  - `代理3`
+- 运行界面新增 `名称前缀` 配置，可自定义为：
+  - `测试1`
+  - `测试2`
+  - `测试3`
+- 创建接口直接返回 `data.id`，后续质量检测直接用这个 ID，不再依赖列表反查。
+- 逐个上传仍保留并发控制，避免大量端口时速度太慢。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest tests/test_api.py -q -> 29 passed
+python -m compileall -q main.py app tests -> passed
+```
