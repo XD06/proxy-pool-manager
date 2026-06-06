@@ -52,14 +52,14 @@ Environment=PPM_PROXY_LISTEN_HOST=0.0.0.0
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-echo "✔ systemd 服务已注册"
+systemctl enable "${SERVICE_NAME}"
+echo "✔ systemd 服务已注册并设为开机自启"
 
 echo ""
 echo "=== 安装完成 ==="
 echo ""
 echo "启动服务: sudo systemctl start ${SERVICE_NAME}"
 echo "查看状态: sudo systemctl status ${SERVICE_NAME}"
-echo "开机自启: sudo systemctl enable ${SERVICE_NAME}"
 echo "查看日志: journalctl -u ${SERVICE_NAME} -f"
 echo ""
 echo "管理界面: http://<本机IP>:9100"
