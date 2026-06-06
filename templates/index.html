@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Bind proxy nodes to fixed local SOCKS5 ports and verify each route.">
   <title>Proxy Pool Manager</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260606-test-targets-1">
+  <link rel="stylesheet" href="/static/style.css?v=20260606-test-ux-1">
 </head>
 <body>
   <main class="app-shell">
@@ -69,29 +69,30 @@
           <h2>节点测试</h2>
           <p class="panel-copy">临时启动 sing-box，逐个节点验证延迟和出口 IP。同一个出口 IP 可自动只保留最快可用节点。</p>
         </div>
-        <div class="actions">
-          <label class="inline-field wide">
-            测速链接
-            <select id="nodeTestTargets" multiple size="3">
-              <option value="http://cp.cloudflare.com/generate_204">Cloudflare 204</option>
-              <option value="https://www.gstatic.com/generate_204">gstatic 204</option>
-              <option value="https://www.google.com/generate_204">Google 204</option>
-            </select>
-          </label>
+        <div class="test-control-panel">
+          <div class="test-targets" id="nodeTestTargets" aria-label="测速链接">
+            <span>测速链接</span>
+            <label class="target-option"><input class="node-target-check" type="checkbox" value="http://cp.cloudflare.com/generate_204">Cloudflare <small>默认</small></label>
+            <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.gstatic.com/generate_204">gstatic</label>
+            <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.google.com/generate_204">Google</label>
+          </div>
           <label class="inline-field wide">
             自定义测速 URL
             <input id="nodeTestUrl" type="url" placeholder="可选；不选则默认 Cloudflare 204">
           </label>
-          <button id="selectAliveBtn">只选可用</button>
-          <button id="testSelectedBtn" class="primary">测速选中节点</button>
-          <button id="testUntestedBtn">测试未测速</button>
-          <button id="testFailedOnlyBtn">测试失败节点</button>
-          <button id="testPruneBtn">测速并按 IP 去重</button>
-          <button id="deleteSelectedBtn">删除选中</button>
-          <button id="deleteFailedBtn">删除失败</button>
-          <button id="clearNodesBtn">清空节点</button>
+          <div class="test-actions">
+            <button id="testSelectedBtn" class="primary">测速选中节点</button>
+            <button id="testUntestedBtn">测试未测速</button>
+            <button id="testFailedOnlyBtn">测试失败节点</button>
+            <button id="testPruneBtn">测速并按 IP 去重</button>
+            <button id="selectAliveBtn">只选可用</button>
+            <button id="deleteSelectedBtn">删除选中</button>
+            <button id="deleteFailedBtn">删除失败</button>
+            <button id="clearNodesBtn">清空节点</button>
+          </div>
         </div>
       </div>
+      <div id="nodeTestOverview" class="node-test-overview"></div>
       <div id="nodeTable" class="table-card"></div>
     </section>
 
@@ -188,6 +189,6 @@
       <div id="validationResults" class="validation-results"></div>
     </section>
   </main>
-  <script src="/static/app.js?v=20260606-test-targets-1"></script>
+  <script src="/static/app.js?v=20260606-test-ux-1"></script>
 </body>
 </html>

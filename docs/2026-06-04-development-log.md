@@ -1985,3 +1985,44 @@ node --check static/app.js -> passed
 python -m pytest -q -> 56 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 测试页 UX 打磨
+
+用户反馈：
+
+```text
+测试界面还是需要打磨优化，nodeTestTargets 这部分显示不行。
+前面找个地方显示多少节点可用、不可用的总览信息，不然用户要向下翻。
+```
+
+处理：
+
+- 测试页顶部新增结果总览：
+  - 总节点
+  - 可用
+  - 失败
+  - 未测
+  - 测速中
+  - 平均延迟
+  - 本次测速目标
+- 原生多选框改为更紧凑的目标 chip：
+  - Cloudflare
+  - gstatic
+  - Google
+- 操作按钮拆到独立按钮区，减少和输入控件混在一起的视觉噪音。
+- 自定义测速 URL 保留，目标 chip 和自定义 URL 会实时更新“本次目标”总览。
+- 手机端：
+  - 汇总区自动两列排列。
+  - 目标 chip 和按钮自动换行。
+  - 避免横向挤出屏幕。
+- 静态资源版本更新为：
+  - `20260606-test-ux-1`
+
+验证：
+
+```text
+GET / -> contains 20260606-test-ux-1, nodeTestOverview, node-target-check
+node --check static/app.js -> passed
+python -m pytest -q -> 56 passed
+python -m compileall -q main.py app tests -> passed
+```

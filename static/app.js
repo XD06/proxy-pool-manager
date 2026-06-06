@@ -145,6 +145,57 @@ function nodeStatusBadge(node) {
   return statusBadge(node.latency);
 }
 
+function nodeTestStats() {
+  const total = nodes.length;
+  const testing = testingTags.size;
+  const alive = nodes.filter((node) => node.latency?.alive).length;
+  const failed = nodes.filter((node) => node.latency && !node.latency.alive).length;
+  const untested = Math.max(total - alive - failed, 0);
+  const delays = nodes
+    .map((node) => node.latency?.delay)
+    .filter((delay) => typeof delay === "number");
+  const avgDelay = delays.length ? Math.round(delays.reduce((sum, delay) => sum + delay, 0) / delays.length) : null;
+  return { total, testing, alive, failed, untested, avgDelay };
+}
+
+function renderNodeTestOverview() {
+  const box = $("nodeTestOverview");
+  if (!box) return;
+  const stats = nodeTestStats();
+  const targetUrls = selectedNodeTestUrls();
+  const targetText = targetUrls?.length ? targetUrls.map(compactUrl).join(" / ") : "Cloudflare 204";
+  box.innerHTML = `
+    <div class="overview-metric">
+      <span>总节点</span>
+      <strong>${stats.total}</strong>
+    </div>
+    <div class="overview-metric ok">
+      <span>可用</span>
+      <strong>${stats.alive}</strong>
+    </div>
+    <div class="overview-metric bad">
+      <span>失败</span>
+      <strong>${stats.failed}</strong>
+    </div>
+    <div class="overview-metric idle">
+      <span>未测</span>
+      <strong>${stats.untested}</strong>
+    </div>
+    <div class="overview-metric testing">
+      <span>测速中</span>
+      <strong>${stats.testing}</strong>
+    </div>
+    <div class="overview-metric">
+      <span>平均延迟</span>
+      <strong>${stats.avgDelay === null ? "-" : stats.avgDelay + "ms"}</strong>
+    </div>
+    <div class="overview-target" title="${escapeHtml(targetText)}">
+      <span>本次目标</span>
+      <strong>${escapeHtml(targetText)}</strong>
+    </div>
+  `;
+}
+
 // function renderSummary() {
 //   if (!statusSnapshot.running) {
 //     $("engineState").textContent = "未运行";
@@ -199,6 +250,7 @@ function proxyAuthority(port) {
 }
 
 function renderNodeTable() {
+  renderNodeTestOverview();
   if (!nodes.length) {
     $("nodeTable").innerHTML = `<div class="empty">还没有节点。先在导入页粘贴订阅或单节点链接。</div>`;
     return;
@@ -684,7 +736,7 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
 }
 
 function selectedNodeTestUrls() {
-  const urls = Array.from($("nodeTestTargets").selectedOptions || [])
+  const urls = Array.from(document.querySelectorAll(".node-target-check:checked"))
     .map((option) => option.value)
     .filter(Boolean);
   const custom = $("nodeTestUrl").value.trim();
@@ -911,6 +963,12 @@ document.querySelectorAll(".tab").forEach((button) => {
 });
 
 activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "import", false);
+
+document.querySelectorAll(".node-target-check").forEach((item) => {
+  item.addEventListener("change", renderNodeTestOverview);
+});
+
+$("nodeTestUrl").addEventListener("input", renderNodeTestOverview);
 
 $("importUrlBtn").addEventListener("click", () => runTask("导入订阅", async () => {
   await request("/api/import", { method: "POST", body: JSON.stringify({ url: $("urlInput").value }) });

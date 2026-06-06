@@ -245,6 +245,106 @@ label span {
   justify-content: flex-end;
 }
 
+.test-control-panel {
+  display: grid;
+  gap: 9px;
+  min-width: min(100%, 560px);
+  justify-items: end;
+}
+
+.test-targets,
+.test-actions,
+.node-test-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.test-targets {
+  justify-content: flex-end;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.target-option {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 0 10px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.target-option input {
+  width: auto;
+  margin: 0;
+}
+
+.target-option small {
+  color: var(--muted);
+}
+
+.test-actions {
+  justify-content: flex-end;
+}
+
+.node-test-overview {
+  margin: 0 0 12px;
+}
+
+.overview-metric,
+.overview-target {
+  min-height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfb;
+  padding: 8px 10px;
+}
+
+.overview-metric {
+  min-width: 92px;
+}
+
+.overview-target {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.overview-metric span,
+.overview-target span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.overview-metric strong,
+.overview-target strong {
+  display: block;
+  overflow: hidden;
+  font-size: 17px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-metric.ok strong {
+  color: var(--ok);
+}
+
+.overview-metric.bad strong {
+  color: var(--bad);
+}
+
+.overview-metric.testing strong {
+  color: var(--warn);
+}
+
 .form-stack {
   display: grid;
   gap: 12px;
@@ -704,6 +804,19 @@ code {
     justify-content: stretch;
   }
 
+  .test-control-panel {
+    justify-items: stretch;
+  }
+
+  .test-targets,
+  .test-actions {
+    justify-content: flex-start;
+  }
+
+  .test-actions > button {
+    flex: 1 1 150px;
+  }
+
   .actions > button,
   .actions > label,
   .actions > select {
@@ -820,6 +933,20 @@ code {
 
   .panel {
     padding: 10px;
+  }
+
+  .node-test-overview {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .overview-target {
+    grid-column: 1 / -1;
+  }
+
+  .target-option {
+    flex: 1 1 120px;
+    justify-content: center;
   }
 
   .actions {
