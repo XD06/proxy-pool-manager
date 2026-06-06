@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Bind proxy nodes to fixed local SOCKS5 ports and verify each route.">
   <title>Proxy Pool Manager</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260606-test-ux-1">
+  <link rel="stylesheet" href="/static/style.css?v=20260606-test-geo-toggle-1">
 </head>
 <body>
   <main class="app-shell">
@@ -79,6 +79,11 @@
           <label class="inline-field wide">
             自定义测速 URL
             <input id="nodeTestUrl" type="url" placeholder="可选；不选则默认 Cloudflare 204">
+          </label>
+          <label class="target-option test-geo-toggle">
+            <input id="nodeTestGeo" type="checkbox" checked>
+            出口/地区
+            <small>可关掉提速</small>
           </label>
           <div class="test-actions">
             <button id="testSelectedBtn" class="primary">测速选中节点</button>
@@ -189,6 +194,6 @@
       <div id="validationResults" class="validation-results"></div>
     </section>
   </main>
-  <script src="/static/app.js?v=20260606-test-ux-1"></script>
+  <script src="/static/app.js?v=20260606-test-geo-toggle-1"></script>
 </body>
 </html>

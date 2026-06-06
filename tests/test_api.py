@@ -224,6 +224,46 @@ def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
     assert seen == [True]
 
 
+def test_api_node_test_include_geoip_requests_exit_ip(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+        seen.append(include_exit_ip)
+        for node in nodes:
+            result = LatencyResult(alive=True, delay=123, exit_ip="8.8.8.8" if include_exit_ip else None)
+            if on_result:
+                on_result(node.tag, result)
+        return {}
+
+    monkeypatch.setattr(api_module, "test_nodes_with_temporary_engine", fake_test_nodes)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store)
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#HK"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+
+    started = client.post("/api/test/start", json={"node_tags": [tag], "include_geoip": True})
+    job_id = started.json()["id"]
+    for _ in range(20):
+        job = client.get(f"/api/test/jobs/{job_id}")
+        if job.json()["status"] == "done":
+            break
+        time.sleep(0.05)
+
+    assert job.json()["status"] == "done"
+    assert seen == [True]
+    assert job.json()["results"][tag]["exit_ip"] == "8.8.8.8"
+
+
 def test_api_node_test_passes_multiple_target_urls(tmp_path, monkeypatch):
     seen = []
 

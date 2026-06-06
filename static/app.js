@@ -13,7 +13,6 @@ const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 
 const DEFAULT_VALIDATION_URLS = [
   "http://cp.cloudflare.com/generate_204",
-  "https://ipv4.webshare.io/",
   "https://www.google.com/generate_204",
   "https://www.gstatic.com/generate_204",
   "https://www.cloudflare.com/cdn-cgi/trace"
@@ -164,6 +163,7 @@ function renderNodeTestOverview() {
   const stats = nodeTestStats();
   const targetUrls = selectedNodeTestUrls();
   const targetText = targetUrls?.length ? targetUrls.map(compactUrl).join(" / ") : "Cloudflare 204";
+  const geoText = $("nodeTestGeo")?.checked ? "查出口/地区" : "只测速";
   box.innerHTML = `
     <div class="overview-metric">
       <span>总节点</span>
@@ -192,6 +192,10 @@ function renderNodeTestOverview() {
     <div class="overview-target" title="${escapeHtml(targetText)}">
       <span>本次目标</span>
       <strong>${escapeHtml(targetText)}</strong>
+    </div>
+    <div class="overview-metric">
+      <span>地区模式</span>
+      <strong>${escapeHtml(geoText)}</strong>
     </div>
   `;
 }
@@ -353,7 +357,7 @@ function renderPortsTable() {
         const authority = proxyAuthority(port);
         const httpProxy = `http://${authority}/`;
         const socksProxy = `socks5://${authority}`;
-        const curlCommand = `curl --proxy "http://${authority}/" ${curlTarget}`;
+        const curlCommand = `curl --proxy "http://${authority}/" https://ipv4.webshare.io`;
         return `
         <tr>
           <td data-label="端口" class="mono copyable" data-copy="${escapeHtml(httpProxy)}" data-copy-label="HTTP 代理" title="copy ${escapeHtml(httpProxy)}">${port}</td>
@@ -725,7 +729,7 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
   try {
     const started = await request("/api/test/start", {
       method: "POST",
-      body: JSON.stringify({ node_tags: tags, prune_same_ip: pruneSameIp, target_urls: targetUrls })
+      body: JSON.stringify({ node_tags: tags, prune_same_ip: pruneSameIp, include_geoip: Boolean($("nodeTestGeo")?.checked), target_urls: targetUrls })
     });
     await pollTestJob(started.id);
   } catch (error) {
@@ -969,6 +973,8 @@ document.querySelectorAll(".node-target-check").forEach((item) => {
 });
 
 $("nodeTestUrl").addEventListener("input", renderNodeTestOverview);
+
+$("nodeTestGeo").addEventListener("change", renderNodeTestOverview);
 
 $("importUrlBtn").addEventListener("click", () => runTask("导入订阅", async () => {
   await request("/api/import", { method: "POST", body: JSON.stringify({ url: $("urlInput").value }) });

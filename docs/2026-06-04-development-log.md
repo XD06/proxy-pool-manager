@@ -2026,3 +2026,34 @@ node --check static/app.js -> passed
 python -m pytest -q -> 56 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 测试页出口与地区查询开关
+
+用户反馈：
+
+```text
+地区很多时候没有正确显示，兼顾速度和完整信息。
+```
+
+处理：
+
+- 测试页新增默认开启的 `出口/地区` 开关。
+- 普通节点测速：
+  - 开启时：测速成功后同时查询出口 IP，并触发 GeoIP 地区查询。
+  - 关闭时：只测目标 URL 延迟，速度更快。
+- `测速并按 IP 去重` 仍然强制查询出口 IP，保证去重逻辑可靠。
+- 顶部总览新增“地区模式”：
+  - `查出口/地区`
+  - `只测速`
+- API 新增 `include_geoip` 参数，兼容旧 `prune_same_ip` 逻辑。
+- 静态资源版本更新为：
+  - `20260606-test-geo-toggle-1`
+
+验证：
+
+```text
+GET / -> contains 20260606-test-geo-toggle-1, nodeTestGeo, 出口/地区
+node --check static/app.js -> passed
+python -m pytest -q -> 57 passed
+python -m compileall -q main.py app tests -> passed
+```
