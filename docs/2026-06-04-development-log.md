@@ -1953,6 +1953,10 @@ python -m pytest -q -> 64 passed
   - 只有国家：`国家`
   - 没有地区：`none`
 - 自定义前缀单独计算，不受其他前缀影响。
+- 创建后如果远端返回的名称仍是 `default` 或不是期望名称：
+  - 自动尝试 `PUT /api/v1/admin/proxies/{id}` 更新名称。
+  - 如果 `PUT` 不可用，再尝试 `PATCH /api/v1/admin/proxies/{id}`。
+  - 更新失败不影响整批检测，但会在导入结果中记录 `name_update_error`。
 
 验证：
 

@@ -104,10 +104,23 @@ async def proxy_admin_import(payload: Any, items: list[dict]) -> list[dict]:
                     },
                 )
                 proxy = data.get("data") or {}
+                expected_name = item["name"]
+                remote_name = proxy.get("name") or ""
+                name_update_error = None
+                if proxy.get("id") and remote_name != expected_name:
+                    try:
+                        updated = await proxy_admin_update_name(payload, int(proxy["id"]), item)
+                        proxy = updated or proxy
+                        remote_name = proxy.get("name") or remote_name
+                    except Exception as exc:
+                        name_update_error = str(exc)
                 results[current] = {
                     **item,
                     "id": int(proxy.get("id") or 0),
-                    "name": proxy.get("name") or item["name"],
+                    "name": remote_name or expected_name,
+                    "expected_name": expected_name,
+                    "remote_name": remote_name,
+                    "name_update_error": name_update_error,
                 }
             except Exception as exc:
                 results[current] = {
@@ -118,6 +131,27 @@ async def proxy_admin_import(payload: Any, items: list[dict]) -> list[dict]:
 
     await asyncio.gather(*(worker() for _ in range(concurrency)))
     return [item for item in results if item is not None]
+
+
+async def proxy_admin_update_name(payload: Any, proxy_id: int, item: dict) -> dict | None:
+    body = {
+        "name": item["name"],
+        "protocol": "http",
+        "host": item["host"],
+        "port": item["port"],
+        "username": "",
+        "password": "",
+    }
+    last_error: Exception | None = None
+    for method in ("PUT", "PATCH"):
+        try:
+            data = await proxy_admin_api(payload, method, f"/api/v1/admin/proxies/{proxy_id}", body)
+            return data.get("data") or {}
+        except Exception as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    return None
 
 
 async def proxy_admin_quality_check(payload: Any, proxy_id: int) -> dict:
