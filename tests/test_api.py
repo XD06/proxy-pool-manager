@@ -144,7 +144,7 @@ def test_api_import_zero_nodes_returns_error(tmp_path):
 def test_api_progressive_test_job(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
         seen.append(include_exit_ip)
         for node in nodes:
             result = LatencyResult(
@@ -191,7 +191,7 @@ def test_api_progressive_test_job(tmp_path, monkeypatch):
 def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
         seen.append(include_exit_ip)
         for node in nodes:
             result = LatencyResult(alive=True, delay=123, exit_ip="203.0.113.10", test_port=19001)
@@ -224,8 +224,57 @@ def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
     assert seen == [True]
 
 
+def test_api_node_test_passes_multiple_target_urls(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+        seen.append(target_urls)
+        for node in nodes:
+            result = LatencyResult(
+                alive=True,
+                delay=200,
+                target_url=",".join(target_urls or []),
+                target_results=[
+                    {"url": target_urls[0], "ok": True, "status_code": 204, "elapsed_ms": 120},
+                    {"url": target_urls[1], "ok": True, "status_code": 204, "elapsed_ms": 280},
+                ],
+            )
+            if on_result:
+                on_result(node.tag, result)
+        return {}
+
+    monkeypatch.setattr(api_module, "test_nodes_with_temporary_engine", fake_test_nodes)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store)
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#HK"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+    targets = ["http://cp.cloudflare.com/generate_204", "https://www.gstatic.com/generate_204"]
+
+    started = client.post("/api/test/start", json={"node_tags": [tag], "target_urls": targets})
+    job_id = started.json()["id"]
+    for _ in range(20):
+        job = client.get(f"/api/test/jobs/{job_id}")
+        if job.json()["status"] == "done":
+            break
+        time.sleep(0.05)
+
+    assert job.json()["status"] == "done"
+    assert seen == [targets]
+    assert job.json()["results"][tag]["target_results"][1]["elapsed_ms"] == 280
+
+
 def test_api_node_test_attaches_geoip_cache(tmp_path, monkeypatch):
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
         for node in nodes:
             result = LatencyResult(alive=True, delay=123, exit_ip="8.8.8.8", test_port=19001)
             if on_result:
@@ -629,7 +678,7 @@ def test_api_assign_restarts_running_engine(tmp_path):
 
 
 def test_api_start_rejects_while_node_test_job_is_running(tmp_path, monkeypatch):
-    async def slow_test_nodes(nodes, on_result=None, target_url=None, include_exit_ip=False):
+    async def slow_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
         await asyncio.sleep(0.2)
         return {}
 

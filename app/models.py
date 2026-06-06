@@ -28,6 +28,7 @@ class LatencyResult(BaseModel):
     delay: int | None = None
     exit_ip: str | None = None
     geoip: dict[str, Any] | None = None
+    target_results: list[dict[str, Any]] | None = None
     test_port: int | None = None
     target_url: str | None = None
     status_code: int | None = None

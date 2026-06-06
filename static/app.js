@@ -70,6 +70,17 @@ function latencyClass(latency) {
 
 function targetResponseText(latency) {
   if (!latency) return "-";
+  if (latency.target_results?.length > 1) {
+    const okItems = latency.target_results.filter((item) => item.ok);
+    const failed = latency.target_results.length - okItems.length;
+    const detail = latency.target_results
+      .map((item) => `${compactUrl(item.url)} ${item.ok ? item.elapsed_ms + "ms" : "失败"}`)
+      .join("；");
+    const status = `成功 ${okItems.length}/${latency.target_results.length}`;
+    const average = latency.delay ? ` · 平均 ${latency.delay}ms` : "";
+    const failedText = failed ? ` · 失败 ${failed}` : "";
+    return `${status}${average}${failedText} · ${detail}`;
+  }
   if (latency.target_url) {
     if (!latency.alive && latency.error) return latency.error;
     const status = latency.status_code ? `HTTP ${latency.status_code}` : "无状态码";
@@ -655,14 +666,14 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
     showNotice("没有需要测速的节点", "ok");
     return;
   }
-  const targetUrl = $("nodeTestUrl").value.trim() || null;
+  const targetUrls = selectedNodeTestUrls();
   testingTags = new Set(tags);
   renderNodeTable();
-  showNotice(targetUrl ? `已开始测速目标 URL：${targetUrl}` : `已开始测速：0/${tags.length}`);
+  showNotice(targetUrls?.length ? `已开始测速目标：${targetUrls.join("，")}` : `已开始测速默认目标：${DEFAULT_VALIDATION_URLS[0]}`);
   try {
     const started = await request("/api/test/start", {
       method: "POST",
-      body: JSON.stringify({ node_tags: tags, prune_same_ip: pruneSameIp, target_url: targetUrl })
+      body: JSON.stringify({ node_tags: tags, prune_same_ip: pruneSameIp, target_urls: targetUrls })
     });
     await pollTestJob(started.id);
   } catch (error) {
@@ -670,6 +681,15 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
     renderNodeTable();
     showNotice(error.message, "bad");
   }
+}
+
+function selectedNodeTestUrls() {
+  const urls = Array.from($("nodeTestTargets").selectedOptions || [])
+    .map((option) => option.value)
+    .filter(Boolean);
+  const custom = $("nodeTestUrl").value.trim();
+  if (custom) urls.push(custom);
+  return urls.length ? Array.from(new Set(urls)) : null;
 }
 
 async function pollTestJob(jobId) {

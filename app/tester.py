@@ -121,15 +121,33 @@ async def validate_proxy_targets(port: int, urls: list[str] | None = None) -> li
 async def validate_proxy_port(
     port: int,
     target_url: str | None = None,
+    target_urls: list[str] | None = None,
     *,
     include_exit_ip: bool = False,
 ) -> LatencyResult:
     proxy = f"http://127.0.0.1:{port}"
-    test_urls = [target_url] if target_url else FALLBACK_TEST_URLS
-    started = time.perf_counter()
+    selected_urls = [url for url in (target_urls or []) if url]
+    test_urls = selected_urls or ([target_url] if target_url else FALLBACK_TEST_URLS)
+    use_fallback = not selected_urls and not target_url
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=5, follow_redirects=False) as client:
-            result = await _fetch_first_test_url(client, test_urls)
+            if len(test_urls) > 1 and not use_fallback:
+                target_results = []
+                for url in test_urls:
+                    target_results.append(await _fetch_one_test_url(client, url))
+                ok_results = [item for item in target_results if item["ok"]]
+                if not ok_results:
+                    raise RuntimeError("; ".join(item.get("error") or f"{item['url']}: HTTP {item.get('status_code')}" for item in target_results))
+                result = {
+                    "url": ",".join(test_urls),
+                    "status_code": ok_results[0]["status_code"],
+                    "elapsed_ms": max(int(sum(item["elapsed_ms"] for item in ok_results) / len(ok_results)), 1),
+                    "body_preview": "",
+                    "fallback_notice": None,
+                    "target_results": target_results,
+                }
+            else:
+                result = await _fetch_first_test_url(client, test_urls)
             exit_ip = None
             exit_error = None
             if include_exit_ip:
@@ -145,6 +163,15 @@ async def validate_proxy_port(
                 alive=True,
                 delay=result["elapsed_ms"],
                 exit_ip=exit_ip,
+                target_results=result.get("target_results") or [
+                    {
+                        "url": result["url"],
+                        "ok": True,
+                        "status_code": result["status_code"],
+                        "elapsed_ms": result["elapsed_ms"],
+                        "error": None,
+                    }
+                ],
                 test_port=port,
                 target_url=result["url"],
                 status_code=result["status_code"],
@@ -160,6 +187,33 @@ async def validate_proxy_port(
             target_url=target_url,
             error=str(exc),
         )
+
+
+async def _fetch_one_test_url(client, url: str) -> dict:
+    started = time.perf_counter()
+    try:
+        response = await client.get(url)
+        elapsed = int((time.perf_counter() - started) * 1000)
+        body = response.text.strip().replace("\r", "")[:160]
+        ok = 200 <= response.status_code < 400
+        return {
+            "url": url,
+            "ok": ok,
+            "status_code": response.status_code,
+            "elapsed_ms": max(elapsed, 1),
+            "body_preview": body,
+            "error": None if ok else f"HTTP {response.status_code}",
+        }
+    except Exception as exc:
+        elapsed = int((time.perf_counter() - started) * 1000)
+        return {
+            "url": url,
+            "ok": False,
+            "status_code": None,
+            "elapsed_ms": max(elapsed, 1),
+            "body_preview": "",
+            "error": str(exc),
+        }
 
 
 async def _fetch_first_test_url(client, urls: list[str]) -> dict:
@@ -181,6 +235,15 @@ async def _fetch_first_test_url(client, urls: list[str]) -> dict:
                     "elapsed_ms": max(elapsed, 1),
                     "body_preview": body,
                     "fallback_notice": notice,
+                    "target_results": [
+                        {
+                            "url": url,
+                            "ok": True,
+                            "status_code": response.status_code,
+                            "elapsed_ms": max(elapsed, 1),
+                            "error": None,
+                        }
+                    ],
                 }
             errors.append(f"{url}: HTTP {response.status_code}")
         except Exception as exc:
@@ -214,6 +277,7 @@ async def test_nodes_with_temporary_engine(
     nodes: list[ProxyNode],
     on_result=None,
     target_url: str | None = None,
+    target_urls: list[str] | None = None,
     include_exit_ip: bool = False,
 ) -> dict[str, LatencyResult]:
     if not nodes:
@@ -237,9 +301,10 @@ async def test_nodes_with_temporary_engine(
         await engine.start(SING_BOX_TEST_CONFIG_PATH, check=False, settle_seconds=0.35)
         async def run_one(tag: str, port: int):
             try:
-                timeout = 10 if include_exit_ip else 6
+                url_count = len(target_urls or ([target_url] if target_url else FALLBACK_TEST_URLS))
+                timeout = (10 if include_exit_ip else 6) + max(0, url_count - 1) * 5
                 result = await asyncio.wait_for(
-                    validate_proxy_port(port, target_url=target_url, include_exit_ip=include_exit_ip),
+                    validate_proxy_port(port, target_url=target_url, target_urls=target_urls, include_exit_ip=include_exit_ip),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
@@ -302,13 +367,18 @@ def prune_same_exit_ip(nodes: list[ProxyNode], results: dict[str, LatencyResult]
 
 
 def sort_nodes_by_test_result(nodes: list[ProxyNode], results: dict[str, LatencyResult]) -> list[ProxyNode]:
+    def target_success_count(result: LatencyResult) -> int:
+        if not result.target_results:
+            return 1 if result.alive else 0
+        return sum(1 for item in result.target_results if item.get("ok"))
+
     def key(node: ProxyNode):
         result = results.get(node.tag)
         if result and result.alive:
             delay = result.delay if result.delay is not None else 10**9
-            return (0, delay, node.name.lower())
+            return (0, -target_success_count(result), delay, node.name.lower())
         if result:
-            return (1, 10**9, node.name.lower())
-        return (2, 10**9, node.name.lower())
+            return (1, 0, 10**9, node.name.lower())
+        return (2, 0, 10**9, node.name.lower())
 
     return sorted(nodes, key=key)

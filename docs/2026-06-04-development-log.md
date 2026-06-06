@@ -1946,3 +1946,42 @@ node --check static/app.js -> passed
 python -m pytest -q -> 54 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 节点测速目标选择与多目标综合排序
+
+用户反馈：
+
+```text
+测速界面有好几个测速按钮是否都替换成新的测速逻辑？
+保留几个测速链接，测速界面用户可以自己选择测速链接作为本次测速。
+不选择默认 http://cp.cloudflare.com/generate_204。
+如果用户选择多种测速，需要统计不同的延迟，综合排序。
+```
+
+处理：
+
+- 测试页新增“测速链接”多选框：
+  - Cloudflare 204：`http://cp.cloudflare.com/generate_204`
+  - gstatic 204：`https://www.gstatic.com/generate_204`
+  - Google 204：`https://www.google.com/generate_204`
+- 自定义测速 URL 仍保留，可以和内置目标一起参与本次测速。
+- 不选择任何测速链接、也不填写自定义 URL 时：
+  - 默认使用 Cloudflare 204。
+  - 如果失败，自动 fallback 到 gstatic / Google。
+- 选择一个或多个测速链接时：
+  - 严格按用户选择的目标测试。
+  - 多目标会保存每个目标的状态、HTTP 状态码和延迟。
+  - 节点表显示 `成功 x/y · 平均 nms`。
+- 综合排序规则：
+  - 可用节点排前。
+  - 多目标成功数量越多越靠前。
+  - 成功数量相同，平均延迟越低越靠前。
+  - 失败节点排后。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 56 passed
+python -m compileall -q main.py app tests -> passed
+```

@@ -59,6 +59,7 @@ class TestRequest(BaseModel):
     node_tags: list[str] | None = None
     prune_same_ip: bool = False
     target_url: str | None = None
+    target_urls: list[str] | None = None
 
 
 class PortTestRequest(BaseModel):
@@ -715,6 +716,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             tested = await test_nodes_with_temporary_engine(
                 selected,
                 target_url=payload.target_url,
+                target_urls=payload.target_urls,
                 include_exit_ip=payload.prune_same_ip,
             )
         except EngineError as exc:
@@ -756,7 +758,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             job.results[tag] = {"alive": False, "error": "node not found", "delay": None}
         test_jobs[job.id] = job
         active_test_job["id"] = job.id
-        asyncio.create_task(run_test_job(job.id, selected, payload.prune_same_ip, payload.target_url))
+        asyncio.create_task(run_test_job(job.id, selected, payload.prune_same_ip, payload.target_url, payload.target_urls))
         return job.model_dump()
 
     @app.get("/api/test/jobs/{job_id}")
@@ -766,7 +768,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             raise HTTPException(status_code=404, detail="Test job not found")
         return job.model_dump()
 
-    async def run_test_job(job_id: str, selected, prune_same_ip: bool, target_url: str | None) -> None:
+    async def run_test_job(job_id: str, selected, prune_same_ip: bool, target_url: str | None, target_urls: list[str] | None) -> None:
         job = test_jobs[job_id]
         async with test_job_lock:
             try:
@@ -781,6 +783,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     selected,
                     on_result=update,
                     target_url=target_url,
+                    target_urls=target_urls,
                     include_exit_ip=prune_same_ip,
                 )
                 if prune_same_ip:

@@ -72,6 +72,40 @@ def test_sort_nodes_by_test_result_orders_alive_fastest_first():
     assert [node.tag for node in sorted_nodes] == ["node-c", "node-a", "node-b", "node-d"]
 
 
+def test_sort_nodes_by_multi_target_success_then_average_delay():
+    nodes = [_node("node-a", "A"), _node("node-b", "B"), _node("node-c", "C")]
+    results = {
+        "node-a": LatencyResult(
+            alive=True,
+            delay=100,
+            target_results=[
+                {"url": "u1", "ok": True, "elapsed_ms": 100},
+                {"url": "u2", "ok": False, "elapsed_ms": 300},
+            ],
+        ),
+        "node-b": LatencyResult(
+            alive=True,
+            delay=180,
+            target_results=[
+                {"url": "u1", "ok": True, "elapsed_ms": 160},
+                {"url": "u2", "ok": True, "elapsed_ms": 200},
+            ],
+        ),
+        "node-c": LatencyResult(
+            alive=True,
+            delay=220,
+            target_results=[
+                {"url": "u1", "ok": True, "elapsed_ms": 220},
+                {"url": "u2", "ok": True, "elapsed_ms": 220},
+            ],
+        ),
+    }
+
+    sorted_nodes = sort_nodes_by_test_result(nodes, results)
+
+    assert [node.tag for node in sorted_nodes] == ["node-b", "node-c", "node-a"]
+
+
 def test_allocate_test_ports_skips_occupied_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 19001))

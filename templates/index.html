@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Bind proxy nodes to fixed local SOCKS5 ports and verify each route.">
   <title>Proxy Pool Manager</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260606-geoip-compact-1">
+  <link rel="stylesheet" href="/static/style.css?v=20260606-test-targets-1">
 </head>
 <body>
   <main class="app-shell">
@@ -71,8 +71,16 @@
         </div>
         <div class="actions">
           <label class="inline-field wide">
-            测试目标 URL
-            <input id="nodeTestUrl" type="url" placeholder="留空则测出口 IP；填入则只测这个 URL">
+            测速链接
+            <select id="nodeTestTargets" multiple size="3">
+              <option value="http://cp.cloudflare.com/generate_204">Cloudflare 204</option>
+              <option value="https://www.gstatic.com/generate_204">gstatic 204</option>
+              <option value="https://www.google.com/generate_204">Google 204</option>
+            </select>
+          </label>
+          <label class="inline-field wide">
+            自定义测速 URL
+            <input id="nodeTestUrl" type="url" placeholder="可选；不选则默认 Cloudflare 204">
           </label>
           <button id="selectAliveBtn">只选可用</button>
           <button id="testSelectedBtn" class="primary">测速选中节点</button>
@@ -180,6 +188,6 @@
       <div id="validationResults" class="validation-results"></div>
     </section>
   </main>
-  <script src="/static/app.js?v=20260606-geoip-compact-1"></script>
+  <script src="/static/app.js?v=20260606-test-targets-1"></script>
 </body>
 </html>
