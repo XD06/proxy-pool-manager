@@ -879,6 +879,7 @@ async function refresh() {
   statusSnapshot = status;
   nodes = nodeData.nodes;
   ports = portData.ports;
+  localProxyCheckResults = portData.local_proxy_checks || {};
   renderSummary();
   renderNodeTable();
   renderAssignTable();

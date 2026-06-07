@@ -890,6 +890,35 @@ def test_api_local_proxy_check_uses_proxycheck_adapter(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["grade"] == "A"
     assert called["args"] == ("http://127.0.0.1:18007/", 18007, 20)
+    assert store.load().local_proxy_check_results["18007"]["grade"] == "A"
+
+
+def test_api_ports_returns_persisted_local_proxy_check(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    state = AppState(
+        nodes=[
+            ProxyNode(
+                tag="node-a",
+                name="A",
+                type="vless",
+                server="example.com",
+                server_port=443,
+                outbound={},
+            )
+        ],
+        port_mappings={"18007": PortMapping(node_tag="node-a")},
+        local_proxy_check_results={"18007": {"id": 18007, "grade": "A", "score": 100}},
+    )
+    store.save(state)
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.get("/api/ports")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["local_proxy_checks"]["18007"]["grade"] == "A"
+    assert payload["ports"]["18007"]["local_proxy_check"]["score"] == 100
 
 
 def test_api_local_proxy_check_reports_closed_port(tmp_path, monkeypatch):

@@ -2588,6 +2588,31 @@ python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 ```
 
+## 本地检测结果持久化
+
+目标：
+
+- 页面刷新或服务重启后保留本地 proxycheck 检测结果。
+- 端口表继续按上次检测结果排序和展示。
+
+处理：
+
+- `AppState` 增加 `local_proxy_check_results`。
+- `POST /api/proxy-check` 单次检测成功后写入 state。
+- `POST /api/proxy-check/start` 后台任务每完成一个端口就写入 state。
+- `GET /api/ports` 返回：
+  - 每个端口的 `local_proxy_check`。
+  - 当前映射端口过滤后的 `local_proxy_checks`。
+- 前端刷新时从 `/api/ports` 恢复 `localProxyCheckResults`。
+
+验证：
+
+```text
+python -m pytest -q -> 74 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

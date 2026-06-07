@@ -68,6 +68,7 @@ class AppState(BaseModel):
     latency_cache: dict[str, LatencyResult] = Field(default_factory=dict)
     exit_ip_cache: dict[str, ExitIpCache] = Field(default_factory=dict)
     geoip_cache: dict[str, GeoIpResult] = Field(default_factory=dict)
+    local_proxy_check_results: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class ImportResult(BaseModel):

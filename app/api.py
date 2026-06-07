@@ -994,8 +994,14 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 "exit_ip": exit_ip,
                 "geoip": geoip,
                 "latency": attach_geoip_to_result(latency).model_dump() if latency else None,
+                "local_proxy_check": app_state.local_proxy_check_results.get(port),
             }
-        return {"ports": response}
+        local_checks = {
+            port: app_state.local_proxy_check_results.get(port)
+            for port in response
+            if app_state.local_proxy_check_results.get(port)
+        }
+        return {"ports": response, "local_proxy_checks": local_checks}
 
     @app.post("/api/ports/check")
     async def check_ports(payload: PortAvailabilityRequest):
@@ -1049,7 +1055,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     @app.post("/api/proxy-check")
     async def local_proxy_check(payload: LocalProxyCheckRequest):
         try:
-            return await run_local_proxy_check(payload)
+            result = await run_local_proxy_check(payload)
+            if payload.port:
+                app_state.local_proxy_check_results[str(payload.port)] = result
+                save()
+            return result
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -1112,7 +1122,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                                 ],
                             }
                         job.results[str(port)] = result
+                        app_state.local_proxy_check_results[str(port)] = result
                         job.completed += 1
+                        save()
 
                 await asyncio.gather(*(worker() for _ in range(worker_count)))
                 job.status = "done"
