@@ -170,7 +170,7 @@ def test_api_import_zero_nodes_returns_error(tmp_path):
 def test_api_progressive_test_job(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False, **kwargs):
         seen.append(include_exit_ip)
         for node in nodes:
             result = LatencyResult(
@@ -217,7 +217,7 @@ def test_api_progressive_test_job(tmp_path, monkeypatch):
 def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False, **kwargs):
         seen.append(include_exit_ip)
         for node in nodes:
             result = LatencyResult(alive=True, delay=123, exit_ip="203.0.113.10", test_port=19001)
@@ -253,7 +253,7 @@ def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
 def test_api_node_test_include_geoip_requests_exit_ip(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False, **kwargs):
         seen.append(include_exit_ip)
         for node in nodes:
             result = LatencyResult(alive=True, delay=123, exit_ip="8.8.8.8" if include_exit_ip else None)
@@ -300,7 +300,7 @@ def test_api_node_test_include_geoip_requests_exit_ip(tmp_path, monkeypatch):
 def test_api_node_test_passes_multiple_target_urls(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False, **kwargs):
         seen.append(target_urls)
         for node in nodes:
             result = LatencyResult(
@@ -347,7 +347,7 @@ def test_api_node_test_passes_multiple_target_urls(tmp_path, monkeypatch):
 
 
 def test_api_node_test_attaches_geoip_cache(tmp_path, monkeypatch):
-    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+    async def fake_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False, **kwargs):
         for node in nodes:
             result = LatencyResult(alive=True, delay=123, exit_ip="8.8.8.8", test_port=19001)
             if on_result:
@@ -991,6 +991,53 @@ def test_api_local_proxy_check_job_streams_results(tmp_path, monkeypatch):
         assert payload["results"]["18002"]["exit_ip"] == "203.0.113.2"
 
 
+def test_api_local_proxy_check_job_can_be_canceled(tmp_path, monkeypatch):
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(api_module.socket, "create_connection", lambda *args, **kwargs: FakeConnection())
+
+    async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
+        await asyncio.sleep(0.05)
+        return {
+            "id": proxy_id,
+            "proxy_url": proxy_url,
+            "exit_ip": "",
+            "country": "",
+            "score": 100,
+            "grade": "A",
+            "items": [{"target": "base_connectivity", "status": "pass"}],
+        }
+
+    monkeypatch.setattr(api_module, "check_proxy_quality", fake_check_proxy_quality)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/proxy-check/start",
+            json={"ports": [18001, 18002, 18003], "timeout": 20, "concurrency": 1},
+        )
+        job_id = started.json()["id"]
+        canceled = client.post(f"/api/proxy-check/jobs/{job_id}/cancel")
+        assert canceled.status_code == 200
+        assert canceled.json()["status"] in {"running", "canceling"}
+
+        for _ in range(20):
+            job = client.get(f"/api/proxy-check/jobs/{job_id}")
+            if job.json()["status"] == "canceled":
+                break
+            time.sleep(0.05)
+
+        payload = job.json()
+        assert payload["status"] == "canceled"
+        assert payload["completed"] < payload["total"]
+
+
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
     class FakeResponse:
         def __init__(self, payload):
@@ -1191,7 +1238,7 @@ def test_api_assign_restarts_running_engine(tmp_path):
 
 
 def test_api_start_rejects_while_node_test_job_is_running(tmp_path, monkeypatch):
-    async def slow_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False):
+    async def slow_test_nodes(nodes, on_result=None, target_url=None, target_urls=None, include_exit_ip=False, **kwargs):
         await asyncio.sleep(0.2)
         return {}
 

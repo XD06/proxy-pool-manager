@@ -189,6 +189,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     local_proxy_check_jobs: dict[str, LocalProxyCheckJob] = {}
     local_proxy_check_job_lock = asyncio.Lock()
     active_local_proxy_check_job: dict[str, str | None] = {"id": None}
+    canceled_test_jobs: set[str] = set()
+    canceled_port_test_jobs: set[str] = set()
+    canceled_proxy_admin_jobs: set[str] = set()
+    canceled_local_proxy_check_jobs: set[str] = set()
     geoip_tasks: dict[str, asyncio.Task] = {}
     geoip_semaphore = asyncio.Semaphore(4)
 
@@ -803,11 +807,23 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             raise HTTPException(status_code=404, detail="Test job not found")
         return job.model_dump()
 
+    @app.post("/api/test/jobs/{job_id}/cancel")
+    async def cancel_test_job(job_id: str):
+        job = test_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Test job not found")
+        canceled_test_jobs.add(job_id)
+        if job.status == "running":
+            job.status = "canceling"
+        return job.model_dump()
+
     async def run_test_job(job_id: str, selected, prune_same_ip: bool, include_geoip: bool, target_url: str | None, target_urls: list[str] | None) -> None:
         job = test_jobs[job_id]
         async with test_job_lock:
             try:
                 def update(tag, result):
+                    if job_id in canceled_test_jobs:
+                        return
                     attach_geoip_to_result(result)
                     app_state.latency_cache[tag] = result
                     job.results[tag] = result.model_dump()
@@ -820,7 +836,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     target_url=target_url,
                     target_urls=target_urls,
                     include_exit_ip=prune_same_ip or include_geoip,
+                    should_cancel=lambda: job_id in canceled_test_jobs,
                 )
+                if job_id in canceled_test_jobs:
+                    job.status = "canceled"
+                    return
                 if include_geoip:
                     ips = sorted({result.exit_ip for result in app_state.latency_cache.values() if result.exit_ip})
                     for ip in ips:
@@ -857,6 +877,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             finally:
                 if active_test_job["id"] == job_id:
                     active_test_job["id"] = None
+                canceled_test_jobs.discard(job_id)
 
     @app.post("/api/test-ports")
     async def test_ports(payload: PortTestRequest | None = None):
@@ -892,15 +913,32 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             raise HTTPException(status_code=404, detail="Port validation job not found")
         return job.model_dump()
 
+    @app.post("/api/test-ports/jobs/{job_id}/cancel")
+    async def cancel_port_test_job(job_id: str):
+        job = port_test_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Port validation job not found")
+        canceled_port_test_jobs.add(job_id)
+        if job.status == "running":
+            job.status = "canceling"
+        return job.model_dump()
+
     async def run_port_test_job(job_id: str, tag_ports: list[tuple[str, int]], urls: list[str] | None) -> None:
         job = port_test_jobs[job_id]
         async with port_test_job_lock:
+            tasks = []
             try:
                 tasks = [
-                    validate_assigned_tag(tag, port, urls)
+                    asyncio.create_task(validate_assigned_tag(tag, port, urls))
                     for tag, port in tag_ports
                 ]
                 for completed in asyncio.as_completed(tasks):
+                    if job_id in canceled_port_test_jobs:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        job.status = "canceled"
+                        break
                     tag, port, result, detail = await completed
                     job.results[tag] = result
                     if port and detail:
@@ -908,13 +946,19 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         store_port_test_result(tag, port, result, detail)
                     job.completed += 1
                     save()
-                job.status = "done"
+                if job.status != "canceled":
+                    job.status = "done"
             except Exception as exc:
-                job.status = "error"
-                job.error = str(exc)
+                if job_id in canceled_port_test_jobs:
+                    job.status = "canceled"
+                else:
+                    job.status = "error"
+                    job.error = str(exc)
             finally:
+                await asyncio.gather(*tasks, return_exceptions=True)
                 if active_port_test_job["id"] == job_id:
                     active_port_test_job["id"] = None
+                canceled_port_test_jobs.discard(job_id)
 
     @app.put("/api/assign")
     async def assign(payload: AssignRequest):
@@ -1086,6 +1130,16 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             raise HTTPException(status_code=404, detail="Local proxy check job not found")
         return job.model_dump()
 
+    @app.post("/api/proxy-check/jobs/{job_id}/cancel")
+    async def cancel_local_proxy_check_job(job_id: str):
+        job = local_proxy_check_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Local proxy check job not found")
+        canceled_local_proxy_check_jobs.add(job_id)
+        if job.status == "running":
+            job.status = "canceling"
+        return job.model_dump()
+
     async def run_local_proxy_check_job(job_id: str, ports: list[int], timeout: int, concurrency: int) -> None:
         job = local_proxy_check_jobs[job_id]
         async with local_proxy_check_job_lock:
@@ -1096,6 +1150,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 async def worker():
                     nonlocal idx
                     while idx < len(ports):
+                        if job_id in canceled_local_proxy_check_jobs:
+                            return
                         port = ports[idx]
                         idx += 1
                         try:
@@ -1127,19 +1183,33 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         save()
 
                 await asyncio.gather(*(worker() for _ in range(worker_count)))
-                job.status = "done"
+                job.status = "canceled" if job_id in canceled_local_proxy_check_jobs else "done"
             except Exception as exc:
-                job.status = "error"
-                job.error = str(exc)
+                if job_id in canceled_local_proxy_check_jobs:
+                    job.status = "canceled"
+                else:
+                    job.status = "error"
+                    job.error = str(exc)
             finally:
                 if active_local_proxy_check_job["id"] == job_id:
                     active_local_proxy_check_job["id"] = None
+                canceled_local_proxy_check_jobs.discard(job_id)
 
     @app.get("/api/proxy-admin/jobs/{job_id}")
     async def get_proxy_admin_job(job_id: str):
         job = proxy_admin_jobs.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="ProxyAdmin job not found")
+        return job.model_dump()
+
+    @app.post("/api/proxy-admin/jobs/{job_id}/cancel")
+    async def cancel_proxy_admin_job(job_id: str):
+        job = proxy_admin_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="ProxyAdmin job not found")
+        canceled_proxy_admin_jobs.add(job_id)
+        if job.status == "running":
+            job.status = "canceling"
         return job.model_dump()
 
     async def run_proxy_admin_job(job_id: str, payload: ProxyAdminRequest, proxy_items: list[dict]) -> None:
@@ -1152,6 +1222,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 upload_failures = [item for item in imported if int(item.get("id") or 0) <= 0]
                 job.total = len(imported)
                 for item in upload_failures:
+                    if job_id in canceled_proxy_admin_jobs:
+                        job.status = "canceled"
+                        return
                     result = {
                         "id": item.get("id") or 0,
                         "exit_ip": "",
@@ -1172,6 +1245,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 async def worker():
                     nonlocal idx
                     while idx < len(check_items):
+                        if job_id in canceled_proxy_admin_jobs:
+                            return
                         item = check_items[idx]
                         idx += 1
                         proxy_id = int(item.get("id") or 0)
@@ -1191,13 +1266,17 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         job.completed += 1
 
                 await asyncio.gather(*(worker() for _ in range(concurrency)))
-                job.status = "done"
+                job.status = "canceled" if job_id in canceled_proxy_admin_jobs else "done"
             except Exception as exc:
-                job.status = "error"
-                job.error = str(exc)
+                if job_id in canceled_proxy_admin_jobs:
+                    job.status = "canceled"
+                else:
+                    job.status = "error"
+                    job.error = str(exc)
             finally:
                 if active_proxy_admin_job["id"] == job_id:
                     active_proxy_admin_job["id"] = None
+                canceled_proxy_admin_jobs.discard(job_id)
 
     @app.post("/api/proxy-admin/remove")
     async def remove_proxy_admin_items(payload: ProxyAdminRemoveRequest):

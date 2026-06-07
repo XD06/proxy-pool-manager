@@ -2613,6 +2613,39 @@ python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 ```
 
+## 长任务取消机制
+
+目标：
+
+- 本地检测、节点测速、端口验证、ProxyAdmin 检测开始后可以取消。
+- 已完成的结果保留，未完成的任务尽快停止。
+
+处理：
+
+- 新增取消接口：
+  - `POST /api/test/jobs/{job_id}/cancel`
+  - `POST /api/test-ports/jobs/{job_id}/cancel`
+  - `POST /api/proxy-check/jobs/{job_id}/cancel`
+  - `POST /api/proxy-admin/jobs/{job_id}/cancel`
+- 任务状态新增运行时状态：
+  - `canceling`
+  - `canceled`
+- 本地 proxycheck 后台任务、端口验证、ProxyAdmin 检测循环都会检查取消标记。
+- 节点测速底层 `test_nodes_with_temporary_engine` 增加 `should_cancel`，取消时停止等待剩余节点并关闭临时 sing-box。
+- 前端新增取消按钮：
+  - 节点测试页：取消测速。
+  - 运行页本地检测：取消。
+  - 运行页验证与导出：取消验证。
+  - ProxyAdmin 检测：取消检测。
+
+验证：
+
+```text
+python -m pytest -q -> 75 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

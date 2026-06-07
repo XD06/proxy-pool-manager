@@ -11,6 +11,10 @@ let proxyAdminImported = [];
 let proxyAdminConfigLoaded = false;
 let localProxyCheckResults = {};
 let localProxyCheckingPorts = new Set();
+let activeNodeTestJobId = null;
+let activePortValidationJobId = null;
+let activeLocalProxyCheckJobId = null;
+let activeProxyAdminJobId = null;
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 
 const DEFAULT_VALIDATION_URLS = [
@@ -528,6 +532,11 @@ function renderLocalProxyCheckResult(result) {
   box.title = targets || result.summary || failedMessage || "";
 }
 
+function setCancelButton(id, visible) {
+  const button = $(id);
+  if (button) button.classList.toggle("hidden", !visible);
+}
+
 async function runLocalProxyCheckForPort(port) {
   localProxyCheckingPorts.add(String(port));
   renderPortsTable();
@@ -565,6 +574,8 @@ async function runLocalProxyCheckForPorts(portList, concurrency = 3) {
     method: "POST",
     body: JSON.stringify({ ports: portList.map(Number), timeout: 30, concurrency })
   });
+  activeLocalProxyCheckJobId = started.id;
+  setCancelButton("cancelLocalProxyCheckBtn", true);
   return pollLocalProxyCheckJob(started.id, portList);
 }
 
@@ -577,15 +588,22 @@ async function pollLocalProxyCheckJob(jobId, portList) {
       localProxyCheckResults[String(port)] = result;
       localProxyCheckingPorts.delete(String(port));
     });
-    if (job.status === "done" || job.status === "error") {
+    if (job.status === "done" || job.status === "error" || job.status === "canceled") {
       portList.forEach((port) => localProxyCheckingPorts.delete(String(port)));
     }
     renderPortsTable();
     $("localProxyCheckResult").textContent = `批量 ${job.completed}/${job.total}`;
     if (job.status === "done") break;
-    if (job.status === "error") throw new Error(job.error || "本地检测任务失败");
+    if (job.status === "canceled") break;
+    if (job.status === "error") {
+      activeLocalProxyCheckJobId = null;
+      setCancelButton("cancelLocalProxyCheckBtn", false);
+      throw new Error(job.error || "本地检测任务失败");
+    }
     await new Promise((resolve) => setTimeout(resolve, 700));
   }
+  activeLocalProxyCheckJobId = null;
+  setCancelButton("cancelLocalProxyCheckBtn", false);
   const results = Object.values(finalJob?.results || {});
   return {
     passed: results.filter((result) => !localProxyCheckFailed(result)).length,
@@ -842,6 +860,8 @@ function renderProxyAdminResults() {
 }
 
 async function pollProxyAdminJob(jobId) {
+  activeProxyAdminJobId = jobId;
+  setCancelButton("proxyAdminCancelBtn", true);
   for (;;) {
     const job = await request(`/api/proxy-admin/jobs/${jobId}`);
     proxyAdminImported = job.imported || proxyAdminImported;
@@ -850,10 +870,20 @@ async function pollProxyAdminJob(jobId) {
     renderPortsTable();
     if (job.status === "done") {
       showQuickResult("ProxyAdmin 检测", `完成 ${job.completed}/${job.total}`, true);
+      activeProxyAdminJobId = null;
+      setCancelButton("proxyAdminCancelBtn", false);
+      return;
+    }
+    if (job.status === "canceled") {
+      showQuickResult("ProxyAdmin 检测", `已取消，完成 ${job.completed}/${job.total}`, false);
+      activeProxyAdminJobId = null;
+      setCancelButton("proxyAdminCancelBtn", false);
       return;
     }
     if (job.status === "error") {
       showQuickResult("ProxyAdmin 检测", job.error || "检测失败", false);
+      activeProxyAdminJobId = null;
+      setCancelButton("proxyAdminCancelBtn", false);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 800));
@@ -951,8 +981,12 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
       method: "POST",
       body: JSON.stringify({ node_tags: tags, prune_same_ip: pruneSameIp, include_geoip: Boolean($("nodeTestGeo")?.checked), target_urls: targetUrls })
     });
+    activeNodeTestJobId = started.id;
+    setCancelButton("cancelNodeTestBtn", true);
     await pollTestJob(started.id);
   } catch (error) {
+    activeNodeTestJobId = null;
+    setCancelButton("cancelNodeTestBtn", false);
     testingTags.clear();
     renderNodeTable();
     showNotice(error.message, "bad");
@@ -981,13 +1015,25 @@ async function pollTestJob(jobId) {
     showNotice(`测速进度：${job.completed}/${job.total}`);
     if (job.status === "done") {
       testingTags.clear();
+      activeNodeTestJobId = null;
+      setCancelButton("cancelNodeTestBtn", false);
       await refresh();
       const removed = job.removed?.length ? `；已去重：${job.removed.join("；")}` : "";
       showNotice(`测速完成：${job.completed}/${job.total}${removed}`, "ok");
       return;
     }
+    if (job.status === "canceled") {
+      testingTags.clear();
+      activeNodeTestJobId = null;
+      setCancelButton("cancelNodeTestBtn", false);
+      renderNodeTable();
+      showNotice(`测速已取消：${job.completed}/${job.total}`, "bad");
+      return;
+    }
     if (job.status === "error") {
       testingTags.clear();
+      activeNodeTestJobId = null;
+      setCancelButton("cancelNodeTestBtn", false);
       renderNodeTable();
       showNotice(job.error || "测速失败", "bad");
       return;
@@ -1101,8 +1147,12 @@ async function runAllPortValidation() {
       method: "POST",
       body: JSON.stringify({ urls })
     });
+    activePortValidationJobId = started.id;
+    setCancelButton("cancelPortValidationBtn", true);
     await pollPortTestJob(started.id, urls);
   } finally {
+    activePortValidationJobId = null;
+    setCancelButton("cancelPortValidationBtn", false);
     setPortValidationRunning(false);
   }
 }
@@ -1122,6 +1172,13 @@ async function pollPortTestJob(jobId, urls) {
       renderPortsTable();
       renderValidationResults();
       showQuickResult("验证全部端口", `可用 ${ok}/${total}；目标：${urls.join("，")}`, ok > 0);
+      return;
+    }
+    if (job.status === "canceled") {
+      validatingPorts.clear();
+      renderPortsTable();
+      renderValidationResults();
+      showQuickResult("验证全部端口", `已取消；完成 ${job.completed}/${job.total}`, false);
       return;
     }
     if (job.status === "error") {
@@ -1369,6 +1426,18 @@ $("repairEngineBtn").addEventListener("click", () => runTask("重启修复引擎
 
 $("testPortsBtn").addEventListener("click", () => runTask("验证全部端口", runAllPortValidation));
 
+$("cancelNodeTestBtn").addEventListener("click", () => runTask("取消测速", async () => {
+  if (!activeNodeTestJobId) throw new Error("没有正在运行的节点测速任务");
+  await request(`/api/test/jobs/${activeNodeTestJobId}/cancel`, { method: "POST", body: "{}" });
+  return "已发送取消测速请求";
+}));
+
+$("cancelPortValidationBtn").addEventListener("click", () => runTask("取消端口验证", async () => {
+  if (!activePortValidationJobId) throw new Error("没有正在运行的端口验证任务");
+  await request(`/api/test-ports/jobs/${activePortValidationJobId}/cancel`, { method: "POST", body: "{}" });
+  return "已发送取消端口验证请求";
+}));
+
 $("customTestUrl").addEventListener("input", () => {
   renderPortsTable();
 });
@@ -1474,6 +1543,12 @@ $("proxyAdminDeleteUnusedBtn").addEventListener("click", () => runTask("ProxyAdm
 
 $("refreshBtn").addEventListener("click", () => runTask("刷新", refresh));
 
+$("proxyAdminCancelBtn").addEventListener("click", () => runTask("取消 ProxyAdmin 检测", async () => {
+  if (!activeProxyAdminJobId) throw new Error("没有正在运行的 ProxyAdmin 检测任务");
+  await request(`/api/proxy-admin/jobs/${activeProxyAdminJobId}/cancel`, { method: "POST", body: "{}" });
+  return "已发送取消 ProxyAdmin 检测请求";
+}));
+
 $("localProxyCheckBtn").addEventListener("click", () => runTask("本地检测", async () => {
   const port = Number($("localProxyCheckPort").value || 0);
   if (!port) throw new Error("没有可检测端口");
@@ -1494,6 +1569,12 @@ $("localProxyCheckAllBtn").addEventListener("click", () => runTask("全部检测
   const result = await runLocalProxyCheckForPorts(portList, 3);
   showQuickResult("一键本地检测", `通过 ${result.passed}，失败 ${result.failed}`, result.failed === 0);
   return `一键本地检测完成：通过 ${result.passed}，失败 ${result.failed}`;
+}));
+
+$("cancelLocalProxyCheckBtn").addEventListener("click", () => runTask("取消本地检测", async () => {
+  if (!activeLocalProxyCheckJobId) throw new Error("没有正在运行的本地检测任务");
+  await request(`/api/proxy-check/jobs/${activeLocalProxyCheckJobId}/cancel`, { method: "POST", body: "{}" });
+  return "已发送取消本地检测请求";
 }));
 
 refresh().catch((error) => showNotice(error.message, "bad"));

@@ -299,6 +299,7 @@ async def test_nodes_with_temporary_engine(
     target_url: str | None = None,
     target_urls: list[str] | None = None,
     include_exit_ip: bool = False,
+    should_cancel=None,
 ) -> dict[str, LatencyResult]:
     if not nodes:
         return {}
@@ -345,13 +346,22 @@ async def test_nodes_with_temporary_engine(
             async with semaphore:
                 return await run_one(tag, port)
 
-        tasks = [limited_run_one(node.tag, ports[index]) for index, node in enumerate(nodes)]
+        tasks = [asyncio.create_task(limited_run_one(node.tag, ports[index])) for index, node in enumerate(nodes)]
         results: dict[str, LatencyResult] = {}
-        for completed in asyncio.as_completed(tasks):
-            tag, result = await completed
-            results[tag] = result
-            if on_result:
-                on_result(tag, result)
+        try:
+            for completed in asyncio.as_completed(tasks):
+                if should_cancel and should_cancel():
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    break
+                tag, result = await completed
+                results[tag] = result
+                if on_result:
+                    on_result(tag, result)
+        finally:
+            if should_cancel and should_cancel():
+                await asyncio.gather(*tasks, return_exceptions=True)
         return results
     finally:
         await engine.stop()
