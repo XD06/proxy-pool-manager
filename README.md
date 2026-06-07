@@ -67,7 +67,14 @@ chmod +x scripts/*.sh
 ./scripts/start-service.sh
 ```
 
-安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，并生成默认 `config/app.json`。
+安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，构建 Linux 版 `proxycheck-api/proxycheck`，并生成默认 `config/app.json`。
+
+如果 Linux 服务器没有安装 Go，本地 proxycheck 检测会不可用。安装 Go 后执行：
+
+```bash
+cd proxycheck-api
+go build -o proxycheck ./cmd/proxycheck
+```
 
 手动安装依赖也可以：
 

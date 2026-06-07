@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,10 +29,32 @@ def proxycheck_binary_path() -> Path:
     for path in candidates:
         if path.exists():
             return path
+    built = build_proxycheck_binary()
+    if built.exists():
+        return built
     raise FileNotFoundError(
         "proxycheck binary not found. Build it with `go build -o proxycheck ./cmd/proxycheck` "
         "inside proxycheck-api, or set PROXYCHECK_BIN."
     )
+
+
+def build_proxycheck_binary() -> Path:
+    output = PROXYCHECK_DIR / ("proxycheck.exe" if sys.platform.startswith("win") else "proxycheck")
+    if not (PROXYCHECK_DIR / "go.mod").exists() or not shutil.which("go"):
+        return output
+    try:
+        subprocess.run(
+            ["go", "build", "-o", output.name, "./cmd/proxycheck"],
+            cwd=str(PROXYCHECK_DIR),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+        )
+    except Exception:
+        return output
+    return output
 
 
 def normalize_proxycheck_result(raw: dict, proxy_id: int) -> dict:

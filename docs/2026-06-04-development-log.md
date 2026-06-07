@@ -2382,6 +2382,40 @@ node --check static/app.js -> passed
 proxycheck-api\proxycheck.exe -h -> passed
 ```
 
+## Linux proxycheck 二进制构建修复
+
+问题：
+
+```text
+base_connectivity: fail -ms proxycheck binary not found.
+Build it with `go build -o proxycheck ./cmd/proxycheck` inside proxycheck-api, or set PROXYCHECK_BIN.
+```
+
+原因：
+
+- 仓库里提交的是 Windows `proxycheck-api/proxycheck.exe`。
+- Linux 不能执行 `.exe`，后端会查找 `proxycheck-api/proxycheck`。
+- Linux 服务器没有这个无扩展名二进制时，本地检测不可用。
+
+处理：
+
+- `scripts/install-linux.sh` 新增自动构建：
+  - 如果 `proxycheck-api/proxycheck` 已存在则跳过。
+  - 如果系统有 `go`，执行 `go build -o proxycheck ./cmd/proxycheck`。
+  - 如果没有 Go，输出明确安装/构建提示。
+- `app/proxy_check.py` 增加运行时兜底：
+  - 找不到平台二进制时，如果系统有 `go`，自动构建一次。
+  - 仍支持 `PROXYCHECK_BIN` 指定外部二进制。
+- README 和 `docs/operation.md` 补充 Linux proxycheck 构建说明。
+
+验证：
+
+```text
+proxycheck-api\proxycheck.exe -h -> passed
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

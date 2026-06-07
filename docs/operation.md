@@ -129,6 +129,24 @@ chmod +x scripts/*.sh
 
 Linux 脚本同样使用 `.venv`，sing-box 放在 `bin/sing-box`。
 
+本地 proxycheck 检测使用平台二进制：
+
+- Windows：`proxycheck-api/proxycheck.exe`
+- Linux：`proxycheck-api/proxycheck`
+
+`scripts/install-linux.sh` 会在服务器已安装 Go 时自动构建 Linux 二进制。如果提示 Go 不存在，先安装 Go，然后执行：
+
+```bash
+cd proxycheck-api
+go build -o proxycheck ./cmd/proxycheck
+```
+
+也可以通过环境变量指定已有二进制：
+
+```bash
+export PROXYCHECK_BIN=/path/to/proxycheck
+```
+
 ## 部署到服务器给别人用
 
 默认只允许本机使用：

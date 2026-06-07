@@ -30,6 +30,18 @@ fi
 ".venv/bin/python" -m pip install --upgrade pip
 ".venv/bin/python" -m pip install -r requirements.txt
 
+if [ -x proxycheck-api/proxycheck ]; then
+  echo "proxycheck binary already exists, skipping build"
+elif command -v go >/dev/null 2>&1; then
+  echo "Building proxycheck binary..."
+  (cd proxycheck-api && go build -o proxycheck ./cmd/proxycheck)
+  chmod +x proxycheck-api/proxycheck
+else
+  echo "Warning: Go is not installed; local proxycheck detection will be unavailable until you run:" >&2
+  echo "  cd proxycheck-api && go build -o proxycheck ./cmd/proxycheck" >&2
+  echo "or set PROXYCHECK_BIN to an existing Linux proxycheck binary." >&2
+fi
+
 # 如果 bin/sing-box 已存在且可执行，跳过下载
 if [ -x bin/sing-box ]; then
   echo "sing-box binary already exists, skipping download"
