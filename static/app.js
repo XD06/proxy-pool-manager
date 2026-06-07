@@ -451,6 +451,37 @@ function renderPortsTable() {
   renderValidationResults();
 }
 
+function renderLocalProxyCheckPorts() {
+  const select = $("localProxyCheckPort");
+  if (!select) return;
+  const selected = select.value;
+  const portEntries = Object.keys(ports).sort((left, right) => Number(left) - Number(right));
+  select.innerHTML = portEntries.length
+    ? portEntries.map((port) => `<option value="${escapeHtml(port)}">${escapeHtml(port)}</option>`).join("")
+    : '<option value="">无端口</option>';
+  if (selected && portEntries.includes(selected)) select.value = selected;
+}
+
+function localProxyCheckFailed(result) {
+  return result?.grade === "ERR" || (result?.items || []).some((item) => item.status === "fail");
+}
+
+function renderLocalProxyCheckResult(result) {
+  const box = $("localProxyCheckResult");
+  if (!box) return;
+  if (!result) {
+    box.className = "local-check-result muted";
+    box.textContent = "未检测";
+    box.title = "";
+    return;
+  }
+  const failed = localProxyCheckFailed(result);
+  const targets = (result.items || []).map((item) => `${item.target}: ${item.status} ${item.latency_ms || "-"}ms`).join("\n");
+  box.className = `local-check-result ${failed ? "bad" : "ok"}`;
+  box.textContent = `${result.grade || "-"} · ${result.score ?? "-"} · ${result.exit_ip || "-"} · ${result.country || result.country_code || "-"}`;
+  box.title = targets || result.summary || "";
+}
+
 function proxyAdminResultByPort() {
   const resultById = new Map(Object.values(proxyAdminResults).map((result) => [String(result.id), result]));
   const byPort = new Map();
@@ -693,6 +724,7 @@ async function refresh() {
   renderSummary();
   renderNodeTable();
   renderAssignTable();
+  renderLocalProxyCheckPorts();
   renderPortsTable();
 }
 
@@ -1273,6 +1305,23 @@ $("proxyAdminDeleteUnusedBtn").addEventListener("click", () => runTask("ProxyAdm
 }));
 
 $("refreshBtn").addEventListener("click", () => runTask("刷新", refresh));
+
+$("localProxyCheckBtn").addEventListener("click", () => runTask("本地检测", async () => {
+  const port = Number($("localProxyCheckPort").value || 0);
+  if (!port) throw new Error("没有可检测端口");
+  renderLocalProxyCheckResult({ grade: "...", score: "-", exit_ip: "检测中", country: "" });
+  const result = await request("/api/proxy-check", {
+    method: "POST",
+    body: JSON.stringify({ port, timeout: 30 })
+  });
+  renderLocalProxyCheckResult(result);
+  showQuickResult(
+    `本地检测 ${port}`,
+    `${result.grade || "-"} · ${result.score ?? "-"} · ${result.exit_ip || "-"} · ${result.country || result.country_code || "-"}`,
+    !localProxyCheckFailed(result)
+  );
+  return `本地检测完成：${port}`;
+}));
 
 refresh().catch((error) => showNotice(error.message, "bad"));
 setInterval(() => {

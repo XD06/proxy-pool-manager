@@ -244,6 +244,34 @@ label span {
   justify-content: flex-end;
 }
 
+.local-check-result {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(100%, 360px);
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-check-result.ok {
+  border-color: rgba(42, 132, 90, 0.25);
+  background: rgba(42, 132, 90, 0.08);
+  color: #236b4b;
+}
+
+.local-check-result.bad {
+  border-color: rgba(190, 59, 59, 0.25);
+  background: rgba(190, 59, 59, 0.08);
+  color: #9f2f2f;
+}
+
 .test-control-panel {
   display: grid;
   gap: 9px;

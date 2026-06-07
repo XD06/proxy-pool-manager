@@ -2352,6 +2352,11 @@ ProxyAdmin 和本地 proxycheck-api 都有检测能力，如果混在一个流�
   - 后端跳过远端上传，只对已有远端 id 重跑 ProxyAdmin 远端质量检测。
   - 避免失败重试时在 ProxyAdmin 里重复创建代理。
 - 本地 `proxycheck-api` 检测模块暂时独立保留，后续应接到单独的本地检测区域，不混入 `proxy-admin-box`。
+- 运行页 section-head 新增本地检测入口：
+  - 端口下拉框自动使用当前映射端口。
+  - `检测` 按钮调用 `POST /api/proxy-check`。
+  - 后端通过本地 `proxycheck-api` 检测 `http://127.0.0.1:{port}/`。
+  - 结果在 section-head 内紧凑展示 `grade / score / exit_ip / country`。
 
 本地验证：
 
@@ -2366,7 +2371,7 @@ python adapter check_proxy_quality("http://127.0.0.1:8001/", 8001, 30)
 验证：
 
 ```text
-python -m pytest -q -> 70 passed
+python -m pytest -q -> 71 passed
 python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 proxycheck-api\proxycheck.exe -h -> passed

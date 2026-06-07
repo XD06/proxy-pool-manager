@@ -856,6 +856,33 @@ def test_api_proxy_admin_check_only_requires_ids(tmp_path):
     assert "Missing ProxyAdmin ids for ports: 18007" in response.json()["detail"]
 
 
+def test_api_local_proxy_check_uses_proxycheck_adapter(tmp_path, monkeypatch):
+    called = {}
+
+    async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
+        called["args"] = (proxy_url, proxy_id, timeout_seconds)
+        return {
+            "id": proxy_id,
+            "proxy_url": proxy_url,
+            "exit_ip": "203.0.113.9",
+            "country": "TEST",
+            "score": 100,
+            "grade": "A",
+            "items": [{"target": "base_connectivity", "status": "pass", "latency_ms": 10}],
+        }
+
+    monkeypatch.setattr(api_module, "check_proxy_quality", fake_check_proxy_quality)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post("/api/proxy-check", json={"port": 18007, "timeout": 20})
+
+    assert response.status_code == 200
+    assert response.json()["grade"] == "A"
+    assert called["args"] == ("http://127.0.0.1:18007/", 18007, 20)
+
+
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
     class FakeResponse:
         def __init__(self, payload):

@@ -25,6 +25,7 @@ from .proxy_admin import (
     proxy_admin_quality_check,
     proxy_admin_remove_ids,
 )
+from .proxy_check import check_proxy_quality
 from .settings import (
     APP_CONFIG_PATH,
     SING_BOX_CONFIG_PATH,
@@ -112,6 +113,12 @@ class ProxyAdminConfig(BaseModel):
     replace_to: str = ""
     proxy_name_prefix: str = "代理"
     concurrency: int = 10
+
+
+class LocalProxyCheckRequest(BaseModel):
+    port: int | None = None
+    proxy_url: str | None = None
+    timeout: int = 30
 
 
 class GeoIpConfig(BaseModel):
@@ -960,6 +967,21 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         config["proxy_admin"] = payload.model_dump()
         save_app_config(config)
         return {"ok": True, "config": proxy_admin_config_payload()}
+
+    @app.post("/api/proxy-check")
+    async def local_proxy_check(payload: LocalProxyCheckRequest):
+        proxy_url = (payload.proxy_url or "").strip()
+        proxy_id = int(payload.port or 0)
+        if not proxy_url:
+            if not payload.port:
+                raise HTTPException(status_code=400, detail="port or proxy_url is required")
+            if payload.port < 1 or payload.port > 65535:
+                raise HTTPException(status_code=400, detail="invalid port")
+            proxy_url = f"http://127.0.0.1:{payload.port}/"
+        try:
+            return await check_proxy_quality(proxy_url, proxy_id, payload.timeout)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/api/proxy-admin/jobs/{job_id}")
     async def get_proxy_admin_job(job_id: str):
