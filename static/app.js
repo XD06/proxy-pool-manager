@@ -24,8 +24,6 @@ const DEFAULT_VALIDATION_URLS = [
   "https://www.cloudflare.com/cdn-cgi/trace"
 ];
 const EXIT_IP_CHECK_URL = "https://ipv4.webshare.io/";
-const GEOIP_CHIP_STYLE = "display:inline-block;max-width:150px;overflow:hidden;color:#3f5e52;font-size:12px;text-overflow:ellipsis;vertical-align:middle;white-space:nowrap";
-
 const $ = (id) => document.getElementById(id);
 
 async function request(path, options = {}) {
@@ -101,6 +99,11 @@ function targetResponseText(latency) {
   }
   if (latency.exit_ip) return `出口 ${latency.exit_ip}`;
   return compactCheckMessage(latency.error) || "-";
+}
+
+function targetResponsePreview(latency) {
+  const text = targetResponseText(latency);
+  return text.length > 82 ? `${text.slice(0, 79)}...` : text;
 }
 
 function geoIpSummary(geoip) {
@@ -232,33 +235,42 @@ function renderNodeTestOverview() {
 // }
 
 
+function setTone(id, tone) {
+  const element = $(id);
+  if (!element) return;
+  element.classList.remove("tone-ok", "tone-bad", "tone-warn", "tone-muted", "tone-info");
+  element.classList.add(`tone-${tone}`);
+}
+
 function renderSummary() {
   const expectedPorts = statusSnapshot.expected_ports || [];
   const listeningPorts = statusSnapshot.listening_ports || [];
   const missingPorts = statusSnapshot.missing_ports || expectedPorts.filter((port) => !listeningPorts.includes(port));
+  let tone = "muted";
   if (!statusSnapshot.running) {
     $("engineState").textContent = "未运行";
-    $("engineState").style.color = "#787774";
   } else if (statusSnapshot.config_matches_state === false) {
     const configured = statusSnapshot.config_ports?.length || 0;
     const expected = statusSnapshot.expected_ports?.length || 0;
-    $("engineState").textContent = `配置不一致restart #${statusSnapshot.pid} ${configured}/${expected}`;
-    $("engineState").style.color = "#9f2f2d";
+    $("engineState").textContent = `需重启 #${statusSnapshot.pid} ${configured}/${expected}`;
+    tone = "bad";
   } else if (statusSnapshot.ready === false) {
     const listening = statusSnapshot.listening_ports?.length || 0;
     const expected = statusSnapshot.expected_ports?.length || 0;
     $("engineState").textContent = `启动中 #${statusSnapshot.pid} ${listening}/${expected}`;
-    $("engineState").style.color = "#1f6c9f";
+    tone = "info";
   } else {
     $("engineState").textContent = `运行中 #${statusSnapshot.pid}`;
-    $("engineState").style.color = "#346538";
+    tone = "ok";
   }
+  $("engineState").title = $("engineState").textContent;
+  setTone("engineState", tone);
   $("nodeCount").textContent = String(statusSnapshot.node_count ?? nodes.length);
-  $("nodeCount").style.color = $("engineState").style.color;
   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
-  $("mappingCount").style.color = $("engineState").style.color;
   $("listeningCount").textContent = `${listeningPorts.length}/${expectedPorts.length}`;
-  $("listeningCount").style.color = missingPorts.length ? "#9f2f2d" : $("engineState").style.color;
+  setTone("nodeCount", tone);
+  setTone("mappingCount", tone);
+  setTone("listeningCount", missingPorts.length ? "bad" : tone);
   $("listeningCount").title = missingPorts.length
     ? `异常端口：${missingPorts.join(", ")}`
     : "所有映射端口均在监听";
@@ -393,8 +405,8 @@ function renderNodeTable() {
           <td data-label="状态">${nodeStatusBadge(node)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(node.latency)}" title="${escapeHtml(latencyTitle(node.latency))}">${escapeHtml(latencyText(node.latency))}</span></td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
-          <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
-          <td data-label="目标结果" class="result-preview">${escapeHtml(targetResponseText(node.latency))}</td>
+          <td data-label="地区"><span class="geoip-chip" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
+          <td data-label="目标结果" class="result-preview" title="${escapeHtml(targetResponseText(node.latency))}">${escapeHtml(targetResponsePreview(node.latency))}</td>
         </tr>`).join("")}
       </tbody>
     </table>`;
@@ -441,7 +453,7 @@ function renderAssignTable() {
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
           <td data-label="节点">${escapeHtml(node.name)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
-          <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
+          <td data-label="地区"><span class="geoip-chip" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
           <td data-label="状态">${statusBadge(node.latency)}</td>
         </tr>`;
       }).join("")}</tbody>
@@ -484,17 +496,19 @@ function renderPortsTable() {
           <td data-label="协议">${escapeHtml(item.type || "-")}</td>
           <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}" title="${escapeHtml(latencyTitle(item.latency))}">${escapeHtml(latencyText(item.latency))}</span></td>
-          <td data-label="验证结果" class="result-preview">${escapeHtml(targetResponseText(item.latency))}</td>
+          <td data-label="验证结果" class="result-preview" title="${escapeHtml(targetResponseText(item.latency))}">${escapeHtml(targetResponsePreview(item.latency))}</td>
           <td data-label="ProxyAdmin">${proxyAdminPortSummary(port)}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
-          <td data-label="地区"><span class="geoip-chip" style="${GEOIP_CHIP_STYLE}" id="geo-${port}" title="${escapeHtml(geoIpTitle(item))}">${escapeHtml(geoIpText(item))}</span></td>
+          <td data-label="地区"><span class="geoip-chip" id="geo-${port}" title="${escapeHtml(geoIpTitle(item))}">${escapeHtml(geoIpText(item))}</span></td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
           <td data-label="操作">
-            <button data-ip-port="${port}">查出口</button>
-            <button data-validate-port="${port}">验证</button>
-            <button data-remove-port="${port}">移除映射</button>
-            <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5">复制 SOCKS</button>
-            <button data-remove-proxy-admin-port="${port}">移除代理</button>
+            <div class="table-actions">
+              <button data-ip-port="${port}">查出口</button>
+              <button data-validate-port="${port}">验证</button>
+              <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5">复制 SOCKS</button>
+              <button data-remove-port="${port}">移除映射</button>
+              <button data-remove-proxy-admin-port="${port}">移除代理</button>
+            </div>
           </td>
         </tr>`;
       }).join("")}</tbody>
@@ -846,7 +860,7 @@ async function copyText(text, label = "内容") {
       document.execCommand("copy");
       textarea.remove();
     }
-    showQuickResult("已复制", `${label}：${text}`, true);
+    showQuickResult("已复制", label, true);
   } catch (error) {
     showQuickResult("复制失败", error.message || "浏览器拒绝访问剪贴板", false);
   }
