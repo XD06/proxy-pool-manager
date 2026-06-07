@@ -28,9 +28,11 @@ def proxycheck_binary_path() -> Path:
 
     for path in candidates:
         if path.exists():
+            ensure_executable(path)
             return path
     built = build_proxycheck_binary()
     if built.exists():
+        ensure_executable(built)
         return built
     raise FileNotFoundError(
         "proxycheck binary not found. Build it with `go build -o proxycheck ./cmd/proxycheck` "
@@ -55,6 +57,15 @@ def build_proxycheck_binary() -> Path:
     except Exception:
         return output
     return output
+
+
+def ensure_executable(path: Path) -> None:
+    if sys.platform.startswith("win"):
+        return
+    try:
+        path.chmod(path.stat().st_mode | 0o111)
+    except OSError:
+        return
 
 
 def normalize_proxycheck_result(raw: dict, proxy_id: int) -> dict:

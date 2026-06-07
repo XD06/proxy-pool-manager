@@ -2416,6 +2416,33 @@ python -m pytest -q -> 72 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## Linux proxycheck 执行权限修复
+
+问题：
+
+```text
+[Errno 13] Permission denied: '/home/dsk/proxy-pool-manager/proxycheck-api/proxycheck'
+```
+
+原因：
+
+- Linux 二进制文件存在，但没有执行位。
+- Windows 上提交二进制时容易保留为 `100644`，Linux 运行时无法执行。
+
+处理：
+
+- Git 文件模式设置为 `100755`：
+  - `proxycheck-api/proxycheck`
+  - Linux 服务脚本
+- `app/proxy_check.py` 在 Linux 下找到二进制后会尝试自动补 `+x` 执行位，作为运行时兜底。
+
+验证：
+
+```text
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：
