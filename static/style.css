@@ -76,7 +76,8 @@ button:active {
 
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+select:focus-visible {
   outline: 3px solid rgba(31, 108, 159, 0.18);
   outline-offset: 2px;
 }
@@ -474,6 +475,17 @@ input[type="checkbox"] {
   accent-color: #111;
   box-shadow: none;
   vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 textarea {
@@ -1296,7 +1308,7 @@ code {
   .tab {
     flex: 0 0 auto;
     min-width: 64px;
-    min-height: 32px;
+    min-height: 44px;
   }
 
   .panel {
@@ -1315,6 +1327,7 @@ code {
   .target-option {
     flex: 1 1 120px;
     justify-content: center;
+    min-height: 44px;
   }
 
   .actions {
@@ -1341,7 +1354,7 @@ code {
   }
 
   button {
-    min-height: 34px;
+    min-height: 44px;
     padding-inline: 8px;
     font-size: 13px;
   }
@@ -1349,8 +1362,15 @@ code {
   input,
   textarea,
   select {
+    min-height: 44px;
     padding: 7px 8px;
     font-size: 13px;
+  }
+
+  input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    min-height: 0;
   }
 
   .input-row {

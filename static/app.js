@@ -370,7 +370,7 @@ function renderNodeTable() {
     <table>
       <thead>
         <tr>
-          <th><input id="checkAllNodes" type="checkbox" checked></th>
+          <th><input id="checkAllNodes" type="checkbox" aria-label="选择全部节点" checked></th>
           <th>节点</th>
           <th>协议</th>
           <th>服务器</th>
@@ -383,7 +383,7 @@ function renderNodeTable() {
       </thead>
       <tbody>${nodes.map((node) => `
         <tr>
-          <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" checked></td>
+          <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" aria-label="选择节点 ${escapeHtml(node.name)}" checked></td>
           <td data-label="节点">
             <strong>${escapeHtml(node.name)}</strong>
             <small>${escapeHtml(node.tag)}</small>
@@ -437,7 +437,7 @@ function renderAssignTable() {
       <tbody>${assignNodes.map(({ node, assignedPort }) => {
         const checked = assignedPort || (autoSelectAliveForAssign && node.latency?.alive) ? "checked" : "";
         return `<tr>
-          <td data-label="使用"><input type="checkbox" class="assign-check" data-tag="${escapeHtml(node.tag)}" ${checked}></td>
+          <td data-label="使用"><input type="checkbox" class="assign-check" data-tag="${escapeHtml(node.tag)}" aria-label="分配节点 ${escapeHtml(node.name)}" ${checked}></td>
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
           <td data-label="节点">${escapeHtml(node.name)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
