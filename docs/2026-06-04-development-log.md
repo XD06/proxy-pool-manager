@@ -2470,6 +2470,36 @@ python -m pytest -q -> 72 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## 本地 proxycheck 后台任务
+
+目标：
+
+- “全部检测”不再由前端逐个请求端口。
+- 后端统一管理本地检测进度和结果，前端轮询任务。
+
+处理：
+
+- 新增后端模型 `LocalProxyCheckJob`。
+- 新增接口：
+  - `POST /api/proxy-check/start`
+  - `GET /api/proxy-check/jobs/{job_id}`
+- 后端任务支持：
+  - 默认检测全部映射端口。
+  - 端口去重并按端口号排序。
+  - 并发上限 10，默认 3。
+  - 单端口失败不会中断整批，失败结果写入对应端口。
+- 前端“全部检测”改为启动后台任务并轮询：
+  - 测完一个端口就更新表格对应行。
+  - 任务完成后统计通过/失败数量。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

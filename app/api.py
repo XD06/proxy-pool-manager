@@ -121,6 +121,12 @@ class LocalProxyCheckRequest(BaseModel):
     timeout: int = 30
 
 
+class LocalProxyCheckStartRequest(BaseModel):
+    ports: list[int] | None = None
+    timeout: int = 30
+    concurrency: int = 3
+
+
 class GeoIpConfig(BaseModel):
     enabled: bool = True
     cache_ttl_hours: int = 168
@@ -157,6 +163,15 @@ class ProxyAdminJob(BaseModel):
     error: str | None = None
 
 
+class LocalProxyCheckJob(BaseModel):
+    id: str
+    status: str = "running"
+    total: int = 0
+    completed: int = 0
+    results: dict[str, dict] = {}
+    error: str | None = None
+
+
 def create_app(store: StateStore | None = None, engine: EngineManager | None = None) -> FastAPI:
     state_store = store or StateStore()
     app_state = state_store.load()
@@ -171,6 +186,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     proxy_admin_jobs: dict[str, ProxyAdminJob] = {}
     proxy_admin_job_lock = asyncio.Lock()
     active_proxy_admin_job: dict[str, str | None] = {"id": None}
+    local_proxy_check_jobs: dict[str, LocalProxyCheckJob] = {}
+    local_proxy_check_job_lock = asyncio.Lock()
+    active_local_proxy_check_job: dict[str, str | None] = {"id": None}
     geoip_tasks: dict[str, asyncio.Task] = {}
     geoip_semaphore = asyncio.Semaphore(4)
 
@@ -427,6 +445,53 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 return False
 
         return await asyncio.to_thread(check)
+
+    async def run_local_proxy_check(payload: LocalProxyCheckRequest) -> dict:
+        proxy_url = (payload.proxy_url or "").strip()
+        proxy_id = int(payload.port or 0)
+        if not proxy_url:
+            if not payload.port:
+                raise ValueError("port or proxy_url is required")
+            if payload.port < 1 or payload.port > 65535:
+                raise ValueError("invalid port")
+            if not await local_proxy_port_open(payload.port):
+                return {
+                    "id": int(payload.port),
+                    "proxy_url": f"http://127.0.0.1:{payload.port}/",
+                    "exit_ip": "",
+                    "country": "",
+                    "country_code": "",
+                    "score": 0,
+                    "grade": "ERR",
+                    "summary": "本地代理端口未监听",
+                    "items": [
+                        {
+                            "target": "base_connectivity",
+                            "status": "fail",
+                            "http_status": None,
+                            "latency_ms": None,
+                            "message": f"127.0.0.1:{payload.port} 未监听，请先启动或重启引擎",
+                        }
+                    ],
+                }
+            proxy_url = f"http://127.0.0.1:{payload.port}/"
+        result = await check_proxy_quality(proxy_url, proxy_id, payload.timeout)
+        base_failed = any(
+            item.get("target") == "base_connectivity" and item.get("status") == "fail"
+            for item in result.get("items") or []
+        )
+        if base_failed and not result.get("exit_ip"):
+            result["grade"] = "ERR"
+            result["score"] = 0
+            result["error"] = next(
+                (
+                    item.get("message")
+                    for item in result.get("items") or []
+                    if item.get("target") == "base_connectivity" and item.get("status") == "fail"
+                ),
+                "base connectivity failed",
+            )
+        return result
 
     def allocate_available_ports(start_port: int, count: int, exclude: list[int]) -> dict:
         if count < 0 or count > 1000:
@@ -980,54 +1045,80 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.post("/api/proxy-check")
     async def local_proxy_check(payload: LocalProxyCheckRequest):
-        proxy_url = (payload.proxy_url or "").strip()
-        proxy_id = int(payload.port or 0)
-        if not proxy_url:
-            if not payload.port:
-                raise HTTPException(status_code=400, detail="port or proxy_url is required")
-            if payload.port < 1 or payload.port > 65535:
-                raise HTTPException(status_code=400, detail="invalid port")
-            if not await local_proxy_port_open(payload.port):
-                return {
-                    "id": int(payload.port),
-                    "proxy_url": f"http://127.0.0.1:{payload.port}/",
-                    "exit_ip": "",
-                    "country": "",
-                    "country_code": "",
-                    "score": 0,
-                    "grade": "ERR",
-                    "summary": "本地代理端口未监听",
-                    "items": [
-                        {
-                            "target": "base_connectivity",
-                            "status": "fail",
-                            "http_status": None,
-                            "latency_ms": None,
-                            "message": f"127.0.0.1:{payload.port} 未监听，请先启动或重启引擎",
-                        }
-                    ],
-                }
-            proxy_url = f"http://127.0.0.1:{payload.port}/"
         try:
-            result = await check_proxy_quality(proxy_url, proxy_id, payload.timeout)
-            base_failed = any(
-                item.get("target") == "base_connectivity" and item.get("status") == "fail"
-                for item in result.get("items") or []
-            )
-            if base_failed and not result.get("exit_ip"):
-                result["grade"] = "ERR"
-                result["score"] = 0
-                result["error"] = next(
-                    (
-                        item.get("message")
-                        for item in result.get("items") or []
-                        if item.get("target") == "base_connectivity" and item.get("status") == "fail"
-                    ),
-                    "base connectivity failed",
-                )
-            return result
+            return await run_local_proxy_check(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/api/proxy-check/start")
+    async def start_local_proxy_check(payload: LocalProxyCheckStartRequest):
+        if active_local_proxy_check_job["id"] is not None or local_proxy_check_job_lock.locked():
+            raise HTTPException(status_code=409, detail="A local proxy check job is already running")
+        ports = [int(port) for port in (payload.ports or mapped_ports())]
+        ports = sorted(dict.fromkeys(ports))
+        if not ports:
+            raise HTTPException(status_code=400, detail="No ports to check")
+        job = LocalProxyCheckJob(id=str(uuid.uuid4()), total=len(ports))
+        local_proxy_check_jobs[job.id] = job
+        active_local_proxy_check_job["id"] = job.id
+        asyncio.create_task(run_local_proxy_check_job(job.id, ports, payload.timeout, payload.concurrency))
+        return job.model_dump()
+
+    @app.get("/api/proxy-check/jobs/{job_id}")
+    async def get_local_proxy_check_job(job_id: str):
+        job = local_proxy_check_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Local proxy check job not found")
+        return job.model_dump()
+
+    async def run_local_proxy_check_job(job_id: str, ports: list[int], timeout: int, concurrency: int) -> None:
+        job = local_proxy_check_jobs[job_id]
+        async with local_proxy_check_job_lock:
+            try:
+                idx = 0
+                worker_count = max(1, min(int(concurrency or 3), 10, len(ports)))
+
+                async def worker():
+                    nonlocal idx
+                    while idx < len(ports):
+                        port = ports[idx]
+                        idx += 1
+                        try:
+                            result = await run_local_proxy_check(
+                                LocalProxyCheckRequest(port=port, timeout=timeout)
+                            )
+                        except Exception as exc:
+                            result = {
+                                "id": port,
+                                "proxy_url": f"http://127.0.0.1:{port}/",
+                                "exit_ip": "",
+                                "country": "",
+                                "country_code": "",
+                                "score": 0,
+                                "grade": "ERR",
+                                "summary": "本地检测失败",
+                                "error": str(exc),
+                                "items": [
+                                    {
+                                        "target": "base_connectivity",
+                                        "status": "fail",
+                                        "message": str(exc),
+                                    }
+                                ],
+                            }
+                        job.results[str(port)] = result
+                        job.completed += 1
+
+                await asyncio.gather(*(worker() for _ in range(worker_count)))
+                job.status = "done"
+            except Exception as exc:
+                job.status = "error"
+                job.error = str(exc)
+            finally:
+                if active_local_proxy_check_job["id"] == job_id:
+                    active_local_proxy_check_job["id"] = None
 
     @app.get("/api/proxy-admin/jobs/{job_id}")
     async def get_proxy_admin_job(job_id: str):

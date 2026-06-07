@@ -537,20 +537,38 @@ async function runLocalProxyCheckForPort(port) {
 }
 
 async function runLocalProxyCheckForPorts(portList, concurrency = 3) {
-  let index = 0;
-  let passed = 0;
-  let failed = 0;
-  async function worker() {
-    while (index < portList.length) {
-      const port = portList[index];
-      index += 1;
-      const result = await runLocalProxyCheckForPort(port);
-      if (localProxyCheckFailed(result)) failed += 1;
-      else passed += 1;
+  portList.forEach((port) => localProxyCheckingPorts.add(String(port)));
+  renderPortsTable();
+  const started = await request("/api/proxy-check/start", {
+    method: "POST",
+    body: JSON.stringify({ ports: portList.map(Number), timeout: 30, concurrency })
+  });
+  return pollLocalProxyCheckJob(started.id, portList);
+}
+
+async function pollLocalProxyCheckJob(jobId, portList) {
+  let finalJob = null;
+  for (;;) {
+    const job = await request(`/api/proxy-check/jobs/${jobId}`);
+    finalJob = job;
+    Object.entries(job.results || {}).forEach(([port, result]) => {
+      localProxyCheckResults[String(port)] = result;
+      localProxyCheckingPorts.delete(String(port));
+    });
+    if (job.status === "done" || job.status === "error") {
+      portList.forEach((port) => localProxyCheckingPorts.delete(String(port)));
     }
+    renderPortsTable();
+    $("localProxyCheckResult").textContent = `批量 ${job.completed}/${job.total}`;
+    if (job.status === "done") break;
+    if (job.status === "error") throw new Error(job.error || "本地检测任务失败");
+    await new Promise((resolve) => setTimeout(resolve, 700));
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, portList.length) }, worker));
-  return { passed, failed };
+  const results = Object.values(finalJob?.results || {});
+  return {
+    passed: results.filter((result) => !localProxyCheckFailed(result)).length,
+    failed: results.filter((result) => localProxyCheckFailed(result)).length
+  };
 }
 
 function proxyAdminResultByPort() {

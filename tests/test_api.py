@@ -915,6 +915,53 @@ def test_api_local_proxy_check_reports_closed_port(tmp_path, monkeypatch):
     assert "未监听" in payload["items"][0]["message"]
 
 
+def test_api_local_proxy_check_job_streams_results(tmp_path, monkeypatch):
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(api_module.socket, "create_connection", lambda *args, **kwargs: FakeConnection())
+
+    async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
+        await asyncio.sleep(0)
+        return {
+            "id": proxy_id,
+            "proxy_url": proxy_url,
+            "exit_ip": f"203.0.113.{proxy_id - 18000}",
+            "country": "TEST",
+            "score": 100,
+            "grade": "A",
+            "items": [{"target": "base_connectivity", "status": "pass", "latency_ms": 10}],
+        }
+
+    monkeypatch.setattr(api_module, "check_proxy_quality", fake_check_proxy_quality)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/proxy-check/start",
+            json={"ports": [18002, 18001], "timeout": 20, "concurrency": 2},
+        )
+        assert started.status_code == 200
+        job_id = started.json()["id"]
+        for _ in range(20):
+            job = client.get(f"/api/proxy-check/jobs/{job_id}")
+            if job.json()["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        payload = job.json()
+        assert payload["status"] == "done"
+        assert payload["total"] == 2
+        assert payload["completed"] == 2
+        assert payload["results"]["18001"]["grade"] == "A"
+        assert payload["results"]["18002"]["exit_ip"] == "203.0.113.2"
+
+
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
     class FakeResponse:
         def __init__(self, payload):
