@@ -9,6 +9,8 @@ let validatingPorts = new Set();
 let proxyAdminResults = {};
 let proxyAdminImported = [];
 let proxyAdminConfigLoaded = false;
+let localProxyCheckResults = {};
+let localProxyCheckingPorts = new Set();
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 
 const DEFAULT_VALIDATION_URLS = [
@@ -466,6 +468,18 @@ function localProxyCheckFailed(result) {
   return result?.grade === "ERR" || (result?.items || []).some((item) => item.status === "fail");
 }
 
+function compactCheckMessage(message) {
+  const text = String(message || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const certMismatch = text.match(/x509: certificate is valid for ([^,]+).*not ([^\s"]+)/i);
+  if (certMismatch) return `TLS 证书不匹配：${certMismatch[2]} 返回了 ${certMismatch[1]} 证书`;
+  if (/No connection could be made|connection refused|actively refused/i.test(text)) return "本地端口未监听或连接被拒绝";
+  if (/timeout|deadline exceeded|timed out/i.test(text)) return "请求超时";
+  if (/tls: failed to verify certificate/i.test(text)) return "TLS 证书校验失败";
+  if (/proxyconnect tcp/i.test(text)) return "代理连接失败";
+  return text.length > 96 ? `${text.slice(0, 96)}...` : text;
+}
+
 function renderLocalProxyCheckResult(result) {
   const box = $("localProxyCheckResult");
   if (!box) return;
@@ -478,6 +492,7 @@ function renderLocalProxyCheckResult(result) {
   const failed = localProxyCheckFailed(result);
   const items = result.items || [];
   const failedMessage = result.error || items.find((item) => item.status === "fail")?.message || "";
+  const compactFailedMessage = compactCheckMessage(failedMessage || result.summary || "失败");
   const targets = items.map((item) => `${item.target}: ${item.status} ${item.latency_ms || "-"}ms ${item.message || ""}`).join("\n");
   const targetChips = items
     .filter((item) => item.target !== "base_connectivity")
@@ -486,9 +501,56 @@ function renderLocalProxyCheckResult(result) {
     .join("");
   box.className = `local-check-result ${failed ? "bad" : "ok"}`;
   box.innerHTML = failed
-    ? `<span>${escapeHtml(result.grade || "ERR")} · ${escapeHtml(failedMessage || result.summary || "失败")}</span>`
+    ? `<span>${escapeHtml(result.grade || "ERR")} · ${escapeHtml(compactFailedMessage)}</span>`
     : `<span>${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")} · ${escapeHtml(result.exit_ip || "-")} · ${escapeHtml(result.country || result.country_code || "-")}</span><span class="local-check-targets">${targetChips}</span>`;
   box.title = targets || result.summary || failedMessage || "";
+}
+
+async function runLocalProxyCheckForPort(port) {
+  localProxyCheckingPorts.add(String(port));
+  renderPortsTable();
+  try {
+    const result = await request("/api/proxy-check", {
+      method: "POST",
+      body: JSON.stringify({ port: Number(port), timeout: 30 })
+    });
+    localProxyCheckResults[String(port)] = result;
+    renderLocalProxyCheckResult(result);
+    return result;
+  } catch (error) {
+    const result = {
+      id: Number(port),
+      score: 0,
+      grade: "ERR",
+      exit_ip: "",
+      country: "",
+      error: error.message,
+      items: [{ target: "base_connectivity", status: "fail", message: error.message }]
+    };
+    localProxyCheckResults[String(port)] = result;
+    renderLocalProxyCheckResult(result);
+    return result;
+  } finally {
+    localProxyCheckingPorts.delete(String(port));
+    renderPortsTable();
+  }
+}
+
+async function runLocalProxyCheckForPorts(portList, concurrency = 3) {
+  let index = 0;
+  let passed = 0;
+  let failed = 0;
+  async function worker() {
+    while (index < portList.length) {
+      const port = portList[index];
+      index += 1;
+      const result = await runLocalProxyCheckForPort(port);
+      if (localProxyCheckFailed(result)) failed += 1;
+      else passed += 1;
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, portList.length) }, worker));
+  return { passed, failed };
 }
 
 function proxyAdminResultByPort() {
@@ -503,7 +565,8 @@ function proxyAdminResultByPort() {
 
 function proxyAdminPortSummary(port) {
   const entry = proxyAdminResultByPort().get(String(port));
-  if (!entry) return '<span class="muted">-</span>';
+  const local = localProxyPortSummary(port);
+  if (!entry) return local || '<span class="muted">-</span>';
   const { result } = entry;
   const failed = result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail");
   const targets = (result.items || []).slice(0, 4);
@@ -518,6 +581,37 @@ function proxyAdminPortSummary(port) {
       <span class="proxy-admin-mini-targets">
         ${targets.map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`).join("")}
       </span>
+    </div>
+    ${local}
+  `;
+}
+
+function localProxyPortSummary(port) {
+  if (localProxyCheckingPorts.has(String(port))) {
+    return '<div class="proxy-admin-inline local"><span class="badge testing">本地检测中</span></div>';
+  }
+  const result = localProxyCheckResults[String(port)];
+  if (!result) return "";
+  const failed = localProxyCheckFailed(result);
+  const items = result.items || [];
+  const failedMessage = result.error || items.find((item) => item.status === "fail")?.message || "";
+  const compactFailedMessage = compactCheckMessage(failedMessage || result.summary || "失败");
+  const title = items
+    .map((item) => `${item.target}: ${item.status} ${item.http_status || "-"} ${item.latency_ms || "-"}ms ${item.message || ""}`)
+    .join("\n");
+  const targetChips = items
+    .filter((item) => item.target !== "base_connectivity")
+    .slice(0, 4)
+    .map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`)
+    .join("");
+  return `
+    <div class="proxy-admin-inline local" title="${escapeHtml(title || failedMessage || result.summary || "")}">
+      <span class="badge ${failed ? "bad" : "ok"}">本地 ${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")}</span>
+      ${failed ? `<span>${escapeHtml(compactFailedMessage)}</span>` : `
+        <span class="mono">${escapeHtml(result.exit_ip || "-")}</span>
+        <span>${escapeHtml(result.country || result.country_code || "-")}</span>
+        <span class="proxy-admin-mini-targets">${targetChips}</span>
+      `}
     </div>
   `;
 }
@@ -536,9 +630,8 @@ function proxyAdminResultFailed(result) {
   return result?.grade === "ERR" || (result?.items || []).some((item) => item.status === "fail");
 }
 
-function proxyAdminQuality(entry) {
-  if (!entry?.result) return { bucket: 1, gradeRank: 99, score: -1 };
-  const result = entry.result;
+function qualityFromResult(result) {
+  if (!result) return { bucket: 1, gradeRank: 99, score: -1 };
   if (proxyAdminResultFailed(result)) return { bucket: 2, gradeRank: 99, score: Number(result.score || 0) };
   const gradeOrder = { A: 0, B: 1, C: 2, D: 3, F: 4 };
   return {
@@ -546,6 +639,10 @@ function proxyAdminQuality(entry) {
     gradeRank: gradeOrder[String(result.grade || "").toUpperCase()] ?? 50,
     score: Number(result.score || 0)
   };
+}
+
+function proxyAdminQuality(entry) {
+  return qualityFromResult(entry?.result);
 }
 
 function latencySortValue(latency) {
@@ -556,8 +653,16 @@ function latencySortValue(latency) {
 
 function sortedPortEntries() {
   const proxyAdminByPort = proxyAdminResultByPort();
+  const hasLocalProxyResults = Object.keys(localProxyCheckResults).length > 0;
   const hasProxyAdminResults = proxyAdminByPort.size > 0;
   return Object.entries(ports).sort(([leftPort, left], [rightPort, right]) => {
+    if (hasLocalProxyResults) {
+      const leftQuality = qualityFromResult(localProxyCheckResults[String(leftPort)]);
+      const rightQuality = qualityFromResult(localProxyCheckResults[String(rightPort)]);
+      if (leftQuality.bucket !== rightQuality.bucket) return leftQuality.bucket - rightQuality.bucket;
+      if (leftQuality.gradeRank !== rightQuality.gradeRank) return leftQuality.gradeRank - rightQuality.gradeRank;
+      if (leftQuality.score !== rightQuality.score) return rightQuality.score - leftQuality.score;
+    }
     if (hasProxyAdminResults) {
       const leftQuality = proxyAdminQuality(proxyAdminByPort.get(String(leftPort)));
       const rightQuality = proxyAdminQuality(proxyAdminByPort.get(String(rightPort)));
@@ -1319,17 +1424,22 @@ $("localProxyCheckBtn").addEventListener("click", () => runTask("本地检测", 
   const port = Number($("localProxyCheckPort").value || 0);
   if (!port) throw new Error("没有可检测端口");
   renderLocalProxyCheckResult({ grade: "...", score: "-", exit_ip: "检测中", country: "" });
-  const result = await request("/api/proxy-check", {
-    method: "POST",
-    body: JSON.stringify({ port, timeout: 30 })
-  });
-  renderLocalProxyCheckResult(result);
+  const result = await runLocalProxyCheckForPort(port);
   showQuickResult(
     `本地检测 ${port}`,
     `${result.grade || "-"} · ${result.score ?? "-"} · ${result.exit_ip || "-"} · ${result.country || result.country_code || "-"}`,
     !localProxyCheckFailed(result)
   );
   return `本地检测完成：${port}`;
+}));
+
+$("localProxyCheckAllBtn").addEventListener("click", () => runTask("一键本地检测", async () => {
+  const portList = Object.keys(ports).sort((left, right) => Number(left) - Number(right));
+  if (!portList.length) throw new Error("没有可检测端口");
+  renderLocalProxyCheckResult({ grade: "...", score: "-", exit_ip: "批量检测中", country: "" });
+  const result = await runLocalProxyCheckForPorts(portList, 3);
+  showQuickResult("一键本地检测", `通过 ${result.passed}，失败 ${result.failed}`, result.failed === 0);
+  return `一键本地检测完成：通过 ${result.passed}，失败 ${result.failed}`;
 }));
 
 refresh().catch((error) => showNotice(error.message, "bad"));

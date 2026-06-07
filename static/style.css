@@ -700,6 +700,21 @@ code {
 .proxy-admin-inline {
   max-width: 260px;
   font-size: 12px;
+  overflow: hidden;
+}
+
+.proxy-admin-inline > span:not(.badge):not(.proxy-admin-mini-targets) {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-admin-inline.local {
+  margin-top: 5px;
+  border-top: 1px dashed rgba(121, 134, 120, 0.24);
+  padding-top: 5px;
 }
 
 .proxy-admin-mini-targets b {

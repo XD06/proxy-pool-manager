@@ -2355,8 +2355,12 @@ ProxyAdmin 和本地 proxycheck-api 都有检测能力，如果混在一个流�
 - 运行页 section-head 新增本地检测入口：
   - 端口下拉框自动使用当前映射端口。
   - `检测` 按钮调用 `POST /api/proxy-check`。
+  - `一键本地检测` 按当前端口排序并发检测全部映射端口，测完一个更新一行。
   - 后端通过本地 `proxycheck-api` 检测 `http://127.0.0.1:{port}/`。
-  - 结果在 section-head 内紧凑展示 `grade / score / exit_ip / country` 和 `gpt / claude / gemini` 状态。
+  - 本地检测结果写入端口表 `ProxyAdmin` 列，和远端 ProxyAdmin 结果分层展示。
+  - 端口表会按本地检测结果排序：通过优先，未检测居中，失败/ERR 放后面。
+  - 结果紧凑展示 `grade / score / exit_ip / country` 和 `gpt / claude / gemini` 状态。
+  - 长错误信息只展示短摘要，完整内容保留在 hover title，避免 TLS 证书错误等长文本撑坏布局。
   - 检测前先检查 `127.0.0.1:{port}` 是否监听；未监听直接返回 `ERR` 和明确原因，避免显示误导性的 `B / 78`。
 
 本地验证：
