@@ -2443,6 +2443,33 @@ python -m pytest -q -> 72 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## Doctor 自检脚本
+
+目标：
+
+- 快速定位安装、权限、二进制、服务和端口监听问题。
+- Linux/Windows 都能运行，不依赖 Web UI。
+
+处理：
+
+- 新增 `scripts/doctor.sh`：
+  - 检查 `python3`、`.venv`、`requirements.txt`、`config/app.json`。
+  - 检查 `bin/sing-box`、`proxycheck-api/proxycheck` 是否存在且可执行。
+  - 检查 `tmp/server.pid`、`/api/status`、项目 sing-box 进程。
+  - 输出 `running/ready/listening/expected/missing ports` 摘要。
+- 新增 `scripts/doctor.ps1`：
+  - Windows 下检查 Python、venv、sing-box.exe、proxycheck.exe、Web API 和项目 sing-box 进程。
+- README 和 `docs/operation.md` 增加自检命令。
+
+验证：
+
+```text
+bash -n scripts/doctor.sh -> passed
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1 -> fail=0
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

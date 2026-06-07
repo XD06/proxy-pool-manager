@@ -127,6 +127,18 @@ chmod +x scripts/*.sh
 ./scripts/stop-service.sh
 ```
 
+环境自检：
+
+```bash
+./scripts/doctor.sh
+```
+
+Windows 自检：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
+```
+
 Linux 脚本同样使用 `.venv`，sing-box 放在 `bin/sing-box`。
 
 本地 proxycheck 检测使用平台二进制：

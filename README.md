@@ -76,6 +76,18 @@ cd proxycheck-api
 go build -o proxycheck ./cmd/proxycheck
 ```
 
+环境自检：
+
+```bash
+./scripts/doctor.sh
+```
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
+```
+
 手动安装依赖也可以：
 
 ```powershell
