@@ -238,27 +238,27 @@ function renderSummary() {
   const missingPorts = statusSnapshot.missing_ports || expectedPorts.filter((port) => !listeningPorts.includes(port));
   if (!statusSnapshot.running) {
     $("engineState").textContent = "未运行";
-    $("engineState").style.color = "#999";              // 灰色
+    $("engineState").style.color = "#787774";
   } else if (statusSnapshot.config_matches_state === false) {
     const configured = statusSnapshot.config_ports?.length || 0;
     const expected = statusSnapshot.expected_ports?.length || 0;
     $("engineState").textContent = `配置不一致restart #${statusSnapshot.pid} ${configured}/${expected}`;
-    $("engineState").style.color = "#e74c3c";            // 红色
+    $("engineState").style.color = "#9f2f2d";
   } else if (statusSnapshot.ready === false) {
     const listening = statusSnapshot.listening_ports?.length || 0;
     const expected = statusSnapshot.expected_ports?.length || 0;
     $("engineState").textContent = `启动中 #${statusSnapshot.pid} ${listening}/${expected}`;
-    $("engineState").style.color = "#3498db";            // 蓝色
+    $("engineState").style.color = "#1f6c9f";
   } else {
     $("engineState").textContent = `运行中 #${statusSnapshot.pid}`;
-    $("engineState").style.color = "#2ecc71";            // 绿色
+    $("engineState").style.color = "#346538";
   }
   $("nodeCount").textContent = String(statusSnapshot.node_count ?? nodes.length);
-  $("nodeCount").style.color = $("engineState").style.color; // 节点数大于0显示绿色，否则红色
+  $("nodeCount").style.color = $("engineState").style.color;
   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
-  $("mappingCount").style.color = $("engineState").style.color; // 映射数大于0显示绿色，否则红色
+  $("mappingCount").style.color = $("engineState").style.color;
   $("listeningCount").textContent = `${listeningPorts.length}/${expectedPorts.length}`;
-  $("listeningCount").style.color = missingPorts.length ? "#e74c3c" : $("engineState").style.color;
+  $("listeningCount").style.color = missingPorts.length ? "#9f2f2d" : $("engineState").style.color;
   $("listeningCount").title = missingPorts.length
     ? `异常端口：${missingPorts.join(", ")}`
     : "所有映射端口均在监听";
