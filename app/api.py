@@ -418,6 +418,16 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "label": "可用" if available else "系统不可绑定",
         }
 
+    async def local_proxy_port_open(port: int) -> bool:
+        def check() -> bool:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+                    return True
+            except OSError:
+                return False
+
+        return await asyncio.to_thread(check)
+
     def allocate_available_ports(start_port: int, count: int, exclude: list[int]) -> dict:
         if count < 0 or count > 1000:
             raise HTTPException(status_code=400, detail="Invalid allocation count")
@@ -977,9 +987,45 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 raise HTTPException(status_code=400, detail="port or proxy_url is required")
             if payload.port < 1 or payload.port > 65535:
                 raise HTTPException(status_code=400, detail="invalid port")
+            if not await local_proxy_port_open(payload.port):
+                return {
+                    "id": int(payload.port),
+                    "proxy_url": f"http://127.0.0.1:{payload.port}/",
+                    "exit_ip": "",
+                    "country": "",
+                    "country_code": "",
+                    "score": 0,
+                    "grade": "ERR",
+                    "summary": "本地代理端口未监听",
+                    "items": [
+                        {
+                            "target": "base_connectivity",
+                            "status": "fail",
+                            "http_status": None,
+                            "latency_ms": None,
+                            "message": f"127.0.0.1:{payload.port} 未监听，请先启动或重启引擎",
+                        }
+                    ],
+                }
             proxy_url = f"http://127.0.0.1:{payload.port}/"
         try:
-            return await check_proxy_quality(proxy_url, proxy_id, payload.timeout)
+            result = await check_proxy_quality(proxy_url, proxy_id, payload.timeout)
+            base_failed = any(
+                item.get("target") == "base_connectivity" and item.get("status") == "fail"
+                for item in result.get("items") or []
+            )
+            if base_failed and not result.get("exit_ip"):
+                result["grade"] = "ERR"
+                result["score"] = 0
+                result["error"] = next(
+                    (
+                        item.get("message")
+                        for item in result.get("items") or []
+                        if item.get("target") == "base_connectivity" and item.get("status") == "fail"
+                    ),
+                    "base connectivity failed",
+                )
+            return result
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

@@ -2356,7 +2356,8 @@ ProxyAdmin 和本地 proxycheck-api 都有检测能力，如果混在一个流�
   - 端口下拉框自动使用当前映射端口。
   - `检测` 按钮调用 `POST /api/proxy-check`。
   - 后端通过本地 `proxycheck-api` 检测 `http://127.0.0.1:{port}/`。
-  - 结果在 section-head 内紧凑展示 `grade / score / exit_ip / country`。
+  - 结果在 section-head 内紧凑展示 `grade / score / exit_ip / country` 和 `gpt / claude / gemini` 状态。
+  - 检测前先检查 `127.0.0.1:{port}` 是否监听；未监听直接返回 `ERR` 和明确原因，避免显示误导性的 `B / 78`。
 
 本地验证：
 
@@ -2371,7 +2372,7 @@ python adapter check_proxy_quality("http://127.0.0.1:8001/", 8001, 30)
 验证：
 
 ```text
-python -m pytest -q -> 71 passed
+python -m pytest -q -> 72 passed
 python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 proxycheck-api\proxycheck.exe -h -> passed

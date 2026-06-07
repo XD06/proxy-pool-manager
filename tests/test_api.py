@@ -859,6 +859,15 @@ def test_api_proxy_admin_check_only_requires_ids(tmp_path):
 def test_api_local_proxy_check_uses_proxycheck_adapter(tmp_path, monkeypatch):
     called = {}
 
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(api_module.socket, "create_connection", lambda *args, **kwargs: FakeConnection())
+
     async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
         called["args"] = (proxy_url, proxy_id, timeout_seconds)
         return {
@@ -881,6 +890,29 @@ def test_api_local_proxy_check_uses_proxycheck_adapter(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["grade"] == "A"
     assert called["args"] == ("http://127.0.0.1:18007/", 18007, 20)
+
+
+def test_api_local_proxy_check_reports_closed_port(tmp_path, monkeypatch):
+    def fake_create_connection(*args, **kwargs):
+        raise OSError("connection refused")
+
+    async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
+        raise AssertionError("closed local port should not run proxycheck")
+
+    monkeypatch.setattr(api_module.socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(api_module, "check_proxy_quality", fake_check_proxy_quality)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post("/api/proxy-check", json={"port": 18007, "timeout": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["grade"] == "ERR"
+    assert payload["score"] == 0
+    assert payload["items"][0]["status"] == "fail"
+    assert "未监听" in payload["items"][0]["message"]
 
 
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):

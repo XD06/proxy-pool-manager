@@ -247,6 +247,7 @@ label span {
 .local-check-result {
   display: inline-flex;
   align-items: center;
+  gap: 7px;
   max-width: min(100%, 360px);
   min-height: 32px;
   border: 1px solid var(--line);
@@ -258,6 +259,44 @@ label span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.local-check-result span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.local-check-targets {
+  display: inline-flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.local-check-targets b {
+  border-radius: 999px;
+  padding: 2px 5px;
+  background: rgba(121, 134, 120, 0.12);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.local-check-targets .pass {
+  background: rgba(42, 132, 90, 0.14);
+  color: #236b4b;
+}
+
+.local-check-targets .warn,
+.local-check-targets .challenge {
+  background: rgba(167, 122, 38, 0.16);
+  color: #8a6320;
+}
+
+.local-check-targets .fail,
+.local-check-targets .err {
+  background: rgba(190, 59, 59, 0.14);
+  color: #9f2f2f;
 }
 
 .local-check-result.ok {

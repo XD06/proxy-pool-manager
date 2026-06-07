@@ -476,10 +476,19 @@ function renderLocalProxyCheckResult(result) {
     return;
   }
   const failed = localProxyCheckFailed(result);
-  const targets = (result.items || []).map((item) => `${item.target}: ${item.status} ${item.latency_ms || "-"}ms`).join("\n");
+  const items = result.items || [];
+  const failedMessage = result.error || items.find((item) => item.status === "fail")?.message || "";
+  const targets = items.map((item) => `${item.target}: ${item.status} ${item.latency_ms || "-"}ms ${item.message || ""}`).join("\n");
+  const targetChips = items
+    .filter((item) => item.target !== "base_connectivity")
+    .slice(0, 4)
+    .map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`)
+    .join("");
   box.className = `local-check-result ${failed ? "bad" : "ok"}`;
-  box.textContent = `${result.grade || "-"} · ${result.score ?? "-"} · ${result.exit_ip || "-"} · ${result.country || result.country_code || "-"}`;
-  box.title = targets || result.summary || "";
+  box.innerHTML = failed
+    ? `<span>${escapeHtml(result.grade || "ERR")} · ${escapeHtml(failedMessage || result.summary || "失败")}</span>`
+    : `<span>${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")} · ${escapeHtml(result.exit_ip || "-")} · ${escapeHtml(result.country || result.country_code || "-")}</span><span class="local-check-targets">${targetChips}</span>`;
+  box.title = targets || result.summary || failedMessage || "";
 }
 
 function proxyAdminResultByPort() {
