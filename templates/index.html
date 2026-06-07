@@ -149,6 +149,16 @@
         </section>
         <section class="tool-section">
           <header>
+            <strong>系统自检</strong>
+            <span>检查依赖、配置、服务和内核</span>
+          </header>
+          <div class="actions">
+            <button id="doctorBtn">运行自检</button>
+            <span id="doctorSummary" class="local-check-result muted">未运行</span>
+          </div>
+        </section>
+        <section class="tool-section">
+          <header>
             <strong>本地检测</strong>
             <span>调用本机 proxycheck-api</span>
           </header>
@@ -191,6 +201,7 @@
         </section>
         </div>
       <div id="quickResult" class="quick-result hidden"></div>
+      <div id="doctorResult" class="doctor-result hidden"></div>
       <div id="engineHealth" class="engine-health"></div>
       <div class="proxy-admin-box">
         <div class="proxy-admin-head">

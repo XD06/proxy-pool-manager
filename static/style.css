@@ -497,6 +497,43 @@ textarea {
   color: var(--bad);
 }
 
+.doctor-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+
+.doctor-result span {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 5px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doctor-result .ok {
+  border-color: rgba(42, 132, 90, 0.24);
+  background: rgba(42, 132, 90, 0.08);
+  color: #256a47;
+}
+
+.doctor-result .warn {
+  border-color: rgba(154, 112, 34, 0.28);
+  background: rgba(154, 112, 34, 0.1);
+  color: #7a5618;
+}
+
+.doctor-result .fail {
+  border-color: rgba(190, 59, 59, 0.28);
+  background: rgba(190, 59, 59, 0.08);
+  color: var(--bad);
+}
+
 .engine-health {
   display: flex;
   flex-wrap: wrap;

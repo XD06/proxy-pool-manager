@@ -1334,6 +1334,52 @@ def test_api_status_reports_proxy_connect_host(tmp_path, monkeypatch):
     assert response["proxy_connect_host"] == "proxy.example.com"
 
 
+def test_api_doctor_returns_structured_script_result(tmp_path, monkeypatch):
+    def fake_run_doctor_script(timeout=30):
+        return {
+            "ok": 2,
+            "warn": 1,
+            "fail": 0,
+            "summary": "Summary: ok=2 warn=1 fail=0",
+            "lines": ["[OK] python", "[WARN] web service not running", "=== Summary: ok=2 warn=1 fail=0 ==="],
+            "exit_code": 0,
+            "timed_out": False,
+            "command": "doctor",
+        }
+
+    monkeypatch.setattr(api_module, "run_doctor_script", fake_run_doctor_script)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post("/api/doctor", json={"timeout": 12})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] == 2
+    assert body["warn"] == 1
+    assert body["fail"] == 0
+    assert body["exit_code"] == 0
+    assert body["lines"][1].startswith("[WARN]")
+
+
+def test_run_doctor_script_parses_failed_output(monkeypatch):
+    class FakeCompleted:
+        returncode = 1
+        stdout = "[OK] python\n[FAIL] requirements.txt missing\n=== Summary: ok=1 warn=0 fail=1 ===\n"
+        stderr = ""
+
+    monkeypatch.setattr(api_module.subprocess, "run", lambda *args, **kwargs: FakeCompleted())
+    monkeypatch.setattr(api_module, "_doctor_command", lambda: ["doctor"])
+
+    result = api_module.run_doctor_script(30)
+
+    assert result["exit_code"] == 1
+    assert result["ok"] == 1
+    assert result["fail"] == 1
+    assert result["summary"] == "Summary: ok=1 warn=0 fail=1"
+
+
 def test_listening_local_ports_uses_socket_probe():
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))

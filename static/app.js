@@ -285,6 +285,37 @@ function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
   `;
 }
 
+function renderDoctorResult(result) {
+  const box = $("doctorResult");
+  const summary = $("doctorSummary");
+  if (!box || !summary) return;
+  if (!result) {
+    box.className = "doctor-result hidden";
+    box.innerHTML = "";
+    summary.textContent = "未运行";
+    return;
+  }
+  const tone = result.fail ? "fail" : result.warn ? "warn" : "ok";
+  const summaryText = result.summary || `ok=${result.ok || 0} warn=${result.warn || 0} fail=${result.fail || 0}`;
+  summary.textContent = result.timed_out ? "超时" : summaryText;
+  summary.className = `local-check-result ${tone === "ok" ? "ok" : tone === "warn" ? "muted" : "bad"}`;
+  const lines = (result.lines || [])
+    .filter((line) => /^\[(OK|WARN|FAIL)\]/.test(line) || /^status:|^missing ports:|^config:/.test(line))
+    .slice(0, 12);
+  const chips = [
+    `<span class="${tone}" title="${escapeHtml(summaryText)}">自检 ${escapeHtml(summaryText)}</span>`,
+    `<span class="ok">OK ${Number(result.ok || 0)}</span>`,
+    `<span class="warn">WARN ${Number(result.warn || 0)}</span>`,
+    `<span class="fail">FAIL ${Number(result.fail || 0)}</span>`,
+    ...lines.map((line) => {
+      const cls = line.startsWith("[FAIL]") ? "fail" : line.startsWith("[WARN]") ? "warn" : "ok";
+      return `<span class="${cls}" title="${escapeHtml(line)}">${escapeHtml(compactCheckMessage(line))}</span>`;
+    })
+  ];
+  box.className = "doctor-result";
+  box.innerHTML = chips.join("");
+}
+
 function proxyConnectHost() {
   return statusSnapshot.proxy_connect_host || window.location.hostname || "127.0.0.1";
 }
@@ -1542,6 +1573,19 @@ $("proxyAdminDeleteUnusedBtn").addEventListener("click", () => runTask("ProxyAdm
 }));
 
 $("refreshBtn").addEventListener("click", () => runTask("刷新", refresh));
+
+$("doctorBtn").addEventListener("click", () => runTask("系统自检", async () => {
+  $("doctorSummary").textContent = "运行中";
+  renderDoctorResult(null);
+  $("doctorSummary").textContent = "运行中";
+  const result = await request("/api/doctor", {
+    method: "POST",
+    body: JSON.stringify({ timeout: 30 })
+  });
+  renderDoctorResult(result);
+  showQuickResult("系统自检", result.summary || `OK ${result.ok || 0} / WARN ${result.warn || 0} / FAIL ${result.fail || 0}`, !result.fail);
+  return result.fail ? `自检发现 ${result.fail} 个失败项` : "自检完成";
+}));
 
 $("proxyAdminCancelBtn").addEventListener("click", () => runTask("取消 ProxyAdmin 检测", async () => {
   if (!activeProxyAdminJobId) throw new Error("没有正在运行的 ProxyAdmin 检测任务");

@@ -2646,6 +2646,34 @@ python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 ```
 
+## Web 系统自检
+
+目标：
+
+- 在运行界面直接触发现有 doctor 自检，减少切换到命令行排查环境问题的成本。
+- 复用 `scripts/doctor.ps1` 和 `scripts/doctor.sh`，避免 Web API 与脚本维护两套检查逻辑。
+
+处理：
+
+- 新增 `POST /api/doctor`：
+  - Windows 执行 `scripts/doctor.ps1`。
+  - Linux/macOS 执行 `scripts/doctor.sh`。
+  - 返回 `ok`、`warn`、`fail`、`summary`、`lines`、`exit_code`、`timed_out`、`command`。
+  - 默认 30 秒超时，接口层限制在 5-120 秒。
+- 运行页新增“系统自检”工具：
+  - 点击后显示运行状态。
+  - 自检完成后展示 OK/WARN/FAIL 计数和关键行。
+  - 长错误放入 hover title，页面只显示紧凑摘要，避免破坏布局。
+
+验证：
+
+```text
+python -m pytest -q -> 77 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\doctor.ps1 -> ok=7 warn=2 fail=0
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

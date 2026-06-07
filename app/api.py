@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import platform
 import re
 import socket
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 
@@ -28,6 +30,7 @@ from .proxy_admin import (
 from .proxy_check import check_proxy_quality
 from .settings import (
     APP_CONFIG_PATH,
+    ROOT_DIR,
     SING_BOX_CONFIG_PATH,
     STATIC_DIR,
     TEMPLATES_DIR,
@@ -131,6 +134,10 @@ class GeoIpConfig(BaseModel):
     enabled: bool = True
     cache_ttl_hours: int = 168
     concurrency: int = 4
+
+
+class DoctorRequest(BaseModel):
+    timeout: int = 30
 
 
 class TestJob(BaseModel):
@@ -1418,6 +1425,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         await engine_manager.stop()
         return {"ok": True, "engine": engine_manager.status().model_dump()}
 
+    @app.post("/api/doctor")
+    async def doctor(payload: DoctorRequest | None = None):
+        return await asyncio.to_thread(run_doctor_script, (payload or DoctorRequest()).timeout)
+
     app.state.proxy_pool_state = app_state
     app.state.proxy_pool_store = state_store
     app.state.proxy_pool_engine = engine_manager
@@ -1454,3 +1465,80 @@ def _is_local_port_listening(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.05)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _doctor_command() -> list[str]:
+    if platform.system().lower() == "windows":
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT_DIR / "scripts" / "doctor.ps1"),
+        ]
+    return ["bash", str(ROOT_DIR / "scripts" / "doctor.sh")]
+
+
+def _parse_doctor_output(output: str) -> dict:
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    ok = sum(1 for line in lines if line.startswith("[OK]"))
+    warn = sum(1 for line in lines if line.startswith("[WARN]"))
+    fail = sum(1 for line in lines if line.startswith("[FAIL]"))
+    summary = ""
+    for line in reversed(lines):
+        if line.startswith("=== Summary:"):
+            summary = line.strip("= ").strip()
+            break
+    return {
+        "ok": ok,
+        "warn": warn,
+        "fail": fail,
+        "summary": summary or f"ok={ok} warn={warn} fail={fail}",
+        "lines": lines,
+    }
+
+
+def run_doctor_script(timeout: int = 30) -> dict:
+    timeout = max(5, min(int(timeout or 30), 120))
+    command = _doctor_command()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        output = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
+        parsed = _parse_doctor_output(output)
+        return {
+            **parsed,
+            "exit_code": completed.returncode,
+            "timed_out": False,
+            "command": " ".join(command),
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        parsed = _parse_doctor_output("\n".join(part for part in [stdout, stderr] if part).strip())
+        return {
+            **parsed,
+            "fail": max(parsed["fail"], 1),
+            "summary": f"doctor timed out after {timeout}s",
+            "exit_code": None,
+            "timed_out": True,
+            "command": " ".join(command),
+        }
+    except OSError as exc:
+        return {
+            "ok": 0,
+            "warn": 0,
+            "fail": 1,
+            "summary": str(exc),
+            "lines": [f"[FAIL] doctor script could not run: {exc}"],
+            "exit_code": None,
+            "timed_out": False,
+            "command": " ".join(command),
+        }
