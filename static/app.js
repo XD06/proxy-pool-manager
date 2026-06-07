@@ -1214,9 +1214,18 @@ $("proxyAdminRetryFailedBtn").addEventListener("click", () => runTask("ProxyAdmi
   const retryPorts = proxyAdminImported
     .filter((item) => failedIds.includes(Number(item.id)))
     .map((item) => Number(item.port));
+  const proxyIdsByPort = Object.fromEntries(
+    proxyAdminImported
+      .filter((item) => failedIds.includes(Number(item.id)))
+      .map((item) => [String(item.port), Number(item.id)])
+  );
   const started = await request("/api/proxy-admin/check/start", {
     method: "POST",
-    body: JSON.stringify(proxyAdminPayload({ ports: retryPorts }))
+    body: JSON.stringify(proxyAdminPayload({
+      ports: retryPorts,
+      check_only: true,
+      proxy_ids_by_port: proxyIdsByPort
+    }))
   });
   await pollProxyAdminJob(started.id);
   return "ProxyAdmin 失败项已重试";

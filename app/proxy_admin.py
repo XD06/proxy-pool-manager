@@ -161,8 +161,11 @@ async def proxy_admin_quality_check(payload: Any, proxy_id: int) -> dict:
         "id": int(raw.get("proxy_id") or proxy_id),
         "exit_ip": raw.get("exit_ip") or "",
         "country": raw.get("country") or "",
+        "country_code": raw.get("country_code") or "",
         "score": raw.get("score") or 0,
         "grade": raw.get("grade") or "",
+        "summary": raw.get("summary") or "",
+        "base_latency_ms": raw.get("base_latency_ms"),
         "items": [
             {
                 "target": item.get("target") or "",
@@ -170,6 +173,7 @@ async def proxy_admin_quality_check(payload: Any, proxy_id: int) -> dict:
                 "http_status": item.get("http_status"),
                 "latency_ms": item.get("latency_ms"),
                 "message": item.get("message") or "",
+                "cf_ray": item.get("cf_ray") or "",
             }
             for item in raw.get("items") or []
         ],

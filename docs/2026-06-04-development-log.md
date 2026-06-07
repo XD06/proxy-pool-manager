@@ -2323,6 +2323,55 @@ python -m pytest tests/test_api.py -q -> 29 passed
 python -m compileall -q main.py app tests -> passed
 ```
 
+## ProxyAdmin 管理与本地检测模块边界整理
+
+问题：
+
+```text
+ProxyAdmin 和本地 proxycheck-api 都有检测能力，如果混在一个流程里，后续会很难删除或替换其中任意一块。
+```
+
+处理：
+
+- 新增 `app/proxy_check.py`：
+  - 调用本地 `proxycheck-api/proxycheck.exe` 或 Linux 下的 `proxycheck-api/proxycheck`。
+  - 支持通过 `PROXYCHECK_BIN` 指定自定义二进制路径。
+  - Linux 部署时如果没有无扩展名二进制，需要在 `proxycheck-api` 目录执行 `go build -o proxycheck ./cmd/proxycheck`。
+  - 将本地检测结果规范化为前端已有的 `score`、`grade`、`exit_ip`、`country`、`items` 结构。
+- `app/proxy_admin.py` 保留 ProxyAdmin 远端职责：
+  - 拉取远端代理列表。
+  - 创建代理。
+  - 修正远端名称。
+  - 删除代理。
+  - 调用远端 `/quality-check`。
+- `/api/proxy-admin/check/start` 的流程改为：
+  - 先上传代理到 ProxyAdmin。
+  - 上传成功后，使用 ProxyAdmin 远端 `/quality-check` 检测。
+- `重试失败` 改为 `check_only` 模式：
+  - 前端传入失败端口和已有 `port -> ProxyAdmin id` 映射。
+  - 后端跳过远端上传，只对已有远端 id 重跑 ProxyAdmin 远端质量检测。
+  - 避免失败重试时在 ProxyAdmin 里重复创建代理。
+- 本地 `proxycheck-api` 检测模块暂时独立保留，后续应接到单独的本地检测区域，不混入 `proxy-admin-box`。
+
+本地验证：
+
+```text
+proxycheck-api\proxycheck.exe -proxy http://127.0.0.1:8001/ -json -timeout 30
+-> score 100, grade A, exit_ip 108.181.23.255, country 美国/US
+
+python adapter check_proxy_quality("http://127.0.0.1:8001/", 8001, 30)
+-> 8001 A 100 108.181.23.255 美国
+```
+
+验证：
+
+```text
+python -m pytest -q -> 70 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+proxycheck-api\proxycheck.exe -h -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

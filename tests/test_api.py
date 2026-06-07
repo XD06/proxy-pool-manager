@@ -786,6 +786,76 @@ def test_api_proxy_admin_upload_failure_does_not_stop_batch(tmp_path, monkeypatc
         assert payload["results"]["502"]["grade"] == "B"
 
 
+def test_api_proxy_admin_retry_check_only_does_not_upload(tmp_path, monkeypatch):
+    checked_ids = []
+
+    async def fail_import(payload, proxy_items):
+        raise AssertionError("check_only retry should not upload proxies")
+
+    async def fake_proxy_admin_quality_check(payload, proxy_id):
+        checked_ids.append(proxy_id)
+        return {
+            "id": proxy_id,
+            "exit_ip": "203.0.113.7",
+            "country": "TEST",
+            "score": 100,
+            "grade": "A",
+            "items": [{"target": "openai", "status": "pass", "latency_ms": 100, "message": "ok"}],
+        }
+
+    monkeypatch.setattr(api_module, "proxy_admin_import", fail_import)
+    monkeypatch.setattr(api_module, "proxy_admin_quality_check", fake_proxy_admin_quality_check)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/proxy-admin/check/start",
+            json={
+                "base_url": "http://127.0.0.1:8081",
+                "token": "token",
+                "proxy_host": "127.0.0.1",
+                "ports": [18007],
+                "check_only": True,
+                "proxy_ids_by_port": {"18007": 507},
+            },
+        )
+        assert started.status_code == 200
+        job_id = started.json()["id"]
+        for _ in range(20):
+            job = client.get(f"/api/proxy-admin/jobs/{job_id}")
+            if job.json()["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        payload = job.json()
+        assert payload["status"] == "done"
+        assert payload["imported"][0]["id"] == 507
+        assert payload["results"]["507"]["grade"] == "A"
+        assert checked_ids == [507]
+
+
+def test_api_proxy_admin_check_only_requires_ids(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/proxy-admin/check/start",
+        json={
+            "base_url": "http://127.0.0.1:8081",
+            "token": "token",
+            "proxy_host": "127.0.0.1",
+            "ports": [18007],
+            "check_only": True,
+            "proxy_ids_by_port": {},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Missing ProxyAdmin ids for ports: 18007" in response.json()["detail"]
+
+
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
     class FakeResponse:
         def __init__(self, payload):

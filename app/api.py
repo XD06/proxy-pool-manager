@@ -92,6 +92,8 @@ class ProxyAdminRequest(BaseModel):
     proxy_name_prefix: str | None = "代理"
     ports: list[int] | None = None
     concurrency: int = 10
+    check_only: bool = False
+    proxy_ids_by_port: dict[str, int] | None = None
 
 
 class ProxyAdminRemoveRequest(BaseModel):
@@ -934,6 +936,13 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if active_proxy_admin_job["id"] is not None or proxy_admin_job_lock.locked():
             raise HTTPException(status_code=409, detail="A ProxyAdmin check job is already running")
         proxy_items = proxy_urls_for_ports(payload, request)
+        if payload.check_only:
+            id_map = payload.proxy_ids_by_port or {}
+            for item in proxy_items:
+                item["id"] = int(id_map.get(str(item["port"])) or 0)
+            missing = [str(item["port"]) for item in proxy_items if int(item.get("id") or 0) <= 0]
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Missing ProxyAdmin ids for ports: {', '.join(missing)}")
         job = ProxyAdminJob(id=str(uuid.uuid4()))
         job.total = len(proxy_items)
         proxy_admin_jobs[job.id] = job
@@ -963,9 +972,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         job = proxy_admin_jobs[job_id]
         async with proxy_admin_job_lock:
             try:
-                imported = await proxy_admin_import(payload, proxy_items)
+                imported = proxy_items if payload.check_only else await proxy_admin_import(payload, proxy_items)
                 job.imported = imported
-                ids = [item["id"] for item in imported if int(item.get("id") or 0) > 0]
+                check_items = [item for item in imported if int(item.get("id") or 0) > 0]
                 upload_failures = [item for item in imported if int(item.get("id") or 0) <= 0]
                 job.total = len(imported)
                 for item in upload_failures:
@@ -980,17 +989,18 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     }
                     job.results[str(result["id"])] = result
                     job.completed += 1
-                if not ids:
+                if not check_items:
                     job.status = "done"
                     return
                 idx = 0
-                concurrency = max(1, min(payload.concurrency, 30, len(ids)))
+                concurrency = max(1, min(payload.concurrency, 30, len(check_items)))
 
                 async def worker():
                     nonlocal idx
-                    while idx < len(ids):
-                        proxy_id = ids[idx]
+                    while idx < len(check_items):
+                        item = check_items[idx]
                         idx += 1
+                        proxy_id = int(item.get("id") or 0)
                         try:
                             result = await proxy_admin_quality_check(payload, proxy_id)
                         except Exception as exc:
