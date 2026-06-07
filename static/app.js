@@ -265,6 +265,40 @@ function renderSummary() {
   renderEngineHealth(expectedPorts, listeningPorts, missingPorts);
 }
 
+function renderSubscription(subscription) {
+  const data = subscription || statusSnapshot.subscription || {};
+  const urlInput = $("urlInput");
+  const intervalInput = $("subscriptionInterval");
+  const summary = $("subscriptionSummary");
+  if (!summary) return;
+  if (urlInput && document.activeElement !== urlInput) {
+    urlInput.value = data.url || "";
+  }
+  if (intervalInput && document.activeElement !== intervalInput) {
+    intervalInput.value = Number(data.refresh_interval_minutes || 0);
+  }
+  if (!data.url) {
+    summary.textContent = "未配置";
+    summary.className = "local-check-result muted";
+    summary.title = "";
+    return;
+  }
+  if (data.last_error) {
+    summary.textContent = "刷新失败";
+    summary.className = "local-check-result bad";
+    summary.title = data.last_error;
+    return;
+  }
+  const interval = Number(data.refresh_interval_minutes || 0);
+  const nextText = data.next_refresh_in_seconds === null || data.next_refresh_in_seconds === undefined
+    ? ""
+    : `；下次 ${Math.ceil(Number(data.next_refresh_in_seconds || 0) / 60)} 分钟`;
+  const lastText = data.last_refresh_at ? `；上次 ${data.last_count || 0} 个` : "";
+  summary.textContent = interval > 0 ? `每 ${interval} 分钟${lastText}${nextText}` : `已保存${lastText}`;
+  summary.className = "local-check-result ok";
+  summary.title = data.url;
+}
+
 function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
   const box = $("engineHealth");
   if (!box) return;
@@ -942,6 +976,7 @@ async function refresh() {
   ports = portData.ports;
   localProxyCheckResults = portData.local_proxy_checks || {};
   renderSummary();
+  renderSubscription(status.subscription);
   renderNodeTable();
   renderAssignTable();
   renderLocalProxyCheckPorts();
@@ -1293,6 +1328,28 @@ $("nodeTestGeo").addEventListener("change", renderNodeTestOverview);
 $("importUrlBtn").addEventListener("click", () => runTask("导入订阅", async () => {
   await request("/api/import", { method: "POST", body: JSON.stringify({ url: $("urlInput").value }) });
   await refresh();
+}));
+
+$("saveSubscriptionBtn").addEventListener("click", () => runTask("保存订阅", async () => {
+  const result = await request("/api/subscription", {
+    method: "PUT",
+    body: JSON.stringify({
+      url: $("urlInput").value,
+      refresh_interval_minutes: Number($("subscriptionInterval").value || 0)
+    })
+  });
+  renderSubscription(result);
+  return "订阅设置已保存";
+}));
+
+$("refreshSubscriptionBtn").addEventListener("click", () => runTask("刷新订阅", async () => {
+  const result = await request("/api/subscription/refresh", {
+    method: "POST",
+    body: "{}"
+  });
+  renderSubscription(result);
+  await refresh();
+  return `订阅刷新完成：新增 ${result.added || 0}，更新 ${result.updated || 0}，总节点 ${result.total_nodes || 0}`;
 }));
 
 $("importTextBtn").addEventListener("click", () => runTask("解析文本", async () => {

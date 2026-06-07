@@ -2674,6 +2674,46 @@ node --check static/app.js -> passed
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\doctor.ps1 -> ok=7 warn=2 fail=0
 ```
 
+## 订阅定时刷新基础能力
+
+目标：
+
+- 保存订阅 URL 和自动刷新间隔。
+- 支持 Web 界面手动刷新订阅。
+- 服务运行期间按间隔后台刷新订阅，更新节点信息。
+- 刷新过程不自动删除旧节点、不打乱端口映射，避免订阅临时异常影响现有可用代理。
+
+处理：
+
+- `AppState` 新增订阅刷新状态：
+  - `subscription_refresh_interval_minutes`
+  - `subscription_last_refresh_at`
+  - `subscription_last_error`
+  - `subscription_last_count`
+- 新增 API：
+  - `GET /api/subscription`
+  - `PUT /api/subscription`
+  - `POST /api/subscription/refresh`
+- `/api/status` 返回 `subscription` 摘要，前端刷新后恢复订阅配置。
+- 后端增加订阅刷新循环：
+  - 仅在订阅 URL 存在且间隔大于 0 时启用。
+  - 手动刷新和定时刷新共用锁，避免并发写状态文件。
+  - 刷新成功时按 tag 更新已有节点、追加新节点。
+  - 刷新失败时记录 `subscription_last_error`。
+- 导入页新增：
+  - 自动刷新分钟数。
+  - 保存订阅。
+  - 立即刷新。
+  - 订阅状态摘要。
+
+验证：
+
+```text
+python -m pytest -q -> 79 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

@@ -63,6 +63,10 @@ class AppState(BaseModel):
     version: int = 1
     updated_at: str = Field(default_factory=utc_now_iso)
     subscription_url: str | None = None
+    subscription_refresh_interval_minutes: int = 0
+    subscription_last_refresh_at: str | None = None
+    subscription_last_error: str | None = None
+    subscription_last_count: int = 0
     nodes: list[ProxyNode] = Field(default_factory=list)
     port_mappings: dict[str, PortMapping] = Field(default_factory=dict)
     latency_cache: dict[str, LatencyResult] = Field(default_factory=dict)

@@ -8,7 +8,7 @@ import time
 from app import api as api_module
 from app import proxy_admin as proxy_admin_module
 from app.api import create_app
-from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, LatencyResult, PortMapping, ProxyNode
+from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, ImportResult, LatencyResult, PortMapping, ProxyNode
 from app.store import StateStore
 
 
@@ -1361,6 +1361,65 @@ def test_api_doctor_returns_structured_script_result(tmp_path, monkeypatch):
     assert body["fail"] == 0
     assert body["exit_code"] == 0
     assert body["lines"][1].startswith("[WARN]")
+
+
+def test_api_subscription_config_and_manual_refresh(tmp_path, monkeypatch):
+    async def fake_import_nodes(url=None, text=None):
+        assert url == "https://example.com/sub"
+        return ImportResult(
+            nodes=[
+                ProxyNode(
+                    tag="node-1",
+                    name="JP",
+                    type="vless",
+                    server="example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "example.com", "server_port": 443},
+                )
+            ],
+            count=1,
+            warnings=["kept existing stale nodes"],
+        )
+
+    monkeypatch.setattr(api_module, "import_nodes", fake_import_nodes)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    saved = client.put(
+        "/api/subscription",
+        json={"url": "https://example.com/sub", "refresh_interval_minutes": 15},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["url"] == "https://example.com/sub"
+    assert saved.json()["refresh_interval_minutes"] == 15
+
+    refreshed = client.post("/api/subscription/refresh")
+    assert refreshed.status_code == 200
+    body = refreshed.json()
+    assert body["imported"] == 1
+    assert body["added"] == 1
+    assert body["updated"] == 0
+    assert body["total_nodes"] == 1
+    assert body["last_error"] is None
+
+    state = store.load()
+    assert state.subscription_url == "https://example.com/sub"
+    assert state.subscription_refresh_interval_minutes == 15
+    assert state.subscription_last_count == 1
+    assert state.subscription_last_refresh_at
+    assert state.nodes[0].tag == "node-1"
+
+
+def test_api_subscription_refresh_requires_url(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post("/api/subscription/refresh")
+
+    assert response.status_code == 400
+    assert "Subscription URL is not configured" in response.json()["detail"]
 
 
 def test_run_doctor_script_parses_failed_output(monkeypatch):

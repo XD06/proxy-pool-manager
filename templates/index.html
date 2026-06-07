@@ -58,6 +58,16 @@
               <button id="importUrlBtn">导入</button>
             </div>
           </label>
+          <div class="subscription-tools">
+            <label class="inline-field">
+              自动刷新
+              <input id="subscriptionInterval" type="number" min="0" max="10080" value="0">
+              <span>分钟</span>
+            </label>
+            <button id="saveSubscriptionBtn">保存订阅</button>
+            <button id="refreshSubscriptionBtn">立即刷新</button>
+            <span id="subscriptionSummary" class="local-check-result muted">未配置</span>
+          </div>
           <label>
             <span>配置文本</span>
             <textarea id="textInput" rows="8" placeholder="vless://..."></textarea>

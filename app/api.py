@@ -7,6 +7,7 @@ import platform
 import re
 import socket
 import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,7 @@ from .engine import EngineError, EngineManager
 from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config
 from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
-from .models import AppState, ExitIpCache, LatencyResult, PortMapping
+from .models import AppState, ExitIpCache, LatencyResult, PortMapping, utc_now_iso
 from .parser import import_nodes
 from .proxy_admin import (
     proxy_admin_import,
@@ -53,6 +54,11 @@ from .tester import (
 class ImportRequest(BaseModel):
     url: str | None = None
     text: str | None = None
+
+
+class SubscriptionConfigRequest(BaseModel):
+    url: str | None = None
+    refresh_interval_minutes: int = 0
 
 
 class AssignRequest(BaseModel):
@@ -202,20 +208,27 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     canceled_local_proxy_check_jobs: set[str] = set()
     geoip_tasks: dict[str, asyncio.Task] = {}
     geoip_semaphore = asyncio.Semaphore(4)
+    subscription_refresh_lock = asyncio.Lock()
+    next_subscription_refresh_at: dict[str, float | None] = {"value": None}
 
     monitor_task: asyncio.Task | None = None
+    subscription_task: asyncio.Task | None = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal monitor_task
+        nonlocal monitor_task, subscription_task
         monitor = getattr(engine_manager, "monitor", None)
         if monitor and not monitor_task:
             monitor_task = asyncio.create_task(monitor(SING_BOX_CONFIG_PATH))
+        if not subscription_task:
+            subscription_task = asyncio.create_task(subscription_refresh_loop())
         try:
             yield
         finally:
             if monitor_task:
                 monitor_task.cancel()
+            if subscription_task:
+                subscription_task.cancel()
 
     app = FastAPI(title="Proxy Pool Manager", lifespan=lifespan)
 
@@ -240,6 +253,74 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             setattr(app_state, field, getattr(fresh, field))
         state_loaded_mtime_ns = mtime_ns
         return True
+
+    def subscription_payload() -> dict:
+        next_at = next_subscription_refresh_at["value"]
+        return {
+            "url": app_state.subscription_url or "",
+            "refresh_interval_minutes": app_state.subscription_refresh_interval_minutes,
+            "last_refresh_at": app_state.subscription_last_refresh_at,
+            "last_error": app_state.subscription_last_error,
+            "last_count": app_state.subscription_last_count,
+            "next_refresh_in_seconds": max(0, int(next_at - time.time())) if next_at else None,
+        }
+
+    async def refresh_subscription_now() -> dict:
+        refresh_state_from_disk()
+        url = (app_state.subscription_url or "").strip()
+        if not url:
+            raise ValueError("Subscription URL is not configured")
+        async with subscription_refresh_lock:
+            try:
+                result = await import_nodes(url=url)
+                existing = node_by_tag()
+                added = 0
+                updated = 0
+                for node in result.nodes:
+                    if node.tag in existing:
+                        updated += 1
+                    else:
+                        added += 1
+                    existing[node.tag] = node
+                app_state.nodes = list(existing.values())
+                app_state.subscription_last_refresh_at = utc_now_iso()
+                app_state.subscription_last_error = None
+                app_state.subscription_last_count = result.count
+                save()
+                return {
+                    **subscription_payload(),
+                    "imported": result.count,
+                    "added": added,
+                    "updated": updated,
+                    "total_nodes": len(app_state.nodes),
+                    "warnings": result.warnings,
+                }
+            except Exception as exc:
+                app_state.subscription_last_refresh_at = utc_now_iso()
+                app_state.subscription_last_error = str(exc)
+                save()
+                raise
+
+    async def subscription_refresh_loop() -> None:
+        while True:
+            refresh_state_from_disk()
+            interval = int(app_state.subscription_refresh_interval_minutes or 0)
+            if not app_state.subscription_url or interval <= 0:
+                next_subscription_refresh_at["value"] = None
+                await asyncio.sleep(30)
+                continue
+            if next_subscription_refresh_at["value"] is None:
+                next_subscription_refresh_at["value"] = time.time() + interval * 60
+            delay = next_subscription_refresh_at["value"] - time.time()
+            if delay > 0:
+                await asyncio.sleep(min(delay, 30))
+                continue
+            try:
+                await refresh_subscription_now()
+            except Exception:
+                pass
+            finally:
+                next_subscription_refresh_at["value"] = time.time() + interval * 60
 
     def load_app_config() -> dict:
         if not APP_CONFIG_PATH.exists():
@@ -683,9 +764,33 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "store_warning": state_store.warning,
             "node_count": len(app_state.nodes),
             "mapping_count": len(app_state.port_mappings),
+            "subscription": subscription_payload(),
             "engine": engine_status,
             **engine_status,
         }
+
+    @app.get("/api/subscription")
+    async def get_subscription():
+        refresh_state_from_disk()
+        return subscription_payload()
+
+    @app.put("/api/subscription")
+    async def save_subscription(payload: SubscriptionConfigRequest):
+        url = (payload.url or "").strip()
+        interval = max(0, min(int(payload.refresh_interval_minutes or 0), 10080))
+        app_state.subscription_url = url or None
+        app_state.subscription_refresh_interval_minutes = interval
+        app_state.subscription_last_error = None
+        next_subscription_refresh_at["value"] = time.time() + interval * 60 if url and interval > 0 else None
+        save()
+        return subscription_payload()
+
+    @app.post("/api/subscription/refresh")
+    async def refresh_subscription():
+        try:
+            return await refresh_subscription_now()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/import")
     async def api_import(payload: ImportRequest):
@@ -704,6 +809,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         app_state.nodes = list(existing.values())
         if payload.url:
             app_state.subscription_url = payload.url
+            app_state.subscription_last_refresh_at = utc_now_iso()
+            app_state.subscription_last_error = None
+            app_state.subscription_last_count = result.count
         save()
         return {"ok": True, **result.model_dump()}
 

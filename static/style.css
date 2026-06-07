@@ -599,6 +599,17 @@ textarea {
   justify-content: flex-start;
 }
 
+.subscription-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.subscription-tools .inline-field input {
+  width: 82px;
+}
+
 .hidden {
   display: none;
 }
