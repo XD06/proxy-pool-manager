@@ -230,7 +230,7 @@ function renderNodeTestOverview() {
 function renderSummary() {
   const expectedPorts = statusSnapshot.expected_ports || [];
   const listeningPorts = statusSnapshot.listening_ports || [];
-  const missingPorts = expectedPorts.filter((port) => !listeningPorts.includes(port));
+  const missingPorts = statusSnapshot.missing_ports || expectedPorts.filter((port) => !listeningPorts.includes(port));
   if (!statusSnapshot.running) {
     $("engineState").textContent = "未运行";
     $("engineState").style.color = "#999";              // 灰色
@@ -257,6 +257,27 @@ function renderSummary() {
   $("listeningCount").title = missingPorts.length
     ? `异常端口：${missingPorts.join(", ")}`
     : "所有映射端口均在监听";
+  renderEngineHealth(expectedPorts, listeningPorts, missingPorts);
+}
+
+function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
+  const box = $("engineHealth");
+  if (!box) return;
+  const configuredPorts = statusSnapshot.config_ports || [];
+  const configMismatch = statusSnapshot.config_matches_state === false;
+  const hasIssue = configMismatch || missingPorts.length > 0 || (statusSnapshot.running && statusSnapshot.ready === false);
+  const repairButton = $("repairEngineBtn");
+  if (repairButton) repairButton.classList.toggle("hidden", !hasIssue);
+  const tone = !statusSnapshot.running ? "idle" : hasIssue ? "bad" : "ok";
+  const missingText = missingPorts.length ? missingPorts.join(", ") : "-";
+  const configText = configMismatch ? `${configuredPorts.length}/${expectedPorts.length} 不一致` : "一致";
+  box.className = `engine-health ${tone}`;
+  box.innerHTML = `
+    <span>期望 <strong>${expectedPorts.length}</strong></span>
+    <span>监听 <strong>${listeningPorts.length}</strong></span>
+    <span>缺失 <strong title="${escapeHtml(missingText)}">${missingPorts.length ? escapeHtml(missingPorts.slice(0, 12).join(", ")) : "-"}</strong></span>
+    <span>配置 <strong>${escapeHtml(configText)}</strong></span>
+  `;
 }
 
 function proxyConnectHost() {
@@ -1329,6 +1350,15 @@ $("startBtn").addEventListener("click", () => runTask("启动引擎", async () =
 $("stopBtn").addEventListener("click", () => runTask("停止引擎", async () => {
   await request("/api/stop", { method: "POST", body: "{}" });
   await refreshStatusOnly();
+}));
+
+$("repairEngineBtn").addEventListener("click", () => runTask("重启修复引擎", async () => {
+  await request("/api/stop", { method: "POST", body: "{}" });
+  await request("/api/start", { method: "POST", body: "{}" });
+  await refresh();
+  const missingPorts = statusSnapshot.missing_ports || [];
+  if (missingPorts.length) return `引擎已重启，仍缺失端口：${missingPorts.join(", ")}`;
+  return "引擎已重启，端口监听正常";
 }));
 
 $("testPortsBtn").addEventListener("click", () => runTask("验证全部端口", runAllPortValidation));

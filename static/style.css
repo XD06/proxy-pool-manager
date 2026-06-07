@@ -497,6 +497,40 @@ textarea {
   color: var(--bad);
 }
 
+.engine-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.engine-health span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 0 10px;
+}
+
+.engine-health strong {
+  color: var(--ink);
+}
+
+.engine-health.ok span {
+  border-color: rgba(42, 132, 90, 0.22);
+  background: rgba(42, 132, 90, 0.07);
+}
+
+.engine-health.bad span {
+  border-color: rgba(190, 59, 59, 0.22);
+  background: rgba(190, 59, 59, 0.07);
+}
+
 .hidden {
   display: none;
 }

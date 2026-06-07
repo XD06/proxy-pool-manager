@@ -377,6 +377,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         payload["config_ports"] = config_ports
         payload["config_matches_state"] = config_ports == expected
         payload["listening_ports"] = listening
+        payload["missing_ports"] = sorted(set(expected) - set(listening))
+        payload["expected_count"] = len(expected)
+        payload["listening_count"] = len(listening)
         payload["ready"] = bool(payload["running"]) and len(listening) == len(expected)
         payload["proxy_listen_host"] = current_proxy_listen_host()
         payload["proxy_public_host"] = current_proxy_public_host()

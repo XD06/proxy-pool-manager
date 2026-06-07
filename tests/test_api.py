@@ -1228,11 +1228,15 @@ def test_api_status_reports_engine_port_readiness(tmp_path, monkeypatch):
     assert not_ready["engine"]["ready"] is False
     assert not_ready["engine"]["expected_ports"] == [8001]
     assert not_ready["engine"]["listening_ports"] == []
+    assert not_ready["engine"]["missing_ports"] == [8001]
+    assert not_ready["engine"]["expected_count"] == 1
+    assert not_ready["engine"]["listening_count"] == 0
 
     monkeypatch.setattr(api_module, "_listening_local_ports", lambda ports: [8001])
     ready = client.get("/api/status").json()
     assert ready["engine"]["ready"] is True
     assert ready["engine"]["listening_ports"] == [8001]
+    assert ready["engine"]["missing_ports"] == []
 
 
 def test_api_status_reports_proxy_connect_host(tmp_path, monkeypatch):

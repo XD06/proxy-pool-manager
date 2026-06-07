@@ -2500,6 +2500,37 @@ python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 ```
 
+## 引擎与端口监听状态增强
+
+目标：
+
+- 避免“显示运行中但端口连不上”的状态误导。
+- 在运行页直接看到期望端口、实际监听端口、缺失端口和配置一致性。
+
+处理：
+
+- `/api/status` 增加字段：
+  - `missing_ports`
+  - `expected_count`
+  - `listening_count`
+- 运行页新增 `engineHealth` 状态条：
+  - 期望端口数。
+  - 实际监听数。
+  - 缺失端口摘要。
+  - 配置是否一致。
+- 新增 `重启修复` 按钮：
+  - 当配置不一致、缺失端口或引擎未 ready 时显示。
+  - 点击后执行 stop -> start -> refresh。
+  - 重启后仍缺失端口会直接提示缺失列表。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：
