@@ -2561,6 +2561,33 @@ python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 ```
 
+## 运行页 UI 分区整理
+
+目标：
+
+- 避免运行页 section-head 堆积过多按钮。
+- 保持 ProxyAdmin 区域独立，方便未来删除或替换。
+
+处理：
+
+- 运行页拆成三个工具区：
+  - `引擎控制`：启动、停止、重启修复。
+  - `本地检测`：端口选择、单端口检测、全部检测、最近结果。
+  - `验证与导出`：自定义 URL、验证全部端口、导出格式、生成导出。
+- `ProxyAdmin 检测` 保持独立 `proxy-admin-box`。
+- 增加响应式布局：
+  - 桌面三列。
+  - 平板两列，验证与导出占满一行。
+  - 手机单列。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

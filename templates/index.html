@@ -131,9 +131,42 @@
           <p class="panel-copy">启动引擎后，在这里验证每个端口是否真正可用，并查看对应出口 IP。端口支持 HTTP 和 SOCKS 代理。</p>
         </div>
         <div class="actions">
+          <button id="refreshBtn">刷新</button>
+        </div>
+      </div>
+      <div class="dashboard-tools">
+        <section class="tool-section">
+          <header>
+            <strong>引擎控制</strong>
+            <span>启动、停止和修复端口监听</span>
+          </header>
+          <div class="actions">
           <button id="startBtn" class="primary">启动引擎</button>
           <button id="stopBtn">停止引擎</button>
           <button id="repairEngineBtn" class="hidden">重启修复</button>
+          </div>
+        </section>
+        <section class="tool-section">
+          <header>
+            <strong>本地检测</strong>
+            <span>调用本机 proxycheck-api</span>
+          </header>
+          <div class="actions">
+            <label class="inline-field">
+              端口
+              <select id="localProxyCheckPort"></select>
+            </label>
+            <button id="localProxyCheckBtn">检测</button>
+            <button id="localProxyCheckAllBtn">全部检测</button>
+            <span id="localProxyCheckResult" class="local-check-result muted">未检测</span>
+          </div>
+        </section>
+        <section class="tool-section wide">
+          <header>
+            <strong>验证与导出</strong>
+            <span>目标 URL、端口验证和标准格式导出</span>
+          </header>
+          <div class="actions">
           <label class="inline-field wide">
             自定义 URL
             <input id="customTestUrl" type="url" placeholder="https://example.com/">
@@ -151,16 +184,9 @@
             </select>
           </label>
           <button id="exportBtn">生成导出</button>
-          <button id="refreshBtn">刷新</button>
-          <label class="inline-field">
-            本地检测
-            <select id="localProxyCheckPort"></select>
-          </label>
-          <button id="localProxyCheckBtn">检测</button>
-          <button id="localProxyCheckAllBtn">全部检测</button>
-          <span id="localProxyCheckResult" class="local-check-result muted">未检测</span>
+          </div>
+        </section>
         </div>
-      </div>
       <div id="quickResult" class="quick-result hidden"></div>
       <div id="engineHealth" class="engine-health"></div>
       <div class="proxy-admin-box">
