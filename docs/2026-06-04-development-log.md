@@ -2531,6 +2531,36 @@ python -m compileall -q main.py app tests -> passed
 node --check static/app.js -> passed
 ```
 
+## 检测错误摘要标准化
+
+目标：
+
+- 防止 TLS 证书错误、连接错误、超时错误等长文本破坏页面布局。
+- 保留完整错误用于排查。
+
+处理：
+
+- 前端统一使用 `compactCheckMessage()`：
+  - 节点测速目标结果。
+  - 端口验证结果卡片。
+  - ProxyAdmin 行内失败结果。
+  - 本地 proxycheck 行内失败结果。
+  - 全局 notice 错误提示。
+- 常见错误会映射成短中文摘要：
+  - TLS 证书不匹配。
+  - 本地端口未监听或连接被拒绝。
+  - 请求超时。
+  - 代理连接失败。
+- 完整错误保留在 `title`，鼠标悬停可看。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
 ## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
 
 处理内容：

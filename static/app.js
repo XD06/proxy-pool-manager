@@ -52,7 +52,8 @@ function showNotice(message, tone = "info") {
     return;
   }
   notice.className = `notice ${tone}`;
-  notice.textContent = message;
+  notice.textContent = tone === "bad" ? compactCheckMessage(message) : message;
+  notice.title = String(message || "");
 }
 
 function latencyText(latency) {
@@ -81,7 +82,7 @@ function targetResponseText(latency) {
     const okItems = latency.target_results.filter((item) => item.ok);
     const failed = latency.target_results.length - okItems.length;
     const detail = latency.target_results
-      .map((item) => `${compactUrl(item.url)} ${item.ok ? item.elapsed_ms + "ms" : "失败"}`)
+      .map((item) => `${compactUrl(item.url)} ${item.ok ? item.elapsed_ms + "ms" : compactCheckMessage(item.error || "失败")}`)
       .join("；");
     const status = `成功 ${okItems.length}/${latency.target_results.length}`;
     const average = latency.delay ? ` · 平均 ${latency.delay}ms` : "";
@@ -89,13 +90,13 @@ function targetResponseText(latency) {
     return `${status}${average}${failedText} · ${detail}`;
   }
   if (latency.target_url) {
-    if (!latency.alive && latency.error) return latency.error;
+    if (!latency.alive && latency.error) return compactCheckMessage(latency.error);
     const status = latency.status_code ? `HTTP ${latency.status_code}` : "无状态码";
     const preview = latency.body_preview ? ` · ${latency.body_preview}` : "";
     return `${status}${preview}`;
   }
   if (latency.exit_ip) return `出口 ${latency.exit_ip}`;
-  return latency.error || "-";
+  return compactCheckMessage(latency.error) || "-";
 }
 
 function geoIpSummary(geoip) {
@@ -609,17 +610,21 @@ function proxyAdminPortSummary(port) {
   const { result } = entry;
   const failed = result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail");
   const targets = (result.items || []).slice(0, 4);
+  const failedMessage = result.error || (result.items || []).find((item) => item.status === "fail")?.message || "";
+  const compactFailedMessage = compactCheckMessage(failedMessage || result.summary || "失败");
   const title = (result.items || [])
     .map((item) => `${item.target}: ${item.status} ${item.http_status || "-"} ${item.latency_ms || "-"}ms ${item.message || ""}`)
     .join("\n");
   return `
     <div class="proxy-admin-inline" title="${escapeHtml(title || result.error || "")}">
       <span class="badge ${failed ? "bad" : "ok"}">${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")}</span>
-      <span class="mono">${escapeHtml(result.exit_ip || "-")}</span>
-      <span>${escapeHtml(result.country || "-")}</span>
-      <span class="proxy-admin-mini-targets">
-        ${targets.map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`).join("")}
-      </span>
+      ${failed ? `<span>${escapeHtml(compactFailedMessage)}</span>` : `
+        <span class="mono">${escapeHtml(result.exit_ip || "-")}</span>
+        <span>${escapeHtml(result.country || "-")}</span>
+        <span class="proxy-admin-mini-targets">
+          ${targets.map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`).join("")}
+        </span>
+      `}
     </div>
     ${local}
   `;
@@ -778,10 +783,10 @@ function renderValidationResults() {
         <button data-remove-port="${port}">移除映射</button>
       </header>
       <div class="validation-chips">${(detail.targets || []).map((target) => `
-        <span class="target-chip ${target.ok ? "ok" : "bad"}">
+        <span class="target-chip ${target.ok ? "ok" : "bad"}" title="${escapeHtml(target.error || target.body_preview || "")}">
           ${escapeHtml(compactUrl(target.url))}
           <b>${target.ok ? "成功" : "失败"}</b>
-          <small>${escapeHtml(target.status_code || "-")} · ${escapeHtml(target.elapsed_ms || "-")}ms</small>
+          <small>${escapeHtml(target.ok ? `${target.status_code || "-"} · ${target.elapsed_ms || "-"}ms` : compactCheckMessage(target.error || target.body_preview || "失败"))}</small>
         </span>
       `).join("")}</div>
     </article>
