@@ -1433,7 +1433,7 @@ $("localProxyCheckBtn").addEventListener("click", () => runTask("本地检测", 
   return `本地检测完成：${port}`;
 }));
 
-$("localProxyCheckAllBtn").addEventListener("click", () => runTask("一键本地检测", async () => {
+$("localProxyCheckAllBtn").addEventListener("click", () => runTask("全部检测", async () => {
   const portList = Object.keys(ports).sort((left, right) => Number(left) - Number(right));
   if (!portList.length) throw new Error("没有可检测端口");
   renderLocalProxyCheckResult({ grade: "...", score: "-", exit_ip: "批量检测中", country: "" });
