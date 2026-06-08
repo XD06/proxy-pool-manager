@@ -9,6 +9,7 @@ from app import api as api_module
 from app import proxy_admin as proxy_admin_module
 from app.api import create_app
 from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, ImportResult, LatencyResult, PortMapping, ProxyNode
+from app.settings import ASSET_VERSION
 from app.store import StateStore
 
 
@@ -88,6 +89,22 @@ def test_api_import_assign_and_status(tmp_path):
     assert status.json()["engine"]["running"] is False
     assert status.json()["node_count"] == 1
     assert status.json()["mapping_count"] == 1
+    assert status.json()["web"]["asset_version"] == ASSET_VERSION
+    assert status.json()["web"]["pid"] > 0
+    assert status.json()["web"]["started_at"]
+
+
+def test_index_injects_asset_version(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert f"style.css?v={ASSET_VERSION}" in response.text
+    assert f"app.js?v={ASSET_VERSION}" in response.text
+    assert "__ASSET_VERSION__" not in response.text
 
 
 def test_api_delete_nodes_cleans_mappings(tmp_path):

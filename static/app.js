@@ -314,6 +314,7 @@ function renderSubscription(subscription) {
 function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
   const box = $("engineHealth");
   if (!box) return;
+  const web = statusSnapshot.web || {};
   const configuredPorts = statusSnapshot.config_ports || [];
   const configMismatch = statusSnapshot.config_matches_state === false;
   const hasIssue = configMismatch || missingPorts.length > 0 || (statusSnapshot.running && statusSnapshot.ready === false);
@@ -328,6 +329,8 @@ function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
     <span>监听 <strong>${listeningPorts.length}</strong></span>
     <span>缺失 <strong title="${escapeHtml(missingText)}">${missingPorts.length ? escapeHtml(missingPorts.slice(0, 12).join(", ")) : "-"}</strong></span>
     <span>配置 <strong>${escapeHtml(configText)}</strong></span>
+    <span>Web <strong title="${escapeHtml(web.started_at || "")}">${escapeHtml(web.pid ? `#${web.pid}` : "-")}</strong></span>
+    <span>资源 <strong title="${escapeHtml(web.asset_version || "")}">${escapeHtml(shortAssetVersion(web.asset_version))}</strong></span>
   `;
 }
 
@@ -976,6 +979,12 @@ function compactUrl(url) {
   } catch {
     return url;
   }
+}
+
+function shortAssetVersion(version) {
+  const text = String(version || "");
+  const withoutDate = text.replace(/^\d{8}-/, "");
+  return withoutDate || text || "-";
 }
 
 async function refresh() {

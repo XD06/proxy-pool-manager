@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import platform
 import re
 import socket
@@ -31,6 +32,7 @@ from .proxy_admin import (
 from .proxy_check import check_proxy_quality
 from .settings import (
     APP_CONFIG_PATH,
+    ASSET_VERSION,
     ROOT_DIR,
     SING_BOX_CONFIG_PATH,
     STATIC_DIR,
@@ -186,6 +188,7 @@ class LocalProxyCheckJob(BaseModel):
 
 
 def create_app(store: StateStore | None = None, engine: EngineManager | None = None) -> FastAPI:
+    web_started_at = utc_now_iso()
     state_store = store or StateStore()
     app_state = state_store.load()
     state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
@@ -753,7 +756,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         index_path = TEMPLATES_DIR / "index.html"
         if not index_path.exists():
             return HTMLResponse("<h1>Proxy Pool Manager</h1>")
-        return HTMLResponse(index_path.read_text(encoding="utf-8"))
+        html = index_path.read_text(encoding="utf-8").replace("__ASSET_VERSION__", ASSET_VERSION)
+        return HTMLResponse(html)
 
     @app.get("/api/status")
     async def status(request: Request):
@@ -765,6 +769,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "node_count": len(app_state.nodes),
             "mapping_count": len(app_state.port_mappings),
             "subscription": subscription_payload(),
+            "web": {
+                "pid": os.getpid(),
+                "started_at": web_started_at,
+                "asset_version": ASSET_VERSION,
+            },
             "engine": engine_status,
             **engine_status,
         }
