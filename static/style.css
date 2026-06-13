@@ -1611,7 +1611,7 @@ button[data-remove-proxy-admin-port]:hover {
   td small,
   td strong,
   td span {
-    min-width: 0;
+    min-width: fit-content;
     overflow-wrap: anywhere;
   }
 
