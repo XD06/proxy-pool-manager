@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -40,12 +41,39 @@ class EngineManager:
         return BIN_DIR / self._binary_name()
 
     def _managed_processes(self, config_path: Path | None = None) -> list[dict[str, Any]]:
-        if platform.system().lower() != "windows":
-            return []
         target_config = config_path or self.managed_config_path
         if not target_config:
             return []
         config = str(target_config)
+        if platform.system().lower() != "windows":
+            try:
+                completed = subprocess.run(
+                    ["ps", "-eo", "pid=,args="],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except Exception:
+                return []
+            if completed.returncode != 0 or not completed.stdout.strip():
+                return []
+            managed: list[dict[str, Any]] = []
+            for line in completed.stdout.splitlines():
+                stripped = line.strip()
+                if not stripped or config not in stripped or "sing-box" not in stripped:
+                    continue
+                match = re.match(r"^(\d+)\s+(.*)$", stripped)
+                if not match:
+                    continue
+                managed.append(
+                    {
+                        "ProcessId": int(match.group(1)),
+                        "ExecutablePath": None,
+                        "CommandLine": match.group(2),
+                    }
+                )
+            return managed
+
         script = (
             "$config = " + _ps_quote(config) + "; "
             "Get-CimInstance Win32_Process -Filter \"name = 'sing-box.exe'\" | "
@@ -79,13 +107,35 @@ class EngineManager:
             pid = item.get("ProcessId")
             if not pid or pid == keep_pid:
                 continue
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
-            )
+            if platform.system().lower() == "windows":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except Exception:
+                continue
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                except Exception:
+                    break
+                time.sleep(0.1)
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
 
     async def ensure_binary(self) -> Path:
         BIN_DIR.mkdir(parents=True, exist_ok=True)

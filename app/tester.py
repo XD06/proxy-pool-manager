@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -93,6 +94,25 @@ async def query_exit_ip(port: int, state: AppState, engine: EngineManager) -> Ex
     return ExitIpCache(ip=None, error=last_error or "exit IP query failed")
 
 
+async def _query_exit_ip_with_budget(client: httpx.AsyncClient, *, timeout_seconds: float = 3.0) -> tuple[str | None, str | None]:
+    deadline = time.monotonic() + max(timeout_seconds, 0.1)
+    last_error = None
+    for url in EXIT_IP_URLS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            response = await client.get(url, timeout=min(remaining, 2.0))
+            response.raise_for_status()
+            ip = extract_public_ipv4(response.text)
+            if ip:
+                return ip, None
+            last_error = f"{url}: no public IPv4 in response"
+        except Exception as exc:
+            last_error = str(exc)
+    return None, last_error or "exit IP query timed out"
+
+
 async def measure_port_latency(port: int) -> LatencyResult:
     proxy = f"socks5://127.0.0.1:{port}"
     try:
@@ -176,16 +196,7 @@ async def validate_proxy_port(
             exit_ip = None
             exit_error = None
             if include_exit_ip:
-                for url in EXIT_IP_URLS:
-                    try:
-                        candidate = await client.get(url)
-                        candidate.raise_for_status()
-                        exit_ip = extract_public_ipv4(candidate.text)
-                        if exit_ip:
-                            break
-                        exit_error = f"{url}: no public IPv4 in response"
-                    except Exception as exc:
-                        exit_error = str(exc)
+                exit_ip, exit_error = await _query_exit_ip_with_budget(client)
             return LatencyResult(
                 alive=True,
                 delay=result["elapsed_ms"],
@@ -316,7 +327,14 @@ async def test_nodes_with_temporary_engine(
     cleanup_engine = EngineManager(SING_BOX_TEST_CONFIG_PATH)
     await cleanup_engine.stop(SING_BOX_TEST_CONFIG_PATH)
     concurrency = max(1, int(concurrency or 12))
-    batch_size = max(1, int(batch_size or len(nodes)))
+    if batch_size is None:
+        env_value = os.environ.get("NODE_TEST_BATCH_SIZE")
+        if env_value:
+            try:
+                batch_size = int(env_value)
+            except ValueError:
+                batch_size = None
+    batch_size = max(1, min(len(nodes), int(batch_size or min(concurrency, 6))))
     results: dict[str, LatencyResult] = {}
     for offset in range(0, len(nodes), batch_size):
         if should_cancel and should_cancel():
@@ -360,10 +378,11 @@ async def _test_node_batch_with_temporary_engine(
 
     engine = EngineManager(SING_BOX_TEST_CONFIG_PATH)
     try:
-        await engine.start(SING_BOX_TEST_CONFIG_PATH, check=False, settle_seconds=0.35)
+        settle_seconds = 0.8 if os.name != "nt" else 0.45
+        await engine.start(SING_BOX_TEST_CONFIG_PATH, check=False, settle_seconds=settle_seconds)
         async def run_one(tag: str, port: int):
             try:
-                url_count = len(target_urls or ([target_url] if target_url else FALLBACK_TEST_URLS))
+                url_count = len(target_urls or ([target_url] if target_url else DEFAULT_NODE_TEST_URLS))
                 timeout = (10 if include_exit_ip else 6) + max(0, url_count - 1) * 5
                 result = await asyncio.wait_for(
                     validate_proxy_port(port, target_url=target_url, target_urls=target_urls, include_exit_ip=include_exit_ip),

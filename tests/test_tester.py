@@ -160,6 +160,32 @@ def test_test_nodes_with_temporary_engine_batches_nodes(monkeypatch):
     assert stops
 
 
+def test_test_nodes_with_temporary_engine_uses_small_default_batches(monkeypatch):
+    batches = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def stop(self, *args, **kwargs):
+            return None
+
+    async def fake_batch(nodes, **kwargs):
+        batches.append([node.tag for node in nodes])
+        return {node.tag: LatencyResult(alive=True, delay=10) for node in nodes}
+
+    monkeypatch.setattr(tester_module, "EngineManager", FakeEngine)
+    monkeypatch.setattr(tester_module, "_test_node_batch_with_temporary_engine", fake_batch)
+    nodes = [_node(f"node-{index}", f"Node {index}") for index in range(8)]
+
+    asyncio.run(tester_module.test_nodes_with_temporary_engine(nodes, concurrency=4))
+
+    assert batches == [
+        ["node-0", "node-1", "node-2", "node-3"],
+        ["node-4", "node-5", "node-6", "node-7"],
+    ]
+
+
 def test_default_validation_urls_include_exit_ip_and_google_targets():
     assert DEFAULT_VALIDATION_URLS[0] == PRIMARY_TEST_URL
     assert "http://cp.cloudflare.com/generate_204" in DEFAULT_VALIDATION_URLS
@@ -170,6 +196,18 @@ def test_default_validation_urls_include_exit_ip_and_google_targets():
 
 def test_default_node_test_urls_only_use_primary_target():
     assert DEFAULT_NODE_TEST_URLS == [PRIMARY_TEST_URL]
+
+
+def test_query_exit_ip_with_budget_returns_last_error():
+    class FakeClient:
+        async def get(self, url, timeout=None):
+            raise RuntimeError(f"boom:{url}")
+
+    ip, error = asyncio.run(tester_module._query_exit_ip_with_budget(FakeClient(), timeout_seconds=0.2))
+
+    assert ip is None
+    assert error is not None
+
 
 def test_extract_public_ipv4_ignores_empty_or_private_responses():
     assert extract_public_ipv4("Found") is None

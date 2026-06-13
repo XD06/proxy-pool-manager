@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import platform
 from pathlib import Path
 
 import pytest
@@ -125,3 +126,26 @@ def test_start_fails_before_popen_when_config_ports_are_unavailable(monkeypatch,
 
     asyncio.run(run())
     assert not popen_called
+
+
+def test_managed_processes_parses_linux_ps_output(monkeypatch):
+    config_path = Path("/tmp/sing-box-test.json")
+    manager = EngineManager(config_path)
+    config_text = str(config_path)
+
+    class Completed:
+        returncode = 0
+        stdout = f"1234 /usr/bin/sing-box run -c {config_text}\n5678 other-process\n"
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr("app.engine.subprocess.run", lambda *args, **kwargs: Completed())
+
+    managed = manager._managed_processes(config_path)
+
+    assert managed == [
+        {
+            "ProcessId": 1234,
+            "ExecutablePath": None,
+            "CommandLine": f"/usr/bin/sing-box run -c {config_text}",
+        }
+    ]
