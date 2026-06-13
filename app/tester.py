@@ -23,6 +23,10 @@ FALLBACK_TEST_URLS = [
     "https://www.google.com/generate_204",
 ]
 
+DEFAULT_NODE_TEST_URLS = [
+    PRIMARY_TEST_URL,
+]
+
 EXIT_IP_URLS = [
     "https://ipv4.webshare.io/",
     "https://api.ipify.org?format=text",
@@ -31,6 +35,7 @@ EXIT_IP_URLS = [
     "https://checkip.amazonaws.com/",
     "https://ident.me/",
 ]
+
 
 IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
@@ -147,7 +152,7 @@ async def validate_proxy_port(
 ) -> LatencyResult:
     proxy = f"http://127.0.0.1:{port}"
     selected_urls = [url for url in (target_urls or []) if url]
-    test_urls = selected_urls or ([target_url] if target_url else FALLBACK_TEST_URLS)
+    test_urls = selected_urls or ([target_url] if target_url else DEFAULT_NODE_TEST_URLS)
     use_fallback = not selected_urls and not target_url
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=5, follow_redirects=False) as client:

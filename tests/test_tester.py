@@ -6,6 +6,7 @@ import pytest
 
 from app import tester as tester_module
 from app.tester import (
+    DEFAULT_NODE_TEST_URLS,
     DEFAULT_VALIDATION_URLS,
     PRIMARY_TEST_URL,
     _fetch_first_test_url,
@@ -14,7 +15,6 @@ from app.tester import (
     prune_same_exit_ip,
     sort_nodes_by_test_result,
 )
-
 
 def _node(tag, name):
     return ProxyNode(
@@ -167,6 +167,9 @@ def test_default_validation_urls_include_exit_ip_and_google_targets():
     assert "https://www.google.com/generate_204" in DEFAULT_VALIDATION_URLS
     assert "https://www.gstatic.com/generate_204" in DEFAULT_VALIDATION_URLS
 
+
+def test_default_node_test_urls_only_use_primary_target():
+    assert DEFAULT_NODE_TEST_URLS == [PRIMARY_TEST_URL]
 
 def test_extract_public_ipv4_ignores_empty_or_private_responses():
     assert extract_public_ipv4("Found") is None
