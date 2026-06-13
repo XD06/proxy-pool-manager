@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -13,16 +13,26 @@ import yaml
 from .models import ImportResult, ProxyNode
 
 
-SUPPORTED_LINK_SCHEMES = {"vless", "vmess", "ss", "trojan", "hysteria2", "hy2"}
+SUPPORTED_LINK_SCHEMES = {"vless", "vmess", "ss", "trojan", "hysteria2", "hy2", "tuic"}
 BASE64_SUBSCRIPTION_RE = re.compile(r"[A-Za-z0-9+/_-]{80,}={0,2}")
+SUBSCRIPTION_INFO_RE = re.compile(
+    r"(remaining|expire|reset|traffic|\u5269\u4f59\u6d41\u91cf|\u5230\u671f|\u5957\u9910|\u91cd\u7f6e)",
+    re.IGNORECASE,
+)
 SUBSCRIPTION_HEADERS = {
     "User-Agent": "Clash.Meta/1.18.0 ProxyPoolManager/1.0",
     "Accept": "text/plain, application/octet-stream, application/yaml, text/yaml, */*",
 }
 
 
+def _normalize_base64_text(value: str) -> str:
+    compact = value.replace("﻿", "").replace("​", "").replace("‌", "").replace("‍", "")
+    compact = re.sub(r"\s+", "", compact)
+    return compact
+
+
 def _decode_base64(value: str) -> str:
-    compact = re.sub(r"\s+", "", value)
+    compact = _normalize_base64_text(value)
     padding = "=" * (-len(compact) % 4)
     raw = base64.urlsafe_b64decode((compact + padding).encode("utf-8"))
     return raw.decode("utf-8", errors="replace")
@@ -49,6 +59,14 @@ def _query(parsed) -> dict[str, str]:
     return {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
 
 
+def _query_list(parsed) -> dict[str, list[str]]:
+    return {key: values for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
+
+
+def _truthy(value: str | None) -> bool:
+    return value in {"1", "true", "True", "yes", "on"}
+
+
 def _tls_from_query(params: dict[str, str]) -> dict[str, Any] | None:
     security = params.get("security") or params.get("tls")
     enabled = security in {"tls", "reality"} or params.get("sni") or params.get("fp")
@@ -67,6 +85,17 @@ def _tls_from_query(params: dict[str, str]) -> dict[str, Any] | None:
     alpn = params.get("alpn")
     if alpn:
         tls["alpn"] = [item for item in alpn.split(",") if item]
+    if security == "reality":
+        tls["reality"] = {"enabled": True}
+        public_key = params.get("pbk") or params.get("public-key")
+        if public_key:
+            tls["reality"]["public_key"] = public_key
+        short_id = params.get("sid") or params.get("short-id")
+        if short_id:
+            tls["reality"]["short_id"] = short_id
+        spider_x = params.get("spx") or params.get("spiderX")
+        if spider_x:
+            tls["reality"]["spider_x"] = unquote(spider_x)
     return tls
 
 
@@ -183,6 +212,79 @@ def parse_hysteria2(link: str) -> ProxyNode:
     return _build_node(_clean_name(parsed.fragment, parsed.hostname or "hysteria2"), "hysteria2", outbound)
 
 
+
+def _split_plugin(value: str) -> tuple[str, list[str]]:
+    parts = [part for part in (value or "").split(";") if part]
+    if not parts:
+        return "", []
+    return parts[0], parts[1:]
+
+
+def _parse_ss_plugin(plugin: str) -> dict[str, Any] | None:
+    plugin_name, options = _split_plugin(unquote(plugin))
+    if not plugin_name:
+        return None
+    if plugin_name in {"obfs-local", "simple-obfs"}:
+        outbound: dict[str, Any] = {"type": "obfs-local"}
+        for option in options:
+            if option.startswith("obfs="):
+                outbound["mode"] = option.split("=", 1)[1]
+            elif option.startswith("obfs-host="):
+                outbound["host"] = option.split("=", 1)[1]
+        return outbound
+    if plugin_name == "v2ray-plugin":
+        outbound = {"type": "v2ray-plugin"}
+        for option in options:
+            if option == "tls":
+                outbound["tls"] = True
+            elif option.startswith("host="):
+                outbound["host"] = option.split("=", 1)[1]
+            elif option.startswith("path="):
+                outbound["path"] = unquote(option.split("=", 1)[1])
+        return outbound
+    return {"type": plugin_name, "options": options}
+
+
+def parse_tuic(link: str) -> ProxyNode:
+    parsed = urlparse(link)
+    params = _query(parsed)
+    query_values = _query_list(parsed)
+    uuid = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    outbound: dict[str, Any] = {
+        "type": "tuic",
+        "server": parsed.hostname or "",
+        "server_port": int(parsed.port or 443),
+        "uuid": uuid,
+        "password": password or params.get("password") or params.get("token") or "",
+        "tls": {
+            "enabled": True,
+            "server_name": params.get("sni") or parsed.hostname,
+        },
+    }
+    alpn_values = query_values.get("alpn") or []
+    if alpn_values:
+        tls_alpn: list[str] = []
+        for value in alpn_values:
+            tls_alpn.extend(item for item in value.split(",") if item)
+        if tls_alpn:
+            outbound["tls"]["alpn"] = tls_alpn
+    if _truthy(params.get("allowInsecure") or params.get("insecure") or params.get("skip-cert-verify")):
+        outbound["tls"]["insecure"] = True
+    congestion = params.get("congestion_control") or params.get("congestion-control")
+    if congestion:
+        outbound["congestion_control"] = congestion
+    udp_relay_mode = params.get("udp_relay_mode") or params.get("udp-relay-mode")
+    if udp_relay_mode:
+        outbound["udp_relay_mode"] = udp_relay_mode
+    if _truthy(params.get("zero_rtt_handshake") or params.get("zero-rtt-handshake")):
+        outbound["zero_rtt_handshake"] = True
+    heartbeat = params.get("heartbeat") or params.get("heartbeat_interval") or params.get("heartbeat-interval")
+    if heartbeat:
+        outbound["heartbeat"] = heartbeat
+    return _build_node(_clean_name(parsed.fragment, parsed.hostname or "tuic"), "tuic", outbound)
+
+
 def parse_vmess(link: str) -> ProxyNode:
     payload = link[len("vmess://") :]
     data = json.loads(_decode_base64(payload))
@@ -244,6 +346,12 @@ def parse_ss(link: str) -> ProxyNode:
         "method": method,
         "password": password,
     }
+    params = _query(parsed)
+    plugin = params.get("plugin")
+    if plugin:
+        plugin_config = _parse_ss_plugin(plugin)
+        if plugin_config:
+            outbound["plugin"] = plugin_config
     return _build_node(_clean_name(fragment, host or "ss"), "ss", outbound)
 
 
@@ -259,6 +367,8 @@ def parse_link(link: str) -> ProxyNode:
         return parse_trojan(link)
     if scheme in {"hysteria2", "hy2"}:
         return parse_hysteria2(link)
+    if scheme == "tuic":
+        return parse_tuic(link)
     raise ValueError(f"Unsupported link scheme: {scheme}")
 
 
@@ -275,6 +385,24 @@ def _clash_tls(proxy: dict[str, Any]) -> dict[str, Any] | None:
         tls["utls"] = {"enabled": True, "fingerprint": proxy["client-fingerprint"]}
     return tls
 
+
+
+
+def _clash_reality(proxy: dict[str, Any]) -> dict[str, Any] | None:
+    reality_opts = proxy.get("reality-opts") or {}
+    if not isinstance(reality_opts, dict) or not reality_opts:
+        return None
+    reality: dict[str, Any] = {"enabled": True}
+    public_key = reality_opts.get("public-key") or reality_opts.get("public_key")
+    if public_key:
+        reality["public_key"] = str(public_key)
+    short_id = reality_opts.get("short-id") or reality_opts.get("short_id")
+    if short_id is not None:
+        reality["short_id"] = str(short_id)
+    spider_x = reality_opts.get("spider-x") or reality_opts.get("spider_x")
+    if spider_x:
+        reality["spider_x"] = str(spider_x)
+    return reality
 
 def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
     data = yaml.safe_load(text) or {}
@@ -302,8 +430,14 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                 if ptype == "vmess":
                     outbound["security"] = proxy.get("cipher") or "auto"
                     outbound["alter_id"] = int(proxy.get("alterId") or proxy.get("alter-id") or 0)
+                flow = proxy.get("flow")
+                if flow:
+                    outbound["flow"] = str(flow)
                 tls = _clash_tls(proxy)
                 if tls:
+                    reality = _clash_reality(proxy)
+                    if reality:
+                        tls["reality"] = reality
                     outbound["tls"] = tls
                 if proxy.get("network") == "ws":
                     ws_opts = proxy.get("ws-opts") or {}
@@ -343,7 +477,11 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
             else:
                 warnings.append(f"Skipped unsupported Clash node type at #{index}: {ptype}")
                 continue
-            nodes.append(_build_node(_clean_name(proxy.get("name"), f"node-{index}"), outbound["type"], outbound))
+            name = _clean_name(proxy.get("name"), f"node-{index}")
+            if SUBSCRIPTION_INFO_RE.search(name):
+                warnings.append(f"Skipped subscription info line: {name}")
+                continue
+            nodes.append(_build_node(name, outbound["type"], outbound))
         except Exception as exc:
             warnings.append(f"Skipped Clash node #{index}: {exc}")
     return nodes, warnings
@@ -358,14 +496,35 @@ def _looks_base64_subscription(text: str) -> bool:
 
 
 def _decode_base64_subscription_text(text: str) -> str | None:
-    try:
-        decoded = _decode_base64(text)
+    direct_candidates = [text, _normalize_base64_text(text)]
+    ascii_only = ''.join(ch for ch in text if ord(ch) < 128)
+    if ascii_only:
+        direct_candidates.extend([
+            ascii_only,
+            _normalize_base64_text(ascii_only),
+        ])
+
+    seen: set[str] = set()
+    for candidate in direct_candidates:
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            decoded = _decode_base64(candidate)
+        except Exception:
+            continue
         if _contains_supported_link(decoded):
             return decoded
-    except Exception:
-        pass
 
-    candidates = sorted(BASE64_SUBSCRIPTION_RE.findall(text), key=len, reverse=True)
+    search_texts = [text, ascii_only]
+    extracted_candidates: list[str] = []
+    for source in search_texts:
+        if not source:
+            continue
+        extracted_candidates.extend(BASE64_SUBSCRIPTION_RE.findall(source))
+
+    candidates = sorted(set(extracted_candidates), key=len, reverse=True)
     for candidate in candidates:
         try:
             decoded = _decode_base64(candidate)
@@ -379,6 +538,14 @@ def _decode_base64_subscription_text(text: str) -> str | None:
 def _contains_supported_link(text: str) -> bool:
     lowered = text.lower()
     return any(f"{scheme}://" in lowered for scheme in SUPPORTED_LINK_SCHEMES)
+
+
+def _should_skip_subscription_line(line: str) -> bool:
+    parsed = urlparse(line)
+    name = unquote(parsed.fragment or "").strip()
+    if not name:
+        return False
+    return bool(SUBSCRIPTION_INFO_RE.search(name))
 
 
 def parse_text(text: str) -> ImportResult:
@@ -399,6 +566,9 @@ def parse_text(text: str) -> ImportResult:
             scheme = line.split("://", 1)[0].lower()
             if scheme not in SUPPORTED_LINK_SCHEMES:
                 warnings.append(f"Skipped unsupported link scheme: {scheme}")
+                continue
+            if _should_skip_subscription_line(line):
+                warnings.append(f"Skipped subscription info line: {unquote(urlparse(line).fragment or line)}")
                 continue
             try:
                 nodes.append(parse_link(line))
@@ -427,3 +597,10 @@ async def import_nodes(url: str | None = None, text: str | None = None) -> Impor
             text = response.text
     assert text is not None
     return parse_text(text)
+
+
+
+
+
+
+

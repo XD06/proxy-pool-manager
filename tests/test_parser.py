@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import asyncio
 import json
 
@@ -166,4 +166,112 @@ proxies:
 def test_unsupported_link_is_warning():
     result = parse_text("ssr://unsupported")
     assert result.count == 0
+    assert result.warnings
+
+
+def test_parse_vless_reality_link():
+    text = (
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+        "?security=reality&flow=xtls-rprx-vision&fp=chrome&sni=www.mozilla.org&pbk=publicKey123&sid=abcd1234&spx=%2Fprobe#US"
+    )
+    result = parse_text(text)
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.outbound["flow"] == "xtls-rprx-vision"
+    assert node.outbound["tls"]["reality"]["enabled"] is True
+    assert node.outbound["tls"]["reality"]["public_key"] == "publicKey123"
+    assert node.outbound["tls"]["reality"]["short_id"] == "abcd1234"
+    assert node.outbound["tls"]["reality"]["spider_x"] == "/probe"
+
+
+def test_parse_tuic_link():
+    text = (
+        "tuic://00000000-0000-0000-0000-000000000000:secret@example.com:443"
+        "?sni=www.example.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3,hq-29#TUIC"
+    )
+    result = parse_text(text)
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.type == "tuic"
+    assert node.outbound["password"] == "secret"
+    assert node.outbound["tls"]["server_name"] == "www.example.com"
+    assert node.outbound["tls"]["alpn"] == ["h3", "hq-29"]
+    assert node.outbound["congestion_control"] == "bbr"
+    assert node.outbound["udp_relay_mode"] == "native"
+
+
+def test_parse_ss_v2ray_plugin_link():
+    userinfo = base64.urlsafe_b64encode(b"aes-256-gcm:secret").decode().rstrip("=")
+    text = f"ss://{userinfo}@ss.example.com:8388?plugin=v2ray-plugin%3Btls%3Bhost%3Dcdn.example.com%3Bpath%3D%252Fws#SS"
+    result = parse_text(text)
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.outbound["plugin"]["type"] == "v2ray-plugin"
+    assert node.outbound["plugin"]["tls"] is True
+    assert node.outbound["plugin"]["host"] == "cdn.example.com"
+    assert node.outbound["plugin"]["path"] == "/ws"
+
+
+def test_parse_subscription_skips_info_lines():
+    text = "\n".join([
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=reality&pbk=pk&sid=11&sni=www.mozilla.org#剩余流量：10GB",
+        "vless://00000000-0000-0000-0000-000000000001@example.com:443?security=tls&sni=www.mozilla.org#Node-1",
+    ])
+    result = parse_text(text)
+    assert result.count == 1
+    assert result.nodes[0].name == "Node-1"
+    assert result.warnings
+
+
+
+def test_parse_base64_subscription_with_non_ascii_noise():
+    subscription = "\n".join([
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=reality&pbk=pk123&sid=1122&sni=www.mozilla.org#Node-1",
+        "vless://00000000-0000-0000-0000-000000000001@example.com:443?security=tls&sni=www.mozilla.org#Node-2",
+    ])
+    encoded = base64.urlsafe_b64encode(subscription.encode()).decode()
+    noisy = "﻿" + encoded[:40] + "剩余流量" + encoded[40:] + "​"
+
+    result = parse_text(noisy)
+
+    assert result.count == 2
+    assert result.nodes[0].outbound["tls"]["reality"]["public_key"] == "pk123"
+
+
+
+def test_parse_clash_yaml_vless_reality_and_skip_info_nodes():
+    text = """
+proxies:
+  - name: 剩余流量：10GB
+    type: vless
+    server: hk.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    tls: true
+    servername: www.mozilla.org
+    client-fingerprint: chrome
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: pk-info
+      short-id: 1111aaaa
+  - name: HK-REALITY
+    type: vless
+    server: hk2.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000001
+    tls: true
+    servername: www.mozilla.org
+    client-fingerprint: chrome
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: pk-real
+      short-id: abcd1234
+"""
+    result = parse_text(text)
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.name == "HK-REALITY"
+    assert node.outbound["flow"] == "xtls-rprx-vision"
+    assert node.outbound["tls"]["reality"]["public_key"] == "pk-real"
+    assert node.outbound["tls"]["reality"]["short_id"] == "abcd1234"
     assert result.warnings

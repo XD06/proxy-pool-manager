@@ -1773,3 +1773,61 @@ def test_api_port_test_job_reports_details_when_engine_stopped(tmp_path):
     assert body["completed"] == 1
     assert body["details"]["8001"]["targets"][0]["url"] == "https://rawchat.cn"
     assert body["details"]["8001"]["targets"][0]["error"] == "sing-box is not running"
+
+
+
+def test_api_test_ports_defaults_to_primary_target_only(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_validate_proxy_targets(port, urls=None):
+        seen.append((port, list(urls or [])))
+        return [
+            {
+                "url": urls[0],
+                "ok": True,
+                "status_code": 204,
+                "elapsed_ms": 25,
+                "body_preview": "",
+                "error": None,
+            }
+        ]
+
+    async def fake_query_exit_ip(port, state, engine):
+        return ExitIpCache(ip=None)
+
+    monkeypatch.setattr(api_module, "validate_proxy_targets", fake_validate_proxy_targets)
+    monkeypatch.setattr(api_module, "query_exit_ip", fake_query_exit_ip)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#HK"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+    client.put("/api/assign", json={"mappings": {"8001": tag}})
+
+    response = client.post("/api/test-ports")
+
+    assert response.status_code == 200
+    assert seen == [(8001, [api_module.PRIMARY_TEST_URL])]
+
+
+def test_current_performance_settings_prefers_lower_batch_defaults(monkeypatch):
+    monkeypatch.delenv("PPM_MAX_NODE_TEST_CONCURRENCY", raising=False)
+    monkeypatch.delenv("PPM_MAX_PORT_TEST_CONCURRENCY", raising=False)
+    monkeypatch.delenv("PPM_STATE_SAVE_DEBOUNCE_MS", raising=False)
+    monkeypatch.setattr("app.settings._APP_CONFIG", {})
+    monkeypatch.setattr("app.settings._load_app_config", lambda: {})
+
+    settings = api_module.current_performance_settings()
+
+    assert settings.max_node_test_concurrency == 6
+    assert settings.max_port_test_concurrency == 8
+    assert settings.state_save_debounce_ms == 500

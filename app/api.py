@@ -46,6 +46,7 @@ from .settings import (
 from .store import StateStore
 from .tester import (
     DEFAULT_VALIDATION_URLS,
+    PRIMARY_TEST_URL,
     measure_port_latency,
     prune_same_exit_ip,
     query_exit_ip,
@@ -85,6 +86,11 @@ class TestRequest(BaseModel):
 class PortTestRequest(BaseModel):
     ports: list[int] | None = None
     urls: list[str] | None = None
+
+
+def default_port_validation_urls(urls: list[str] | None) -> list[str]:
+    selected = [url.strip() for url in (urls or []) if str(url).strip()]
+    return selected or [PRIMARY_TEST_URL]
 
 
 class PortAvailabilityRequest(BaseModel):
@@ -771,7 +777,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         return list(port_by_tag.items())
 
     async def validate_assigned_tag(tag: str, port: int, urls: list[str] | None):
-        targets = urls or DEFAULT_VALIDATION_URLS
+        targets = default_port_validation_urls(urls)
         if not engine_manager.status().running:
             target_results = [
                 {
@@ -1108,6 +1114,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     @app.post("/api/test-ports")
     async def test_ports(payload: PortTestRequest | None = None):
         payload = payload or PortTestRequest()
+        payload.urls = default_port_validation_urls(payload.urls)
         tag_ports = assigned_tags_for_ports(payload.ports)
         semaphore = asyncio.Semaphore(performance.max_port_test_concurrency)
 
@@ -1129,6 +1136,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     @app.post("/api/test-ports/start")
     async def start_port_test_job(payload: PortTestRequest | None = None):
         payload = payload or PortTestRequest()
+        payload.urls = default_port_validation_urls(payload.urls)
         if active_port_test_job["id"] is not None or port_test_job_lock.locked():
             raise HTTPException(status_code=409, detail="A port validation job is already running")
         cleanup_all_jobs()
