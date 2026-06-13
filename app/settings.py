@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import os
@@ -28,6 +29,25 @@ def _load_app_config() -> dict:
 
 def _setting(config: dict, key: str, env_name: str, default: str) -> str:
     return os.environ.get(env_name) or str(config.get(key) or default)
+
+
+def _int_setting(
+    config: dict,
+    key: str,
+    env_name: str,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: int = 10_000,
+) -> int:
+    raw = os.environ.get(env_name)
+    if raw is None:
+        raw = config.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def runtime_setting(key: str, env_name: str, default: str) -> str:
@@ -69,3 +89,98 @@ def current_domain_resolve_strategy() -> str:
     config = _load_app_config()
     fallback = str(config.get("outbound_domain_strategy") or DOMAIN_RESOLVE_STRATEGY)
     return _setting(config, "domain_resolve_strategy", "PPM_DOMAIN_RESOLVE_STRATEGY", fallback)
+
+
+@dataclass(frozen=True)
+class PerformanceSettings:
+    profile: str
+    max_node_test_concurrency: int
+    node_test_batch_size: int
+    max_port_test_concurrency: int
+    max_proxycheck_concurrency: int
+    max_geoip_concurrency: int
+    max_proxy_admin_concurrency: int
+    state_save_debounce_ms: int
+    job_retention_minutes: int
+    max_jobs_per_type: int
+
+
+def current_performance_settings() -> PerformanceSettings:
+    config = _load_app_config()
+    profile = _setting(config, "performance_profile", "PPM_PERFORMANCE_PROFILE", "normal").lower()
+    low = profile == "low"
+    return PerformanceSettings(
+        profile=profile,
+        max_node_test_concurrency=_int_setting(
+            config,
+            "max_node_test_concurrency",
+            "PPM_MAX_NODE_TEST_CONCURRENCY",
+            8 if low else 12,
+            minimum=1,
+            maximum=64,
+        ),
+        node_test_batch_size=_int_setting(
+            config,
+            "node_test_batch_size",
+            "PPM_NODE_TEST_BATCH_SIZE",
+            50 if low else 1000,
+            minimum=1,
+            maximum=1000,
+        ),
+        max_port_test_concurrency=_int_setting(
+            config,
+            "max_port_test_concurrency",
+            "PPM_MAX_PORT_TEST_CONCURRENCY",
+            8 if low else 32,
+            minimum=1,
+            maximum=128,
+        ),
+        max_proxycheck_concurrency=_int_setting(
+            config,
+            "max_proxycheck_concurrency",
+            "PPM_MAX_PROXYCHECK_CONCURRENCY",
+            2 if low else 10,
+            minimum=1,
+            maximum=32,
+        ),
+        max_geoip_concurrency=_int_setting(
+            config,
+            "max_geoip_concurrency",
+            "PPM_MAX_GEOIP_CONCURRENCY",
+            2 if low else 4,
+            minimum=1,
+            maximum=32,
+        ),
+        max_proxy_admin_concurrency=_int_setting(
+            config,
+            "max_proxy_admin_concurrency",
+            "PPM_MAX_PROXY_ADMIN_CONCURRENCY",
+            8 if low else 30,
+            minimum=1,
+            maximum=64,
+        ),
+        state_save_debounce_ms=_int_setting(
+            config,
+            "state_save_debounce_ms",
+            "PPM_STATE_SAVE_DEBOUNCE_MS",
+            1000 if low else 0,
+            minimum=0,
+            maximum=60_000,
+        ),
+        job_retention_minutes=_int_setting(
+            config,
+            "job_retention_minutes",
+            "PPM_JOB_RETENTION_MINUTES",
+            60,
+            minimum=1,
+            maximum=10_080,
+        ),
+        max_jobs_per_type=_int_setting(
+            config,
+            "max_jobs_per_type",
+            "PPM_MAX_JOBS_PER_TYPE",
+            20,
+            minimum=1,
+            maximum=1000,
+        ),
+    )

@@ -4,6 +4,7 @@ import socket
 import asyncio
 import pytest
 
+from app import tester as tester_module
 from app.tester import (
     DEFAULT_VALIDATION_URLS,
     PRIMARY_TEST_URL,
@@ -115,6 +116,48 @@ def test_allocate_test_ports_skips_occupied_port():
 
     assert 19001 not in ports
     assert len(ports) == 2
+
+
+def test_test_nodes_with_temporary_engine_batches_nodes(monkeypatch):
+    batches = []
+    stops = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def stop(self, *args, **kwargs):
+            stops.append(args)
+
+    async def fake_batch(nodes, **kwargs):
+        batches.append(
+            {
+                "tags": [node.tag for node in nodes],
+                "concurrency": kwargs["concurrency"],
+            }
+        )
+        return {node.tag: LatencyResult(alive=True, delay=10) for node in nodes}
+
+    monkeypatch.setattr(tester_module, "EngineManager", FakeEngine)
+    monkeypatch.setattr(tester_module, "_test_node_batch_with_temporary_engine", fake_batch)
+    nodes = [_node(f"node-{index}", f"Node {index}") for index in range(5)]
+
+    results = asyncio.run(
+        tester_module.test_nodes_with_temporary_engine(
+            nodes,
+            concurrency=3,
+            batch_size=2,
+        )
+    )
+
+    assert [batch["tags"] for batch in batches] == [
+        ["node-0", "node-1"],
+        ["node-2", "node-3"],
+        ["node-4"],
+    ]
+    assert {batch["concurrency"] for batch in batches} == {3}
+    assert sorted(results) == [node.tag for node in nodes]
+    assert stops
 
 
 def test_default_validation_urls_include_exit_ip_and_google_targets():

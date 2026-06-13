@@ -9,7 +9,7 @@ from app import api as api_module
 from app import proxy_admin as proxy_admin_module
 from app.api import create_app
 from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, ImportResult, LatencyResult, PortMapping, ProxyNode
-from app.settings import ASSET_VERSION
+from app.settings import ASSET_VERSION, PerformanceSettings
 from app.store import StateStore
 
 
@@ -92,6 +92,7 @@ def test_api_import_assign_and_status(tmp_path):
     assert status.json()["web"]["asset_version"] == ASSET_VERSION
     assert status.json()["web"]["pid"] > 0
     assert status.json()["web"]["started_at"]
+    assert status.json()["performance"]["profile"] in {"normal", "low"}
 
 
 def test_index_injects_asset_version(tmp_path):
@@ -493,6 +494,32 @@ def test_api_fastest_proxy_returns_best_alive_mapping(tmp_path):
     assert payload["target_success_count"] == 2
     assert payload["engine"]["running"] is False
     assert payload["node"]["name"] == "B"
+
+
+def test_api_start_reports_when_config_file_is_unchanged(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": (
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+                "?security=tls#HK"
+            )
+        },
+    )
+    tag = imported.json()["nodes"][0]["tag"]
+    client.put("/api/assign", json={"mappings": {"8001": tag}})
+
+    first = client.post("/api/start")
+    second = client.post("/api/start")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["config_written"] is True
+    assert second.json()["config_written"] is False
 
 
 def test_api_fastest_proxy_refreshes_latest_state_from_disk(tmp_path):
@@ -1051,8 +1078,124 @@ def test_api_local_proxy_check_job_can_be_canceled(tmp_path, monkeypatch):
             time.sleep(0.05)
 
         payload = job.json()
-        assert payload["status"] == "canceled"
-        assert payload["completed"] < payload["total"]
+    assert payload["status"] == "canceled"
+    assert payload["completed"] < payload["total"]
+
+
+def test_local_proxy_check_job_debounces_state_saves(tmp_path, monkeypatch):
+    class CountingStore(StateStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.save_count = 0
+
+        def save(self, state):
+            self.save_count += 1
+            super().save(state)
+
+    monkeypatch.setattr(
+        api_module,
+        "current_performance_settings",
+        lambda: PerformanceSettings(
+            profile="low",
+            max_node_test_concurrency=8,
+            node_test_batch_size=50,
+            max_port_test_concurrency=8,
+            max_proxycheck_concurrency=3,
+            max_geoip_concurrency=2,
+            max_proxy_admin_concurrency=8,
+            state_save_debounce_ms=1000,
+            job_retention_minutes=60,
+            max_jobs_per_type=20,
+        ),
+    )
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(api_module.socket, "create_connection", lambda *args, **kwargs: FakeConnection())
+
+    async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
+        await asyncio.sleep(0)
+        return {"id": proxy_id, "grade": "A", "items": []}
+
+    monkeypatch.setattr(api_module, "check_proxy_quality", fake_check_proxy_quality)
+    store = CountingStore(tmp_path / "assignments.json")
+    store.save(AppState())
+    store.save_count = 0
+    app = create_app(store=store, engine=RunningEngine())
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/proxy-check/start",
+            json={"ports": [18001, 18002, 18003], "concurrency": 3},
+        )
+        job_id = started.json()["id"]
+        for _ in range(20):
+            job = client.get(f"/api/proxy-check/jobs/{job_id}")
+            if job.json()["status"] == "done":
+                break
+            time.sleep(0.05)
+
+    assert job.json()["completed"] == 3
+    assert store.save_count == 1
+
+
+def test_local_proxy_check_jobs_are_retained_by_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        api_module,
+        "current_performance_settings",
+        lambda: PerformanceSettings(
+            profile="normal",
+            max_node_test_concurrency=12,
+            node_test_batch_size=1000,
+            max_port_test_concurrency=32,
+            max_proxycheck_concurrency=1,
+            max_geoip_concurrency=4,
+            max_proxy_admin_concurrency=30,
+            state_save_debounce_ms=0,
+            job_retention_minutes=60,
+            max_jobs_per_type=1,
+        ),
+    )
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(api_module.socket, "create_connection", lambda *args, **kwargs: FakeConnection())
+
+    async def fake_check_proxy_quality(proxy_url, proxy_id, timeout_seconds=30):
+        return {"id": proxy_id, "grade": "A", "items": []}
+
+    monkeypatch.setattr(api_module, "check_proxy_quality", fake_check_proxy_quality)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+
+    def run_job(client, port):
+        started = client.post("/api/proxy-check/start", json={"ports": [port], "concurrency": 1})
+        job_id = started.json()["id"]
+        for _ in range(20):
+            job = client.get(f"/api/proxy-check/jobs/{job_id}")
+            if job.json()["status"] == "done":
+                break
+            time.sleep(0.05)
+        return job_id
+
+    with TestClient(app) as client:
+        first_id = run_job(client, 18001)
+        second_id = run_job(client, 18002)
+        third_id = run_job(client, 18003)
+
+        assert client.get(f"/api/proxy-check/jobs/{first_id}").status_code == 404
+        assert client.get(f"/api/proxy-check/jobs/{second_id}").status_code == 200
+        assert client.get(f"/api/proxy-check/jobs/{third_id}").status_code == 200
 
 
 def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
@@ -1182,6 +1325,84 @@ def test_api_test_ports_uses_only_custom_urls(tmp_path, monkeypatch):
     ports = client.get("/api/ports").json()["ports"]
     assert ports["8001"]["latency"]["target_url"] == "https://custom.example.com/check"
     assert ports["8001"]["latency"]["delay"] == 88
+
+
+def test_api_test_ports_respects_configured_concurrency(tmp_path, monkeypatch):
+    active = 0
+    max_active = 0
+    seen_ports = []
+
+    monkeypatch.setattr(
+        api_module,
+        "current_performance_settings",
+        lambda: PerformanceSettings(
+            profile="normal",
+            max_node_test_concurrency=12,
+            node_test_batch_size=1000,
+            max_port_test_concurrency=2,
+            max_proxycheck_concurrency=10,
+            max_geoip_concurrency=4,
+            max_proxy_admin_concurrency=30,
+            state_save_debounce_ms=0,
+            job_retention_minutes=60,
+            max_jobs_per_type=20,
+        ),
+    )
+
+    async def fake_validate_proxy_targets(port, urls=None):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.01)
+            seen_ports.append(port)
+            return [
+                {
+                    "url": (urls or ["https://example.com"])[0],
+                    "ok": True,
+                    "status_code": 204,
+                    "elapsed_ms": 10,
+                    "body_preview": "",
+                    "error": None,
+                }
+            ]
+        finally:
+            active -= 1
+
+    async def fake_query_exit_ip(port, state, engine):
+        return ExitIpCache(ip=None)
+
+    monkeypatch.setattr(api_module, "validate_proxy_targets", fake_validate_proxy_targets)
+    monkeypatch.setattr(api_module, "query_exit_ip", fake_query_exit_ip)
+    store = StateStore(tmp_path / "assignments.json")
+    nodes = [
+        ProxyNode(
+            tag=f"node-{index}",
+            name=f"Node {index}",
+            type="vless",
+            server="example.com",
+            server_port=443,
+            outbound={"type": "vless", "tag": f"node-{index}"},
+        )
+        for index in range(5)
+    ]
+    store.save(
+        AppState(
+            nodes=nodes,
+            port_mappings={
+                str(8100 + index): PortMapping(node_tag=node.tag)
+                for index, node in enumerate(nodes)
+            },
+        )
+    )
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    response = client.post("/api/test-ports")
+
+    assert response.status_code == 200
+    assert sorted(seen_ports) == [8100, 8101, 8102, 8103, 8104]
+    assert max_active <= 2
 
 
 def test_api_test_ports_falls_back_to_exit_ip_for_geoip(tmp_path, monkeypatch):

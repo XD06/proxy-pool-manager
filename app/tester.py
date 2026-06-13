@@ -71,17 +71,20 @@ async def query_exit_ip(port: int, state: AppState, engine: EngineManager) -> Ex
     proxies = [f"socks5://127.0.0.1:{port}", f"socks5h://127.0.0.1:{port}"]
     last_error = None
     for proxy in proxies:
-        for url in EXIT_IP_URLS:
-            try:
-                async with httpx.AsyncClient(proxy=proxy, timeout=10) as client:
-                    response = await client.get(url)
-                    response.raise_for_status()
-                    ip = extract_public_ipv4(response.text)
-                    if ip:
-                        return ExitIpCache(ip=ip)
-                    last_error = f"{url}: no public IPv4 in response"
-            except Exception as exc:
-                last_error = str(exc)
+        try:
+            async with httpx.AsyncClient(proxy=proxy, timeout=10) as client:
+                for url in EXIT_IP_URLS:
+                    try:
+                        response = await client.get(url)
+                        response.raise_for_status()
+                        ip = extract_public_ipv4(response.text)
+                        if ip:
+                            return ExitIpCache(ip=ip)
+                        last_error = f"{url}: no public IPv4 in response"
+                    except Exception as exc:
+                        last_error = str(exc)
+        except Exception as exc:
+            last_error = str(exc)
     return ExitIpCache(ip=None, error=last_error or "exit IP query failed")
 
 
@@ -300,11 +303,42 @@ async def test_nodes_with_temporary_engine(
     target_urls: list[str] | None = None,
     include_exit_ip: bool = False,
     should_cancel=None,
+    concurrency: int = 12,
+    batch_size: int | None = None,
 ) -> dict[str, LatencyResult]:
     if not nodes:
         return {}
     cleanup_engine = EngineManager(SING_BOX_TEST_CONFIG_PATH)
     await cleanup_engine.stop(SING_BOX_TEST_CONFIG_PATH)
+    concurrency = max(1, int(concurrency or 12))
+    batch_size = max(1, int(batch_size or len(nodes)))
+    results: dict[str, LatencyResult] = {}
+    for offset in range(0, len(nodes), batch_size):
+        if should_cancel and should_cancel():
+            break
+        batch = nodes[offset:offset + batch_size]
+        batch_results = await _test_node_batch_with_temporary_engine(
+            batch,
+            on_result=on_result,
+            target_url=target_url,
+            target_urls=target_urls,
+            include_exit_ip=include_exit_ip,
+            should_cancel=should_cancel,
+            concurrency=concurrency,
+        )
+        results.update(batch_results)
+    return results
+
+
+async def _test_node_batch_with_temporary_engine(
+    nodes: list[ProxyNode],
+    on_result=None,
+    target_url: str | None = None,
+    target_urls: list[str] | None = None,
+    include_exit_ip: bool = False,
+    should_cancel=None,
+    concurrency: int = 12,
+) -> dict[str, LatencyResult]:
     ports = allocate_test_ports(len(nodes))
     mappings = {
         str(ports[index]): PortMapping(node_tag=node.tag)
@@ -340,7 +374,7 @@ async def test_nodes_with_temporary_engine(
                 )
             return tag, result
 
-        semaphore = asyncio.Semaphore(12)
+        semaphore = asyncio.Semaphore(max(1, int(concurrency or 12)))
 
         async def limited_run_one(tag: str, port: int):
             async with semaphore:

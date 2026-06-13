@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .engine import EngineError, EngineManager
 from .engine import _can_bind_tcp_port
@@ -24,6 +24,7 @@ from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping, utc_now_iso
 from .parser import import_nodes
 from .proxy_admin import (
+    proxy_admin_client_scope,
     proxy_admin_import,
     proxy_admin_list_all,
     proxy_admin_quality_check,
@@ -38,6 +39,7 @@ from .settings import (
     STATIC_DIR,
     TEMPLATES_DIR,
     current_clash_api_addr,
+    current_performance_settings,
     current_proxy_listen_host,
     current_proxy_public_host,
 )
@@ -156,6 +158,7 @@ class TestJob(BaseModel):
     results: dict[str, dict] = {}
     removed: list[str] = []
     error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 
 
 class PortTestJob(BaseModel):
@@ -166,6 +169,7 @@ class PortTestJob(BaseModel):
     results: dict[str, dict] = {}
     details: dict[str, dict] = {}
     error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 
 
 class ProxyAdminJob(BaseModel):
@@ -176,6 +180,7 @@ class ProxyAdminJob(BaseModel):
     imported: list[dict] = []
     results: dict[str, dict] = {}
     error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 
 
 class LocalProxyCheckJob(BaseModel):
@@ -185,6 +190,7 @@ class LocalProxyCheckJob(BaseModel):
     completed: int = 0
     results: dict[str, dict] = {}
     error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 
 
 def create_app(store: StateStore | None = None, engine: EngineManager | None = None) -> FastAPI:
@@ -193,6 +199,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     app_state = state_store.load()
     state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
     engine_manager = engine or EngineManager(SING_BOX_CONFIG_PATH)
+    performance = current_performance_settings()
     test_jobs: dict[str, TestJob] = {}
     test_job_lock = asyncio.Lock()
     active_test_job: dict[str, str | None] = {"id": None}
@@ -210,21 +217,24 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     canceled_proxy_admin_jobs: set[str] = set()
     canceled_local_proxy_check_jobs: set[str] = set()
     geoip_tasks: dict[str, asyncio.Task] = {}
-    geoip_semaphore = asyncio.Semaphore(4)
+    geoip_semaphore = asyncio.Semaphore(performance.max_geoip_concurrency)
     subscription_refresh_lock = asyncio.Lock()
     next_subscription_refresh_at: dict[str, float | None] = {"value": None}
 
     monitor_task: asyncio.Task | None = None
     subscription_task: asyncio.Task | None = None
+    job_cleanup_task: asyncio.Task | None = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal monitor_task, subscription_task
+        nonlocal monitor_task, subscription_task, job_cleanup_task
         monitor = getattr(engine_manager, "monitor", None)
         if monitor and not monitor_task:
             monitor_task = asyncio.create_task(monitor(SING_BOX_CONFIG_PATH))
         if not subscription_task:
             subscription_task = asyncio.create_task(subscription_refresh_loop())
+        if not job_cleanup_task:
+            job_cleanup_task = asyncio.create_task(job_cleanup_loop())
         try:
             yield
         finally:
@@ -232,16 +242,92 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 monitor_task.cancel()
             if subscription_task:
                 subscription_task.cancel()
+            if job_cleanup_task:
+                job_cleanup_task.cancel()
+            await flush_save()
 
     app = FastAPI(title="Proxy Pool Manager", lifespan=lifespan)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    def save() -> None:
+    pending_save_task: dict[str, asyncio.Task | None] = {"task": None}
+    save_dirty: dict[str, bool] = {"value": False}
+
+    def save_now() -> None:
         nonlocal state_loaded_mtime_ns
         state_store.save(app_state)
         state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
+
+    def save() -> None:
+        save_now()
+
+    async def _run_debounced_save() -> None:
+        try:
+            await asyncio.sleep(performance.state_save_debounce_ms / 1000)
+            if save_dirty["value"]:
+                save_dirty["value"] = False
+                save_now()
+        finally:
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
+            if current_task is None or pending_save_task["task"] is current_task:
+                pending_save_task["task"] = None
+
+    def save_later() -> None:
+        if performance.state_save_debounce_ms <= 0:
+            save()
+            return
+        save_dirty["value"] = True
+        task = pending_save_task["task"]
+        if task is None or task.done():
+            pending_save_task["task"] = asyncio.create_task(_run_debounced_save())
+
+    async def flush_save() -> None:
+        task = pending_save_task["task"]
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if save_dirty["value"]:
+            save_dirty["value"] = False
+            save_now()
+
+    def touch_job(job) -> None:
+        job.touched_at = time.monotonic()
+
+    def cleanup_job_map(jobs: dict[str, BaseModel], active_id: str | None) -> None:
+        now = time.monotonic()
+        retention_seconds = performance.job_retention_minutes * 60
+        inactive_statuses = {"done", "error", "canceled"}
+        removable = [
+            (job_id, job)
+            for job_id, job in jobs.items()
+            if job_id != active_id and getattr(job, "status", "") in inactive_statuses
+        ]
+        for job_id, job in list(removable):
+            if now - getattr(job, "touched_at", now) > retention_seconds:
+                jobs.pop(job_id, None)
+        removable = [
+            (job_id, job)
+            for job_id, job in jobs.items()
+            if job_id != active_id and getattr(job, "status", "") in inactive_statuses
+        ]
+        removable.sort(key=lambda item: getattr(item[1], "touched_at", 0), reverse=True)
+        for job_id, _job in removable[performance.max_jobs_per_type:]:
+            jobs.pop(job_id, None)
+
+    def cleanup_all_jobs() -> None:
+        cleanup_job_map(test_jobs, active_test_job["id"])
+        cleanup_job_map(port_test_jobs, active_port_test_job["id"])
+        cleanup_job_map(proxy_admin_jobs, active_proxy_admin_job["id"])
+        cleanup_job_map(local_proxy_check_jobs, active_local_proxy_check_job["id"])
+
+    async def job_cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(60)
+            cleanup_all_jobs()
 
     def refresh_state_from_disk() -> bool:
         nonlocal state_loaded_mtime_ns
@@ -404,7 +490,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 for cache in app_state.exit_ip_cache.values():
                     if cache.ip == ip:
                         cache.geoip = geoip_payload_with_summaries(ip)
-                save()
+                save_later()
             finally:
                 geoip_tasks.pop(ip, None)
 
@@ -721,7 +807,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     app_state.exit_ip_cache[str(port)] = exit_result
             except Exception:
                 exit_ip = None
-        geoip = await enrich_geoip_now(exit_ip) if exit_ip else None
+        geoip = geoip_payload_with_summaries(exit_ip) if exit_ip else None
+        if exit_ip and not geoip:
+            schedule_geoip_lookup(exit_ip)
         result = {
             "alive": bool(first_ok),
             "delay": first_ok.get("elapsed_ms") if first_ok else None,
@@ -774,6 +862,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 "started_at": web_started_at,
                 "asset_version": ASSET_VERSION,
             },
+            "performance": performance.__dict__,
             "engine": engine_status,
             **engine_status,
         }
@@ -881,6 +970,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 target_url=payload.target_url,
                 target_urls=payload.target_urls,
                 include_exit_ip=payload.prune_same_ip or payload.include_geoip,
+                concurrency=performance.max_node_test_concurrency,
+                batch_size=performance.node_test_batch_size,
             )
         except EngineError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -911,6 +1002,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def start_test_job(payload: TestRequest):
         if active_test_job["id"] is not None or test_job_lock.locked():
             raise HTTPException(status_code=409, detail="A node test is already running")
+        cleanup_all_jobs()
         tags = payload.node_tags if payload.node_tags is not None else [node.tag for node in app_state.nodes]
         by_tag = node_by_tag()
         selected = [by_tag[tag] for tag in tags if tag in by_tag]
@@ -953,6 +1045,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     job.results[tag] = result.model_dump()
                     schedule_geoip_lookup(result.exit_ip)
                     job.completed += 1
+                    touch_job(job)
+                    save_later()
 
                 await test_nodes_with_temporary_engine(
                     selected,
@@ -961,11 +1055,14 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     target_urls=target_urls,
                     include_exit_ip=prune_same_ip or include_geoip,
                     should_cancel=lambda: job_id in canceled_test_jobs,
+                    concurrency=performance.max_node_test_concurrency,
+                    batch_size=performance.node_test_batch_size,
                 )
                 if job_id in canceled_test_jobs:
                     job.status = "canceled"
+                    touch_job(job)
                     return
-                if include_geoip:
+                if include_geoip and performance.profile != "low":
                     ips = sorted({result.exit_ip for result in app_state.latency_cache.values() if result.exit_ip})
                     for ip in ips:
                         geoip = await enrich_geoip_now(ip)
@@ -976,6 +1073,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                                 result.geoip = geoip
                                 if tag in job.results:
                                     job.results[tag] = result.model_dump()
+                        save_later()
                 if prune_same_ip:
                     app_state.nodes, job.removed = prune_same_exit_ip(app_state.nodes, app_state.latency_cache)
                     kept_tags = {node.tag for node in app_state.nodes}
@@ -990,15 +1088,19 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         if tag in kept_tags
                     }
                 app_state.nodes = sort_nodes_by_test_result(app_state.nodes, app_state.latency_cache)
-                save()
                 job.status = "done"
+                touch_job(job)
+                save()
             except EngineError as exc:
                 job.status = "error"
                 job.error = str(exc)
+                touch_job(job)
             except Exception as exc:
                 job.status = "error"
                 job.error = str(exc)
+                touch_job(job)
             finally:
+                await flush_save()
                 if active_test_job["id"] == job_id:
                     active_test_job["id"] = None
                 canceled_test_jobs.discard(job_id)
@@ -1007,7 +1109,13 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def test_ports(payload: PortTestRequest | None = None):
         payload = payload or PortTestRequest()
         tag_ports = assigned_tags_for_ports(payload.ports)
-        validated = await asyncio.gather(*(validate_assigned_tag(tag, port, payload.urls) for tag, port in tag_ports))
+        semaphore = asyncio.Semaphore(performance.max_port_test_concurrency)
+
+        async def validate_one(tag: str, port: int):
+            async with semaphore:
+                return await validate_assigned_tag(tag, port, payload.urls)
+
+        validated = await asyncio.gather(*(validate_one(tag, port) for tag, port in tag_ports))
         results = {}
         details = {}
         for tag, port, result, detail in validated:
@@ -1023,6 +1131,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         payload = payload or PortTestRequest()
         if active_port_test_job["id"] is not None or port_test_job_lock.locked():
             raise HTTPException(status_code=409, detail="A port validation job is already running")
+        cleanup_all_jobs()
         tag_ports = assigned_tags_for_ports(payload.ports)
         job = PortTestJob(id=str(uuid.uuid4()), total=len(tag_ports))
         port_test_jobs[job.id] = job
@@ -1050,36 +1159,42 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def run_port_test_job(job_id: str, tag_ports: list[tuple[str, int]], urls: list[str] | None) -> None:
         job = port_test_jobs[job_id]
         async with port_test_job_lock:
-            tasks = []
             try:
-                tasks = [
-                    asyncio.create_task(validate_assigned_tag(tag, port, urls))
-                    for tag, port in tag_ports
-                ]
-                for completed in asyncio.as_completed(tasks):
-                    if job_id in canceled_port_test_jobs:
-                        for task in tasks:
-                            if not task.done():
-                                task.cancel()
-                        job.status = "canceled"
-                        break
-                    tag, port, result, detail = await completed
-                    job.results[tag] = result
-                    if port and detail:
-                        job.details[str(port)] = detail
-                        store_port_test_result(tag, port, result, detail)
-                    job.completed += 1
-                    save()
-                if job.status != "canceled":
+                idx = 0
+                worker_count = max(1, min(performance.max_port_test_concurrency, len(tag_ports) or 1))
+
+                async def worker():
+                    nonlocal idx
+                    while idx < len(tag_ports):
+                        current = idx
+                        idx += 1
+                        if job_id in canceled_port_test_jobs:
+                            return
+                        tag, port = tag_ports[current]
+                        tag, port, result, detail = await validate_assigned_tag(tag, port, urls)
+                        job.results[tag] = result
+                        if port and detail:
+                            job.details[str(port)] = detail
+                            store_port_test_result(tag, port, result, detail)
+                        job.completed += 1
+                        touch_job(job)
+                        save_later()
+
+                await asyncio.gather(*(worker() for _ in range(worker_count)))
+                if job_id in canceled_port_test_jobs:
+                    job.status = "canceled"
+                else:
                     job.status = "done"
+                touch_job(job)
             except Exception as exc:
                 if job_id in canceled_port_test_jobs:
                     job.status = "canceled"
                 else:
                     job.status = "error"
                     job.error = str(exc)
+                touch_job(job)
             finally:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await flush_save()
                 if active_port_test_job["id"] == job_id:
                     active_port_test_job["id"] = None
                 canceled_port_test_jobs.discard(job_id)
@@ -1120,8 +1235,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         app_state.port_mappings,
                         include_clash_api=include_clash_api_for_next_start(),
                     )
-                    SING_BOX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    SING_BOX_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+                    _write_json_if_changed(SING_BOX_CONFIG_PATH, config)
                     await engine_manager.start(SING_BOX_CONFIG_PATH)
                     await wait_for_mapped_ports()
                     restarted = True
@@ -1194,6 +1308,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def start_proxy_admin_check(payload: ProxyAdminRequest, request: Request):
         if active_proxy_admin_job["id"] is not None or proxy_admin_job_lock.locked():
             raise HTTPException(status_code=409, detail="A ProxyAdmin check job is already running")
+        cleanup_all_jobs()
         proxy_items = proxy_urls_for_ports(payload, request)
         if payload.check_only:
             id_map = payload.proxy_ids_by_port or {}
@@ -1237,6 +1352,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     async def start_local_proxy_check(payload: LocalProxyCheckStartRequest):
         if active_local_proxy_check_job["id"] is not None or local_proxy_check_job_lock.locked():
             raise HTTPException(status_code=409, detail="A local proxy check job is already running")
+        cleanup_all_jobs()
         ports = [int(port) for port in (payload.ports or mapped_ports())]
         ports = sorted(dict.fromkeys(ports))
         if not ports:
@@ -1269,7 +1385,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         async with local_proxy_check_job_lock:
             try:
                 idx = 0
-                worker_count = max(1, min(int(concurrency or 3), 10, len(ports)))
+                worker_count = max(
+                    1,
+                    min(int(concurrency or 3), performance.max_proxycheck_concurrency, len(ports)),
+                )
 
                 async def worker():
                     nonlocal idx
@@ -1304,17 +1423,21 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         job.results[str(port)] = result
                         app_state.local_proxy_check_results[str(port)] = result
                         job.completed += 1
-                        save()
+                        touch_job(job)
+                        save_later()
 
                 await asyncio.gather(*(worker() for _ in range(worker_count)))
                 job.status = "canceled" if job_id in canceled_local_proxy_check_jobs else "done"
+                touch_job(job)
             except Exception as exc:
                 if job_id in canceled_local_proxy_check_jobs:
                     job.status = "canceled"
                 else:
                     job.status = "error"
                     job.error = str(exc)
+                touch_job(job)
             finally:
+                await flush_save()
                 if active_local_proxy_check_job["id"] == job_id:
                     active_local_proxy_check_job["id"] = None
                 canceled_local_proxy_check_jobs.discard(job_id)
@@ -1340,7 +1463,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         job = proxy_admin_jobs[job_id]
         async with proxy_admin_job_lock:
             try:
-                imported = proxy_items if payload.check_only else await proxy_admin_import(payload, proxy_items)
+                effective_concurrency = max(
+                    1,
+                    min(int(payload.concurrency or 1), performance.max_proxy_admin_concurrency),
+                )
+                effective_payload = payload.model_copy(update={"concurrency": effective_concurrency})
+                imported = proxy_items if effective_payload.check_only else await proxy_admin_import(effective_payload, proxy_items)
                 job.imported = imported
                 check_items = [item for item in imported if int(item.get("id") or 0) > 0]
                 upload_failures = [item for item in imported if int(item.get("id") or 0) <= 0]
@@ -1360,11 +1488,13 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     }
                     job.results[str(result["id"])] = result
                     job.completed += 1
+                    touch_job(job)
                 if not check_items:
                     job.status = "done"
+                    touch_job(job)
                     return
                 idx = 0
-                concurrency = max(1, min(payload.concurrency, 30, len(check_items)))
+                concurrency = max(1, min(effective_payload.concurrency, len(check_items)))
 
                 async def worker():
                     nonlocal idx
@@ -1375,7 +1505,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         idx += 1
                         proxy_id = int(item.get("id") or 0)
                         try:
-                            result = await proxy_admin_quality_check(payload, proxy_id)
+                            result = await proxy_admin_quality_check(effective_payload, proxy_id)
                         except Exception as exc:
                             result = {
                                 "id": proxy_id,
@@ -1388,15 +1518,19 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                             }
                         job.results[str(proxy_id)] = result
                         job.completed += 1
+                        touch_job(job)
 
-                await asyncio.gather(*(worker() for _ in range(concurrency)))
+                async with proxy_admin_client_scope():
+                    await asyncio.gather(*(worker() for _ in range(concurrency)))
                 job.status = "canceled" if job_id in canceled_proxy_admin_jobs else "done"
+                touch_job(job)
             except Exception as exc:
                 if job_id in canceled_proxy_admin_jobs:
                     job.status = "canceled"
                 else:
                     job.status = "error"
                     job.error = str(exc)
+                touch_job(job)
             finally:
                 if active_proxy_admin_job["id"] == job_id:
                     active_proxy_admin_job["id"] = None
@@ -1405,16 +1539,19 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     @app.post("/api/proxy-admin/remove")
     async def remove_proxy_admin_items(payload: ProxyAdminRemoveRequest):
         ids = list(payload.ids or [])
-        if payload.unused:
-            proxy_map = await proxy_admin_list_all(payload)
-            ids = [
-                int(item.get("id"))
-                for item in proxy_map.values()
-                if int(item.get("account_count") or 0) == 0 and item.get("id")
-            ]
-        if not ids:
-            return {"removed": [], "count": 0}
-        results = await proxy_admin_remove_ids(payload, ids)
+        effective_concurrency = max(1, min(int(payload.concurrency or 1), performance.max_proxy_admin_concurrency))
+        effective_payload = payload.model_copy(update={"concurrency": effective_concurrency})
+        async with proxy_admin_client_scope():
+            if payload.unused:
+                proxy_map = await proxy_admin_list_all(effective_payload)
+                ids = [
+                    int(item.get("id"))
+                    for item in proxy_map.values()
+                    if int(item.get("account_count") or 0) == 0 and item.get("id")
+                ]
+            if not ids:
+                return {"removed": [], "count": 0}
+            results = await proxy_admin_remove_ids(effective_payload, ids)
         return {"removed": results, "count": len(results)}
 
     @app.get("/api/ports/{port}/ip")
@@ -1529,11 +1666,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 app_state.port_mappings,
                 include_clash_api=include_clash_api_for_next_start(),
             )
-            SING_BOX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            SING_BOX_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+            config_written = _write_json_if_changed(SING_BOX_CONFIG_PATH, config)
             await engine_manager.start(SING_BOX_CONFIG_PATH)
             await wait_for_mapped_ports()
-            return {"ok": True, "engine": engine_status_payload()}
+            return {"ok": True, "engine": engine_status_payload(), "config_written": config_written}
         except (ConfigError, EngineError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1582,6 +1718,18 @@ def _is_local_port_listening(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.05)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _write_json_if_changed(path, data: dict) -> bool:
+    serialized = json.dumps(data, ensure_ascii=False, indent=2)
+    try:
+        if path.exists() and path.read_text(encoding="utf-8") == serialized:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialized, encoding="utf-8")
+    return True
 
 
 def _doctor_command() -> list[str]:

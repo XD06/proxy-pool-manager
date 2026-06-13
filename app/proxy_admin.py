@@ -2,9 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
+
+
+_PROXY_ADMIN_CLIENT: ContextVar[httpx.AsyncClient | None] = ContextVar(
+    "proxy_admin_client",
+    default=None,
+)
+
+
+@asynccontextmanager
+async def proxy_admin_client_scope():
+    existing = _PROXY_ADMIN_CLIENT.get()
+    if existing is not None:
+        yield
+        return
+    async with httpx.AsyncClient(timeout=60) as client:
+        token = _PROXY_ADMIN_CLIENT.set(client)
+        try:
+            yield
+        finally:
+            _PROXY_ADMIN_CLIENT.reset(token)
 
 
 async def proxy_admin_api(payload: Any, method: str, path: str, body=None):
@@ -14,13 +36,20 @@ async def proxy_admin_api(payload: Any, method: str, path: str, body=None):
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.request(method, f"{base_url}{path}", headers=headers, json=body)
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, dict) and data.get("code") not in (None, 0):
-            raise RuntimeError(data.get("message") or f"ProxyAdmin returned code {data.get('code')}")
-        return data
+    client = _PROXY_ADMIN_CLIENT.get()
+    if client is not None:
+        return await _proxy_admin_request(client, method, f"{base_url}{path}", headers, body)
+    async with httpx.AsyncClient(timeout=60) as scoped_client:
+        return await _proxy_admin_request(scoped_client, method, f"{base_url}{path}", headers, body)
+
+
+async def _proxy_admin_request(client: httpx.AsyncClient, method: str, url: str, headers: dict, body=None):
+    response = await client.request(method, url, headers=headers, json=body)
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict) and data.get("code") not in (None, 0):
+        raise RuntimeError(data.get("message") or f"ProxyAdmin returned code {data.get('code')}")
+    return data
 
 
 async def proxy_admin_list_all(payload: Any) -> dict[str, dict]:
@@ -70,67 +99,68 @@ def allocate_proxy_names(
 async def proxy_admin_import(payload: Any, items: list[dict]) -> list[dict]:
     if not items:
         return []
-    proxy_map = await proxy_admin_list_all(payload)
-    names = allocate_proxy_names(
-        getattr(payload, "proxy_name_prefix", "代理"),
-        len(items),
-        {str(item.get("name") or "") for item in proxy_map.values()},
-        [str(item.get("name_suffix") or "none") for item in items],
-    )
-    for index, item in enumerate(items):
-        item["name"] = names[index]
-    results: list[dict | None] = [None] * len(items)
-    idx = 0
-    concurrency = max(1, min(payload.concurrency, 10, len(items)))
+    async with proxy_admin_client_scope():
+        proxy_map = await proxy_admin_list_all(payload)
+        names = allocate_proxy_names(
+            getattr(payload, "proxy_name_prefix", "代理"),
+            len(items),
+            {str(item.get("name") or "") for item in proxy_map.values()},
+            [str(item.get("name_suffix") or "none") for item in items],
+        )
+        for index, item in enumerate(items):
+            item["name"] = names[index]
+        results: list[dict | None] = [None] * len(items)
+        idx = 0
+        concurrency = max(1, min(payload.concurrency, 10, len(items)))
 
-    async def worker():
-        nonlocal idx
-        while idx < len(items):
-            current = idx
-            idx += 1
-            item = items[current]
-            try:
-                data = await proxy_admin_api(
-                    payload,
-                    "POST",
-                    "/api/v1/admin/proxies",
-                    {
-                        "name": item["name"],
-                        "protocol": "http",
-                        "host": item["host"],
-                        "port": item["port"],
-                        "username": "",
-                        "password": "",
-                    },
-                )
-                proxy = data.get("data") or {}
-                expected_name = item["name"]
-                remote_name = proxy.get("name") or ""
-                name_update_error = None
-                if proxy.get("id") and remote_name != expected_name:
-                    try:
-                        updated = await proxy_admin_update_name(payload, int(proxy["id"]), item)
-                        proxy = updated or proxy
-                        remote_name = proxy.get("name") or remote_name
-                    except Exception as exc:
-                        name_update_error = str(exc)
-                results[current] = {
-                    **item,
-                    "id": int(proxy.get("id") or 0),
-                    "name": remote_name or expected_name,
-                    "expected_name": expected_name,
-                    "remote_name": remote_name,
-                    "name_update_error": name_update_error,
-                }
-            except Exception as exc:
-                results[current] = {
-                    **item,
-                    "id": -int(item["port"]),
-                    "upload_error": str(exc),
-                }
+        async def worker():
+            nonlocal idx
+            while idx < len(items):
+                current = idx
+                idx += 1
+                item = items[current]
+                try:
+                    data = await proxy_admin_api(
+                        payload,
+                        "POST",
+                        "/api/v1/admin/proxies",
+                        {
+                            "name": item["name"],
+                            "protocol": "http",
+                            "host": item["host"],
+                            "port": item["port"],
+                            "username": "",
+                            "password": "",
+                        },
+                    )
+                    proxy = data.get("data") or {}
+                    expected_name = item["name"]
+                    remote_name = proxy.get("name") or ""
+                    name_update_error = None
+                    if proxy.get("id") and remote_name != expected_name:
+                        try:
+                            updated = await proxy_admin_update_name(payload, int(proxy["id"]), item)
+                            proxy = updated or proxy
+                            remote_name = proxy.get("name") or remote_name
+                        except Exception as exc:
+                            name_update_error = str(exc)
+                    results[current] = {
+                        **item,
+                        "id": int(proxy.get("id") or 0),
+                        "name": remote_name or expected_name,
+                        "expected_name": expected_name,
+                        "remote_name": remote_name,
+                        "name_update_error": name_update_error,
+                    }
+                except Exception as exc:
+                    results[current] = {
+                        **item,
+                        "id": -int(item["port"]),
+                        "upload_error": str(exc),
+                    }
 
-    await asyncio.gather(*(worker() for _ in range(concurrency)))
-    return [item for item in results if item is not None]
+        await asyncio.gather(*(worker() for _ in range(concurrency)))
+        return [item for item in results if item is not None]
 
 
 async def proxy_admin_update_name(payload: Any, proxy_id: int, item: dict) -> dict | None:
@@ -185,20 +215,21 @@ async def proxy_admin_remove_ids(payload: Any, ids: list[int]) -> list[dict]:
     idx = 0
     concurrency = max(1, min(payload.concurrency, 20, len(ids) or 1))
 
-    async def worker():
-        nonlocal idx
-        while idx < len(ids):
-            proxy_id = ids[idx]
-            idx += 1
-            try:
-                data = await proxy_admin_api(payload, "DELETE", f"/api/v1/admin/proxies/{proxy_id}")
-                success = data.get("code") == 0
-                item = {"id": proxy_id, "success": success}
-                if not success:
-                    item["message"] = data.get("message")
-                results.append(item)
-            except Exception as exc:
-                results.append({"id": proxy_id, "success": False, "message": str(exc)})
+    async with proxy_admin_client_scope():
+        async def worker():
+            nonlocal idx
+            while idx < len(ids):
+                proxy_id = ids[idx]
+                idx += 1
+                try:
+                    data = await proxy_admin_api(payload, "DELETE", f"/api/v1/admin/proxies/{proxy_id}")
+                    success = data.get("code") == 0
+                    item = {"id": proxy_id, "success": success}
+                    if not success:
+                        item["message"] = data.get("message")
+                    results.append(item)
+                except Exception as exc:
+                    results.append({"id": proxy_id, "success": False, "message": str(exc)})
 
-    await asyncio.gather(*(worker() for _ in range(concurrency)))
+        await asyncio.gather(*(worker() for _ in range(concurrency)))
     return results
