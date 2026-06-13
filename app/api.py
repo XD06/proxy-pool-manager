@@ -1054,16 +1054,52 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     touch_job(job)
                     save_later()
 
-                await test_nodes_with_temporary_engine(
-                    selected,
-                    on_result=update,
-                    target_url=target_url,
-                    target_urls=target_urls,
-                    include_exit_ip=prune_same_ip or include_geoip,
-                    should_cancel=lambda: job_id in canceled_test_jobs,
-                    concurrency=performance.max_node_test_concurrency,
-                    batch_size=performance.node_test_batch_size,
-                )
+                assigned_port_by_tag = {
+                    mapping.node_tag: int(port)
+                    for port, mapping in app_state.port_mappings.items()
+                }
+                remaining = []
+                assigned = []
+                if engine_manager.status().running:
+                    for node in selected:
+                        assigned_port = assigned_port_by_tag.get(node.tag)
+                        if assigned_port:
+                            assigned.append((node, assigned_port))
+                        else:
+                            remaining.append(node)
+                else:
+                    remaining = selected
+
+                if assigned and job_id not in canceled_test_jobs:
+                    semaphore = asyncio.Semaphore(performance.max_node_test_concurrency)
+
+                    async def validate_assigned_node(node, assigned_port: int):
+                        async with semaphore:
+                            if job_id in canceled_test_jobs:
+                                return
+                            _tag, _port, result, _detail = await validate_assigned_tag(
+                                node.tag,
+                                assigned_port,
+                                target_urls or ([target_url] if target_url else None),
+                            )
+                            update(node.tag, LatencyResult.model_validate(result))
+
+                    tasks = [
+                        asyncio.create_task(validate_assigned_node(node, assigned_port))
+                        for node, assigned_port in assigned
+                    ]
+                    await asyncio.gather(*tasks)
+                if remaining and job_id not in canceled_test_jobs:
+                    await test_nodes_with_temporary_engine(
+                        remaining,
+                        on_result=update,
+                        target_url=target_url,
+                        target_urls=target_urls,
+                        include_exit_ip=prune_same_ip or include_geoip,
+                        should_cancel=lambda: job_id in canceled_test_jobs,
+                        concurrency=performance.max_node_test_concurrency,
+                        batch_size=performance.node_test_batch_size,
+                    )
                 if job_id in canceled_test_jobs:
                     job.status = "canceled"
                     touch_job(job)
