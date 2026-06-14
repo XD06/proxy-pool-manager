@@ -28,13 +28,14 @@ def generate_config(
     *,
     include_clash_api: bool = True,
     log_path: Path | None = None,
+    listen_host: str | None = None,
 ) -> dict:
     node_by_tag = {node.tag: node for node in nodes}
     inbounds: list[dict] = []
     outbounds: list[dict] = []
     rules: list[dict] = []
     used_tags: set[str] = set()
-    proxy_listen_host = current_proxy_listen_host()
+    proxy_listen_host = listen_host or current_proxy_listen_host()
     domain_resolve_strategy = current_domain_resolve_strategy()
 
     for port_text, mapping in sorted(mappings.items(), key=lambda item: int(item[0])):

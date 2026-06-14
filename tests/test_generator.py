@@ -67,3 +67,17 @@ def test_generate_temp_config_can_disable_clash_api():
     )
     assert "experimental" not in config
     assert config["inbounds"][0]["listen_port"] == 19001
+
+
+def test_generate_config_allows_explicit_listen_host_override(monkeypatch):
+    monkeypatch.setattr("app.generator.current_proxy_listen_host", lambda: "0.0.0.0")
+    node = make_node()
+
+    config = generate_config(
+        [node],
+        {"19001": PortMapping(node_tag=node.tag)},
+        include_clash_api=False,
+        listen_host="127.0.0.1",
+    )
+
+    assert config["inbounds"][0]["listen"] == "127.0.0.1"

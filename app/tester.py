@@ -372,6 +372,7 @@ async def _test_node_batch_with_temporary_engine(
         mappings,
         include_clash_api=False,
         log_path=SING_BOX_TEST_CONFIG_PATH.with_suffix(".log"),
+        listen_host="127.0.0.1",
     )
     SING_BOX_TEST_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     SING_BOX_TEST_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
