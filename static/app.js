@@ -1091,6 +1091,21 @@ function selectedNodeTestUrls() {
   return urls.length ? Array.from(new Set(urls)) : null;
 }
 
+function formatNodeTestDiagnostics(job) {
+  const entries = Object.entries(job.details || {})
+    .filter(([tag]) => tag !== "__engine__")
+    .map(([tag, detail]) => {
+      const result = detail.result || job.results?.[tag] || {};
+      const targets = (detail.targets || [])
+        .map((item) => `${compactUrl(item.url || "-")} => ${item.ok ? `${item.elapsed_ms || "-"}ms` : compactCheckMessage(item.error || item.body_preview || "失败")}`)
+        .join(" | ");
+      const logTail = (detail.engine_log_tail || []).slice(-3).join(" || ");
+      return `${tag} @${detail.test_port || "-"}: ${compactCheckMessage(result.error || "失败")}${targets ? ` | ${targets}` : ""}${logTail ? ` | log: ${compactCheckMessage(logTail)}` : ""}`;
+    });
+  const engineLog = (job.details?.__engine__?.engine_log_tail || []).slice(-5).join(" || ");
+  return [...entries, engineLog ? `engine: ${compactCheckMessage(engineLog)}` : ""].filter(Boolean).join("\n");
+}
+
 async function pollTestJob(jobId) {
   while (true) {
     const job = await request(`/api/test/jobs/${jobId}`);
@@ -1108,7 +1123,8 @@ async function pollTestJob(jobId) {
       setCancelButton("cancelNodeTestBtn", false);
       await refresh();
       const removed = job.removed?.length ? `；已去重：${job.removed.join("；")}` : "";
-      showNotice(`测速完成：${job.completed}/${job.total}${removed}`, "ok");
+      const diagnostics = formatNodeTestDiagnostics(job);
+      showNotice(`测速完成：${job.completed}/${job.total}${removed}${diagnostics ? `\n${diagnostics}` : ""}`, "ok");
       return;
     }
     if (job.status === "canceled") {
@@ -1124,7 +1140,8 @@ async function pollTestJob(jobId) {
       activeNodeTestJobId = null;
       setCancelButton("cancelNodeTestBtn", false);
       renderNodeTable();
-      showNotice(job.error || "测速失败", "bad");
+      const diagnostics = formatNodeTestDiagnostics(job);
+      showNotice(`${job.error || "测速失败"}${diagnostics ? `\n${diagnostics}` : ""}`, "bad");
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));

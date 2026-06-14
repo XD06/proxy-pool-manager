@@ -36,6 +36,7 @@ from .settings import (
     ASSET_VERSION,
     ROOT_DIR,
     SING_BOX_CONFIG_PATH,
+    SING_BOX_TEST_CONFIG_PATH,
     STATIC_DIR,
     TEMPLATES_DIR,
     current_clash_api_addr,
@@ -162,6 +163,7 @@ class TestJob(BaseModel):
     total: int = 0
     completed: int = 0
     results: dict[str, dict] = {}
+    details: dict[str, dict] = {}
     removed: list[str] = []
     error: str | None = None
     touched_at: float = Field(default_factory=time.monotonic, exclude=True)
@@ -302,6 +304,16 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     def touch_job(job) -> None:
         job.touched_at = time.monotonic()
+
+    def tail_test_engine_log(lines: int = 40) -> list[str]:
+        log_path = SING_BOX_TEST_CONFIG_PATH.with_suffix(".log")
+        if not log_path.exists():
+            return []
+        try:
+            content = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return []
+        return content[-max(1, lines):]
 
     def cleanup_job_map(jobs: dict[str, BaseModel], active_id: str | None) -> None:
         now = time.monotonic()
@@ -1043,12 +1055,21 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         job = test_jobs[job_id]
         async with test_job_lock:
             try:
-                def update(tag, result):
+                def update(tag, result, detail: dict | None = None):
                     if job_id in canceled_test_jobs:
                         return
                     attach_geoip_to_result(result)
+                    result_payload = result.model_dump()
+                    if detail:
+                        detail = dict(detail)
+                        detail.setdefault("node_tag", tag)
+                        if result.test_port is not None:
+                            detail.setdefault("test_port", result.test_port)
+                        detail.setdefault("engine_log_tail", tail_test_engine_log())
+                        detail.setdefault("result", result_payload)
+                        job.details[tag] = detail
                     app_state.latency_cache[tag] = result
-                    job.results[tag] = result.model_dump()
+                    job.results[tag] = result_payload
                     schedule_geoip_lookup(result.exit_ip)
                     job.completed += 1
                     touch_job(job)
@@ -1082,7 +1103,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                                 assigned_port,
                                 target_urls or ([target_url] if target_url else None),
                             )
-                            update(node.tag, LatencyResult.model_validate(result))
+                            update(node.tag, LatencyResult.model_validate(result), _detail)
 
                     tasks = [
                         asyncio.create_task(validate_assigned_node(node, assigned_port))
@@ -1090,9 +1111,22 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     ]
                     await asyncio.gather(*tasks)
                 if remaining and job_id not in canceled_test_jobs:
+                    def on_temp_result(tag, result):
+                        target_items = result.target_results or []
+                        detail = {
+                            "node_tag": tag,
+                            "test_port": result.test_port,
+                            "exit_ip": result.exit_ip,
+                            "geoip": result.geoip,
+                            "targets": target_items,
+                            "engine_log_tail": tail_test_engine_log(),
+                            "result": result.model_dump(),
+                        }
+                        update(tag, result, detail)
+
                     await test_nodes_with_temporary_engine(
                         remaining,
-                        on_result=update,
+                        on_result=on_temp_result,
                         target_url=target_url,
                         target_urls=target_urls,
                         include_exit_ip=prune_same_ip or include_geoip,
@@ -1136,10 +1170,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             except EngineError as exc:
                 job.status = "error"
                 job.error = str(exc)
+                job.details["__engine__"] = {"engine_log_tail": tail_test_engine_log()}
                 touch_job(job)
             except Exception as exc:
                 job.status = "error"
                 job.error = str(exc)
+                job.details["__engine__"] = {"engine_log_tail": tail_test_engine_log()}
                 touch_job(job)
             finally:
                 await flush_save()

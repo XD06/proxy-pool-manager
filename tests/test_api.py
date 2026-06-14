@@ -229,6 +229,8 @@ def test_api_progressive_test_job(tmp_path, monkeypatch):
     assert job.json()["status"] == "done"
     assert job.json()["results"][tag]["alive"] is True
     assert job.json()["results"][tag]["exit_ip"] is None
+    assert job.json()["details"][tag]["node_tag"] == tag
+    assert "result" in job.json()["details"][tag]
     assert seen == [False]
 
 
