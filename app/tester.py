@@ -336,7 +336,7 @@ async def test_nodes_with_temporary_engine(
                 batch_size = int(env_value)
             except ValueError:
                 batch_size = None
-    batch_size = max(1, min(len(nodes), int(batch_size or min(concurrency, 6))))
+    batch_size = max(1, min(len(nodes), int(batch_size or len(nodes))))
     results: dict[str, LatencyResult] = {}
     for offset in range(0, len(nodes), batch_size):
         if should_cancel and should_cancel():

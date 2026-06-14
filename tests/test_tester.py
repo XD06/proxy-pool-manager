@@ -160,7 +160,7 @@ def test_test_nodes_with_temporary_engine_batches_nodes(monkeypatch):
     assert stops
 
 
-def test_test_nodes_with_temporary_engine_uses_small_default_batches(monkeypatch):
+def test_test_nodes_with_temporary_engine_uses_one_batch_by_default(monkeypatch):
     batches = []
 
     class FakeEngine:
@@ -180,10 +180,7 @@ def test_test_nodes_with_temporary_engine_uses_small_default_batches(monkeypatch
 
     asyncio.run(tester_module.test_nodes_with_temporary_engine(nodes, concurrency=4))
 
-    assert batches == [
-        ["node-0", "node-1", "node-2", "node-3"],
-        ["node-4", "node-5", "node-6", "node-7"],
-    ]
+    assert batches == [[node.tag for node in nodes]]
 
 
 def test_default_validation_urls_include_exit_ip_and_google_targets():
