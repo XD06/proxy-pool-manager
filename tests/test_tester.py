@@ -194,8 +194,12 @@ def test_default_validation_urls_include_exit_ip_and_google_targets():
     assert "https://www.gstatic.com/generate_204" in DEFAULT_VALIDATION_URLS
 
 
-def test_default_node_test_urls_only_use_primary_target():
-    assert DEFAULT_NODE_TEST_URLS == [PRIMARY_TEST_URL]
+def test_default_node_test_urls_match_port_validation_fallbacks():
+    assert DEFAULT_NODE_TEST_URLS == [
+        PRIMARY_TEST_URL,
+        "https://www.gstatic.com/generate_204",
+        "https://www.google.com/generate_204",
+    ]
 
 
 def test_query_exit_ip_with_budget_returns_last_error():

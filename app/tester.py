@@ -26,6 +26,8 @@ FALLBACK_TEST_URLS = [
 
 DEFAULT_NODE_TEST_URLS = [
     PRIMARY_TEST_URL,
+    "https://www.gstatic.com/generate_204",
+    "https://www.google.com/generate_204",
 ]
 
 EXIT_IP_URLS = [

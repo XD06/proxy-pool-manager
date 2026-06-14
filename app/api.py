@@ -1795,9 +1795,29 @@ def _listening_local_ports(ports: list[int]) -> list[int]:
 
 
 def _is_local_port_listening(port: int) -> bool:
+    if platform.system().lower() != "windows" and _proc_tcp_port_listening(port):
+        return True
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.05)
+        sock.settimeout(0.5)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _proc_tcp_port_listening(port: int) -> bool:
+    port_hex = f"{int(port):04X}"
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                lines = handle.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            columns = line.split()
+            if len(columns) < 4 or columns[3] != "0A":
+                continue
+            local_address = columns[1]
+            if local_address.rsplit(":", 1)[-1].upper() == port_hex:
+                return True
+    return False
 
 
 def _write_json_if_changed(path, data: dict) -> bool:

@@ -15,9 +15,9 @@ def test_current_performance_settings_low_profile_defaults(tmp_path, monkeypatch
     perf = settings.current_performance_settings()
 
     assert perf.profile == "low"
-    assert perf.max_node_test_concurrency == 8
+    assert perf.max_node_test_concurrency == 6
     assert perf.node_test_batch_size == 50
-    assert perf.max_port_test_concurrency == 8
+    assert perf.max_port_test_concurrency == 4
     assert perf.max_proxycheck_concurrency == 2
     assert perf.max_geoip_concurrency == 2
     assert perf.state_save_debounce_ms == 1000
