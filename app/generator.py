@@ -55,7 +55,12 @@ def generate_config(
                 "tag": inbound_tag,
                 "listen": proxy_listen_host,
                 "listen_port": port,
-                "sniff": False,
+            }
+        )
+        rules.append(
+            {
+                "inbound": [inbound_tag],
+                "action": "sniff",
             }
         )
         if domain_resolve_strategy:
@@ -76,6 +81,7 @@ def generate_config(
         if node.tag not in used_tags:
             outbound = dict(node.outbound)
             outbound["tag"] = node.tag
+            outbound["tcp_fast_open"] = True
             outbounds.append(outbound)
             used_tags.add(node.tag)
 
@@ -96,6 +102,18 @@ def generate_config(
             "auto_detect_interface": True,
         },
     }
+
+    if domain_resolve_strategy:
+        config["dns"] = {
+            "servers": [
+                {
+                    "tag": "dns_direct",
+                    "type": "local"
+                }
+            ],
+            "strategy": domain_resolve_strategy,
+        }
+        config["route"]["default_domain_resolver"] = "dns_direct"
     if include_clash_api:
         config["experimental"] = {
             "clash_api": {

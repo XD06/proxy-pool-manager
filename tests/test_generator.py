@@ -28,7 +28,9 @@ def test_generate_config_binds_port_to_outbound():
     assert config["inbounds"][0]["tag"] == "port-8001"
     assert config["inbounds"][0]["type"] == "mixed"
     assert config["route"]["rules"][0]["inbound"] == ["port-8001"]
-    assert config["route"]["rules"][0]["outbound"] == node.tag
+    assert config["route"]["rules"][0]["action"] == "sniff"
+    assert config["route"]["rules"][1]["inbound"] == ["port-8001"]
+    assert config["route"]["rules"][1]["outbound"] == node.tag
     assert {"type": "direct", "tag": "direct"} in config["outbounds"]
 
 
@@ -42,9 +44,10 @@ def test_generate_config_uses_current_runtime_addresses(monkeypatch):
 
     assert config["inbounds"][0]["listen"] == "0.0.0.0"
     assert config["experimental"]["clash_api"]["external_controller"] == "127.0.0.1:10000"
-    assert config["route"]["rules"][0]["action"] == "resolve"
-    assert config["route"]["rules"][0]["strategy"] == "ipv4_only"
-    assert config["route"]["rules"][1]["outbound"] == node.tag
+    assert config["route"]["rules"][0]["action"] == "sniff"
+    assert config["route"]["rules"][1]["action"] == "resolve"
+    assert config["route"]["rules"][1]["strategy"] == "ipv4_only"
+    assert config["route"]["rules"][2]["outbound"] == node.tag
 
 
 def test_generate_config_rejects_missing_node():
@@ -79,5 +82,53 @@ def test_generate_config_allows_explicit_listen_host_override(monkeypatch):
         include_clash_api=False,
         listen_host="127.0.0.1",
     )
-
     assert config["inbounds"][0]["listen"] == "127.0.0.1"
+
+
+def test_generate_config_enables_sniffing():
+    node = make_node()
+    config = generate_config([node], {"8001": PortMapping(node_tag=node.tag)})
+    inbound = config["inbounds"][0]
+    assert "sniff" not in inbound
+    assert "sniff_override_destination" not in inbound
+    assert "sniff_timeout" not in inbound
+    assert config["route"]["rules"][0]["inbound"] == ["port-8001"]
+    assert config["route"]["rules"][0]["action"] == "sniff"
+
+
+def test_generate_config_includes_dns_config(monkeypatch):
+    monkeypatch.setattr("app.generator.current_domain_resolve_strategy", lambda: "ipv4_only")
+    node = make_node()
+    config = generate_config([node], {"8001": PortMapping(node_tag=node.tag)})
+    dns = config["dns"]
+    assert len(dns["servers"]) == 1
+    assert dns["servers"][0]["tag"] == "dns_direct"
+    assert dns["servers"][0]["type"] == "local"
+    assert dns["strategy"] == "ipv4_only"
+    assert config["route"]["default_domain_resolver"] == "dns_direct"
+
+
+def test_generate_config_adds_tcp_fast_open_but_not_multiplex_by_default():
+    node = make_node()
+    config = generate_config([node], {"8001": PortMapping(node_tag=node.tag)})
+    outbound = [o for o in config["outbounds"] if o["tag"] == node.tag][0]
+    assert outbound["tcp_fast_open"] is True
+    assert "multiplex" not in outbound
+
+
+def test_generate_config_preserves_existing_multiplex():
+    node = make_node()
+    node.outbound["multiplex"] = {
+        "enabled": True,
+        "protocol": "h2mux",
+        "max_streams": 16,
+    }
+    config = generate_config([node], {"8001": PortMapping(node_tag=node.tag)})
+    outbound = [o for o in config["outbounds"] if o["tag"] == node.tag][0]
+    assert outbound["tcp_fast_open"] is True
+    assert outbound["multiplex"]["enabled"] is True
+    assert outbound["multiplex"]["protocol"] == "h2mux"
+    assert outbound["multiplex"]["max_streams"] == 16
+
+
+
