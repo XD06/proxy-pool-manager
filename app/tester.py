@@ -132,7 +132,7 @@ async def measure_port_latency(port: int) -> LatencyResult:
 
 async def validate_proxy_targets(port: int, urls: list[str] | None = None) -> list[dict]:
     targets = urls or DEFAULT_VALIDATION_URLS
-    proxy = f"http://127.0.0.1:{port}"
+    proxy = f"socks5h://127.0.0.1:{port}"
 
     async def fetch_target(client, url: str) -> dict:
         started = time.perf_counter()
@@ -170,7 +170,7 @@ async def validate_proxy_port(
     *,
     include_exit_ip: bool = False,
 ) -> LatencyResult:
-    proxy = f"http://127.0.0.1:{port}"
+    proxy = f"socks5h://127.0.0.1:{port}"
     selected_urls = [url for url in (target_urls or []) if url]
     test_urls = selected_urls or ([target_url] if target_url else DEFAULT_NODE_TEST_URLS)
     use_fallback = not selected_urls and not target_url

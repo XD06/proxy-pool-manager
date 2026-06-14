@@ -236,3 +236,32 @@ def test_fetch_first_test_url_falls_back(primary_status):
     assert result["url"] == PRIMARY_TEST_URL
     assert result["status_code"] == 204
     assert "switched" in result["fallback_notice"]
+
+
+
+def test_validate_proxy_port_uses_socks5h_proxy(monkeypatch):
+    seen = {}
+
+    class FakeResponse:
+        status_code = 204
+        text = "ok"
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(tester_module.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(tester_module.validate_proxy_port(19001))
+
+    assert result.alive is True
+    assert seen["proxy"] == "socks5h://127.0.0.1:19001"
