@@ -8,6 +8,7 @@ proxy-port-api/node_modules/
 tmp/
 config/*.json
 !config/app.example.json
+!config/app.docker.example.json
 config/*.log
 config/*.db
 config/*.tmp

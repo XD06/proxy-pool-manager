@@ -110,21 +110,30 @@ Linux 版 sing-box 内核和 Windows 不一样，不能直接复用 `sing-box.ex
 
 ```bash
 chmod +x scripts/*.sh
-./scripts/install-linux.sh
+sudo bash scripts/install-linux.sh --systemd --start
 ```
 
 指定 sing-box 版本：
 
 ```bash
-./scripts/install-linux.sh 1.13.13
+sudo bash scripts/install-linux.sh --systemd --start 1.13.13
 ```
+
+日常更新：
+
+```bash
+bash scripts/update-linux.sh
+```
+
+这会执行 `git pull --ff-only`、同步依赖，并重启 `proxy-pool-manager` systemd 服务。
 
 启动、状态、关闭：
 
 ```bash
-./scripts/start-service.sh
-./scripts/status-service.sh
-./scripts/stop-service.sh
+sudo systemctl start proxy-pool-manager
+sudo systemctl status proxy-pool-manager
+sudo systemctl stop proxy-pool-manager
+journalctl -u proxy-pool-manager -f
 ```
 
 环境自检：
@@ -139,7 +148,7 @@ Windows 自检：
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
 ```
 
-Linux 脚本同样使用 `.venv`，sing-box 放在 `bin/sing-box`。
+Linux 脚本同样使用 `.venv`，sing-box 放在 `bin/sing-box`。没有 systemd 的环境可以继续使用 `./scripts/start-service.sh`、`./scripts/status-service.sh`、`./scripts/stop-service.sh` 手动运行。
 
 本地 proxycheck 检测使用平台二进制：
 
@@ -157,6 +166,75 @@ go build -o proxycheck ./cmd/proxycheck
 
 ```bash
 export PROXYCHECK_BIN=/path/to/proxycheck
+```
+
+## Docker 部署到 VPS
+
+Docker 适合外网 VPS。默认 compose 会把 Web 控制台只绑定到宿主机本地地址，交给 Nginx/Caddy 做 HTTPS 反代：
+
+```bash
+cp config/app.docker.example.json config/app.json
+docker compose up -d --build
+```
+
+默认端口：
+
+```text
+Web 控制台: 127.0.0.1:9100 -> 容器 9100
+代理端口: 默认不公开，需要时在 docker-compose.yml 里打开
+```
+
+`config/app.json` 推荐写法：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 9100,
+  "proxy_listen_host": "0.0.0.0",
+  "proxy_public_host": "你的域名或VPS公网IP",
+  "clash_api_addr": "127.0.0.1:9090",
+  "domain_resolve_strategy": ""
+}
+```
+
+如果只是公开 Web 控制台，不给外部用户连接代理端口，不需要打开 `8001-8062`。如果要把分配的代理端口也给外部使用，在 `docker-compose.yml` 里取消对应端口范围注释：
+
+```yaml
+ports:
+  - "127.0.0.1:9100:9100"
+  - "8001-8062:8001-8062"
+```
+
+更新容器：
+
+```bash
+git pull --ff-only
+docker compose up -d --build
+```
+
+Caddy 反代示例：
+
+```text
+proxy.example.com {
+  reverse_proxy 127.0.0.1:9100
+}
+```
+
+Nginx 反代示例：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name proxy.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:9100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
 ```
 
 ## 部署到服务器给别人用
@@ -177,7 +255,7 @@ Proxy: 127.0.0.1:8001...
 Linux：
 
 ```bash
-PPM_PROXY_LISTEN_HOST=0.0.0.0 ./scripts/start-service.sh
+sudo bash scripts/install-linux.sh --systemd --start --proxy-listen 0.0.0.0
 ```
 
 也可以直接修改 `config/app.json`：
@@ -204,7 +282,7 @@ PPM_PROXY_LISTEN_HOST=0.0.0.0 ./scripts/start-service.sh
 Linux：
 
 ```bash
-PPM_HOST=0.0.0.0 PPM_PROXY_LISTEN_HOST=0.0.0.0 ./scripts/start-service.sh
+sudo bash scripts/install-linux.sh --systemd --start --host 0.0.0.0 --proxy-listen 0.0.0.0
 ```
 
 给别人用的标准代理链接：

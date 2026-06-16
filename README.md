@@ -63,11 +63,32 @@ Linux：
 
 ```bash
 chmod +x scripts/*.sh
+sudo bash scripts/install-linux.sh --systemd --start
+```
+
+安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，构建 Linux 版 `proxycheck-api/proxycheck`，生成默认 `config/app.json`，并注册 `proxy-pool-manager` systemd 服务为开机自启。
+
+后续更新：
+
+```bash
+bash scripts/update-linux.sh
+```
+
+这会执行 `git pull --ff-only`、同步 Python 依赖，并重启 systemd 服务。没有 systemd 的环境仍可手动运行：
+
+```bash
 ./scripts/install-linux.sh
 ./scripts/start-service.sh
 ```
 
-安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，构建 Linux 版 `proxycheck-api/proxycheck`，并生成默认 `config/app.json`。
+Docker / VPS：
+
+```bash
+cp config/app.docker.example.json config/app.json
+docker compose up -d --build
+```
+
+默认 compose 只把控制台绑定到宿主机 `127.0.0.1:9100`，适合在 VPS 上用 Nginx/Caddy 反代 HTTPS。代理端口需要给外部用户使用时，再在 `docker-compose.yml` 里打开对应端口范围，例如 `8001-8062:8001-8062`。
 
 如果 Linux 服务器没有安装 Go，本地 proxycheck 检测会不可用。安装 Go 后执行：
 
@@ -117,9 +138,10 @@ Windows 使用脚本：
 Linux 使用脚本：
 
 ```bash
-./scripts/start-service.sh
-./scripts/status-service.sh
-./scripts/stop-service.sh
+sudo systemctl start proxy-pool-manager
+sudo systemctl status proxy-pool-manager
+sudo systemctl stop proxy-pool-manager
+journalctl -u proxy-pool-manager -f
 ```
 
 Web 端口和监听地址在这里改：

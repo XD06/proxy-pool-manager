@@ -1,0 +1,16 @@
+.git
+.codegraph
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+bin
+config/*.json
+config/*.log
+config/*.db
+config/*.tmp
+tmp
+node_modules
+proxy-port-api/node_modules
+proxycheck-api/proxycheck
+proxycheck-api/proxycheck.exe
