@@ -174,6 +174,7 @@ Docker 适合外网 VPS。默认 compose 会把 Web 控制台只绑定到宿主�
 
 ```bash
 cp config/app.docker.example.json config/app.json
+sed -i 's/change-this-admin-key/你的强管理密钥/' config/app.json
 docker compose up -d --build
 ```
 
@@ -203,6 +204,34 @@ Web 控制台: 127.0.0.1:9100 -> 容器 9100
 ports:
   - "127.0.0.1:9100:9100"
   - "8001-8062:8001-8062"
+```
+
+如果决定直接暴露控制台端口：
+
+```yaml
+ports:
+  - "9100:9100"
+  - "8001-8062:8001-8062"
+```
+
+必须设置管理密钥：
+
+```json
+{
+  "admin_key": "一段足够长的随机密钥"
+}
+```
+
+也可以用环境变量：
+
+```bash
+PPM_ADMIN_KEY='一段足够长的随机密钥' docker compose up -d
+```
+
+如果控制台只通过 HTTPS 域名访问，可以同时设置：
+
+```bash
+PPM_COOKIE_SECURE=1 docker compose up -d
 ```
 
 更新容器：

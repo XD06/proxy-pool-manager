@@ -4,5 +4,6 @@
   "proxy_listen_host": "0.0.0.0",
   "proxy_public_host": "your-vps-domain-or-ip",
   "clash_api_addr": "127.0.0.1:9090",
-  "domain_resolve_strategy": ""
+  "domain_resolve_strategy": "",
+  "admin_key": "change-this-admin-key"
 }

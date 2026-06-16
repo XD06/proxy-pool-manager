@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import hmac
 import json
 import os
 import platform
 import re
+import secrets
 import socket
 import subprocess
 import time
@@ -13,7 +16,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -60,6 +63,10 @@ from .tester import (
 class ImportRequest(BaseModel):
     url: str | None = None
     text: str | None = None
+
+
+class LoginRequest(BaseModel):
+    key: str
 
 
 class SubscriptionConfigRequest(BaseModel):
@@ -224,6 +231,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     canceled_port_test_jobs: set[str] = set()
     canceled_proxy_admin_jobs: set[str] = set()
     canceled_local_proxy_check_jobs: set[str] = set()
+    auth_sessions: set[str] = set()
     geoip_tasks: dict[str, asyncio.Task] = {}
     geoip_semaphore = asyncio.Semaphore(performance.max_geoip_concurrency)
     subscription_refresh_lock = asyncio.Lock()
@@ -258,6 +266,38 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    def admin_key() -> str:
+        config = load_app_config()
+        return os.environ.get("PPM_ADMIN_KEY") or str(config.get("admin_key") or "")
+
+    def auth_enabled() -> bool:
+        return bool(admin_key())
+
+    def auth_cookie_name() -> str:
+        return "ppm_session"
+
+    def auth_cookie_secure() -> bool:
+        value = os.environ.get("PPM_COOKIE_SECURE") or str(load_app_config().get("cookie_secure") or "")
+        return value.lower() in {"1", "true", "yes", "on"}
+
+    def is_authenticated(request: Request) -> bool:
+        if not auth_enabled():
+            return True
+        token = request.cookies.get(auth_cookie_name())
+        return bool(token and token in auth_sessions)
+
+    @app.middleware("http")
+    async def require_auth(request: Request, call_next):
+        path = request.url.path
+        public = (
+            path.startswith("/static/")
+            or path in {"/api/auth/status", "/api/auth/login", "/favicon.ico"}
+        )
+        if not public and not is_authenticated(request):
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Authentication required"}, status_code=401)
+        return await call_next(request)
 
     pending_save_task: dict[str, asyncio.Task | None] = {"task": None}
     save_dirty: dict[str, bool] = {"value": False}
@@ -440,6 +480,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     def save_app_config(config: dict) -> None:
         APP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         APP_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def auth_payload(request: Request) -> dict:
+        return {
+            "enabled": auth_enabled(),
+            "authenticated": is_authenticated(request),
+        }
 
     def proxy_admin_config_payload() -> dict:
         config = load_app_config().get("proxy_admin") or {}
@@ -864,6 +910,39 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             return HTMLResponse("<h1>Proxy Pool Manager</h1>")
         html = index_path.read_text(encoding="utf-8").replace("__ASSET_VERSION__", ASSET_VERSION)
         return HTMLResponse(html)
+
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request):
+        return auth_payload(request)
+
+    @app.post("/api/auth/login")
+    async def auth_login(payload: LoginRequest):
+        if not auth_enabled():
+            return {"enabled": False, "authenticated": True}
+        expected = admin_key()
+        if not hmac.compare_digest(payload.key or "", expected):
+            raise HTTPException(status_code=401, detail="Invalid admin key")
+        token = secrets.token_urlsafe(32)
+        auth_sessions.add(token)
+        response = JSONResponse({"enabled": True, "authenticated": True})
+        response.set_cookie(
+            auth_cookie_name(),
+            token,
+            httponly=True,
+            samesite="lax",
+            secure=auth_cookie_secure(),
+            path="/",
+        )
+        return response
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(request: Request):
+        token = request.cookies.get(auth_cookie_name())
+        if token:
+            auth_sessions.discard(token)
+        response = JSONResponse({"enabled": auth_enabled(), "authenticated": False})
+        response.delete_cookie(auth_cookie_name(), path="/")
+        return response
 
     @app.get("/api/status")
     async def status(request: Request):

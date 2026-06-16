@@ -95,6 +95,28 @@ def test_api_import_assign_and_status(tmp_path):
     assert status.json()["performance"]["profile"] in {"normal", "low"}
 
 
+def test_api_admin_auth_gate_and_login(tmp_path, monkeypatch):
+    monkeypatch.setenv("PPM_ADMIN_KEY", "secret-key")
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    blocked = client.get("/api/status")
+    assert blocked.status_code == 401
+
+    login = client.post("/api/auth/login", json={"key": "secret-key"})
+    assert login.status_code == 200
+    assert login.json()["authenticated"] is True
+
+    allowed = client.get("/api/status")
+    assert allowed.status_code == 200
+    assert allowed.json()["engine"]["running"] is False
+
+    logout = client.post("/api/auth/logout")
+    assert logout.status_code == 200
+    assert logout.json()["authenticated"] is False
+
+
 def test_index_injects_asset_version(tmp_path):
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())

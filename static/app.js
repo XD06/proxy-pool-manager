@@ -16,6 +16,7 @@ let activePortValidationJobId = null;
 let activeLocalProxyCheckJobId = null;
 let activeProxyAdminJobId = null;
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
+let authState = { enabled: false, authenticated: true };
 
 const DEFAULT_VALIDATION_URLS = [
   "http://cp.cloudflare.com/generate_204",
@@ -32,6 +33,10 @@ async function request(path, options = {}) {
     ...options
   });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    showAuthGate(data.detail || "需要登录");
+    throw new Error(data.detail || "需要登录");
+  }
   if (!response.ok) throw new Error(data.detail || JSON.stringify(data));
   return data;
 }
@@ -56,6 +61,41 @@ function showNotice(message, tone = "info") {
   notice.className = `notice ${tone}`;
   notice.textContent = tone === "bad" ? compactCheckMessage(message) : message;
   notice.title = String(message || "");
+}
+
+function showAuthGate(message = "") {
+  const gate = $("authGate");
+  const error = $("authError");
+  if (gate) gate.classList.remove("hidden");
+  if (error) error.textContent = message;
+}
+
+function hideAuthGate() {
+  const gate = $("authGate");
+  const error = $("authError");
+  if (gate) gate.classList.add("hidden");
+  if (error) error.textContent = "";
+}
+
+async function loadAuthState() {
+  const response = await fetch("/api/auth/status");
+  authState = await response.json();
+  if (authState.enabled && !authState.authenticated) {
+    showAuthGate();
+    return false;
+  }
+  hideAuthGate();
+  return true;
+}
+
+async function loginWithAdminKey(key) {
+  const result = await request("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ key })
+  });
+  authState = result;
+  hideAuthGate();
+  await refresh();
 }
 
 function latencyText(latency) {
@@ -1701,8 +1741,27 @@ $("cancelLocalProxyCheckBtn").addEventListener("click", () => runTask("取消本
   return "已发送取消本地检测请求";
 }));
 
-refresh().catch((error) => showNotice(error.message, "bad"));
+$("authForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = $("adminKeyInput");
+  const error = $("authError");
+  if (error) error.textContent = "";
+  try {
+    await loginWithAdminKey(input?.value || "");
+    if (input) input.value = "";
+  } catch (exc) {
+    if (error) error.textContent = exc.message || "登录失败";
+  }
+});
+
+async function bootstrap() {
+  const ready = await loadAuthState();
+  if (ready) await refresh();
+}
+
+bootstrap().catch((error) => showNotice(error.message, "bad"));
 setInterval(() => {
   if (document.hidden) return;
+  if (authState.enabled && !authState.authenticated) return;
   refreshStatusOnly().catch(() => {});
 }, 15000);
