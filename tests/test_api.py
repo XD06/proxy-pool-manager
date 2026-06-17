@@ -101,6 +101,10 @@ def test_api_admin_auth_gate_and_login(tmp_path, monkeypatch):
     app = create_app(store=store, engine=StoppedEngine())
     client = TestClient(app)
 
+    index = client.get("/")
+    assert index.status_code == 200
+    assert "authGate" in index.text
+
     blocked = client.get("/api/status")
     assert blocked.status_code == 401
 

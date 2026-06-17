@@ -292,7 +292,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         path = request.url.path
         public = (
             path.startswith("/static/")
-            or path in {"/api/auth/status", "/api/auth/login", "/favicon.ico"}
+            or path in {"/", "/api/auth/status", "/api/auth/login", "/favicon.ico"}
         )
         if not public and not is_authenticated(request):
             if path.startswith("/api/"):
