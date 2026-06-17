@@ -92,6 +92,7 @@ docker compose up -d --build
 默认 compose 只把控制台绑定到宿主机 `127.0.0.1:9100`，适合在 VPS 上用 Nginx/Caddy 反代 HTTPS。代理端口需要给外部用户使用时，再在 `docker-compose.yml` 里打开对应端口范围，例如 `8001-8062:8001-8062`。
 
 如果你要把 `9100:9100` 直接暴露到公网，必须设置 `admin_key` 或环境变量 `PPM_ADMIN_KEY`，否则控制台没有登录保护。
+前端样式或登录页改动后，记得 `docker compose up -d --build`，并确认页面底部资源版本号已经更新。
 
 如果 Linux 服务器没有安装 Go，本地 proxycheck 检测会不可用。安装 Go 后执行：
 
