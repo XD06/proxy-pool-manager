@@ -41,6 +41,10 @@ body {
   overflow-x: hidden;
 }
 
+body.auth-pending .app-shell {
+  visibility: hidden;
+}
+
 .auth-gate {
   position: fixed;
   inset: 0;

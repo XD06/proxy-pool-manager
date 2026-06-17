@@ -66,6 +66,7 @@ function showNotice(message, tone = "info") {
 function showAuthGate(message = "") {
   const gate = $("authGate");
   const error = $("authError");
+  document.body.classList.remove("auth-pending");
   if (gate) gate.classList.remove("hidden");
   if (error) error.textContent = message;
 }
@@ -73,6 +74,7 @@ function showAuthGate(message = "") {
 function hideAuthGate() {
   const gate = $("authGate");
   const error = $("authError");
+  document.body.classList.remove("auth-pending");
   if (gate) gate.classList.add("hidden");
   if (error) error.textContent = "";
 }
@@ -1755,8 +1757,13 @@ $("authForm")?.addEventListener("submit", async (event) => {
 });
 
 async function bootstrap() {
-  const ready = await loadAuthState();
-  if (ready) await refresh();
+  try {
+    const ready = await loadAuthState();
+    if (ready) await refresh();
+  } catch (error) {
+    document.body.classList.remove("auth-pending");
+    throw error;
+  }
 }
 
 bootstrap().catch((error) => showNotice(error.message, "bad"));
