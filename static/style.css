@@ -41,7 +41,8 @@ body {
   overflow-x: hidden;
 }
 
-body.auth-pending .app-shell {
+body.auth-pending .app-shell,
+body.auth-pending .auth-gate {
   visibility: hidden;
 }
 
