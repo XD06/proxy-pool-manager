@@ -26,4 +26,4 @@ services:
       # Web console: keep it local and put HTTPS reverse proxy in front.
       - "127.0.0.1:9100:9100"
       # Proxy ports: expose only the range you assign to users.
-      # - "8001-8062:8001-8062"
+      - "8001-8100:8001-8100"
