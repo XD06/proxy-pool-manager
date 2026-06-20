@@ -68,7 +68,7 @@ DOMAIN_RESOLVE_STRATEGY = _setting(
     "PPM_DOMAIN_RESOLVE_STRATEGY",
     str(_APP_CONFIG.get("outbound_domain_strategy") or ""),
 )
-ASSET_VERSION = _setting(_APP_CONFIG, "asset_version", "PPM_ASSET_VERSION", "20260617-auth-console")
+ASSET_VERSION = _setting(_APP_CONFIG, "asset_version", "PPM_ASSET_VERSION", "20260621-port-compact")
 DEFAULT_START_PORT = 8001
 TEST_START_PORT = 19001
 
