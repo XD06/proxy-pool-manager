@@ -1200,7 +1200,11 @@ async function assertCompactPortsAvailable(mappings) {
     method: "POST",
     body: JSON.stringify({ ports: targetPorts })
   });
-  const blocked = (checked.ports || []).filter((item) => {
+  const checkedPorts = Object.entries(checked.ports || {}).map(([port, item]) => ({
+    port: Number(port),
+    ...item
+  }));
+  const blocked = checkedPorts.filter((item) => {
     const port = String(item.port);
     if (item.available) return false;
     return !(currentPorts.has(port) && item.reason === "project-listening");
