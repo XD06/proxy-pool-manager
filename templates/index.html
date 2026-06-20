@@ -149,6 +149,7 @@
             <input id="startPort" type="number" value="8001" min="1024" max="65535">
           </label>
           <button id="autoAssignBtn">自动分配</button>
+          <button id="compactPortsBtn">重排端口</button>
           <button id="clearAssignBtn">清空分配</button>
           <button id="saveAssignBtn" class="primary">保存映射</button>
         </div>
@@ -234,7 +235,7 @@
       <div id="quickResult" class="quick-result hidden" role="status" aria-live="polite"></div>
       <div id="doctorResult" class="doctor-result hidden" role="status" aria-live="polite"></div>
       <div id="engineHealth" class="engine-health"></div>
-      <div class="proxy-admin-box">
+      <div class="proxy-admin-box hidden">
         <div class="proxy-admin-head">
           <strong>ProxyAdmin 检测</strong>
           <span id="proxyAdminSummary" class="muted">未检测</span>

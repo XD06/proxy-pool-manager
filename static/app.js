@@ -522,7 +522,6 @@ function renderPortsTable() {
           <th>状态</th>
           <th>延迟</th>
           <th>验证结果</th>
-          <th>ProxyAdmin</th>
           <th>出口 IP</th>
           <th>地区</th>
           <th>curl 验证</th>
@@ -542,7 +541,6 @@ function renderPortsTable() {
           <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}" title="${escapeHtml(latencyTitle(item.latency))}">${escapeHtml(latencyText(item.latency))}</span></td>
           <td data-label="验证结果" class="result-preview" title="${escapeHtml(targetResponseText(item.latency))}">${escapeHtml(targetResponsePreview(item.latency))}</td>
-          <td data-label="ProxyAdmin">${proxyAdminPortSummary(port)}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
           <td data-label="地区"><span class="geoip-chip" id="geo-${port}" title="${escapeHtml(geoIpTitle(item))}">${escapeHtml(geoIpText(item))}</span></td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
@@ -552,7 +550,6 @@ function renderPortsTable() {
               <button data-validate-port="${port}">验证</button>
               <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5">复制 SOCKS</button>
               <button data-remove-port="${port}">移除映射</button>
-              <button data-remove-proxy-admin-port="${port}">移除代理</button>
             </div>
           </td>
         </tr>`;
@@ -588,11 +585,6 @@ function renderPortsTable() {
     button.addEventListener("click", async () => {
       const port = button.dataset.removePort;
       await removePortMapping(port);
-    });
-  });
-  document.querySelectorAll("[data-remove-proxy-admin-port]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await removeProxyAdminProxyForPort(button.dataset.removeProxyAdminPort);
     });
   });
   document.querySelectorAll("[data-copy]").forEach((item) => {
@@ -838,20 +830,11 @@ function latencySortValue(latency) {
 }
 
 function sortedPortEntries() {
-  const proxyAdminByPort = proxyAdminResultByPort();
   const hasLocalProxyResults = Object.keys(localProxyCheckResults).length > 0;
-  const hasProxyAdminResults = proxyAdminByPort.size > 0;
   return Object.entries(ports).sort(([leftPort, left], [rightPort, right]) => {
     if (hasLocalProxyResults) {
       const leftQuality = qualityFromResult(localProxyCheckResults[String(leftPort)]);
       const rightQuality = qualityFromResult(localProxyCheckResults[String(rightPort)]);
-      if (leftQuality.bucket !== rightQuality.bucket) return leftQuality.bucket - rightQuality.bucket;
-      if (leftQuality.gradeRank !== rightQuality.gradeRank) return leftQuality.gradeRank - rightQuality.gradeRank;
-      if (leftQuality.score !== rightQuality.score) return rightQuality.score - leftQuality.score;
-    }
-    if (hasProxyAdminResults) {
-      const leftQuality = proxyAdminQuality(proxyAdminByPort.get(String(leftPort)));
-      const rightQuality = proxyAdminQuality(proxyAdminByPort.get(String(rightPort)));
       if (leftQuality.bucket !== rightQuality.bucket) return leftQuality.bucket - rightQuality.bucket;
       if (leftQuality.gradeRank !== rightQuality.gradeRank) return leftQuality.gradeRank - rightQuality.gradeRank;
       if (leftQuality.score !== rightQuality.score) return rightQuality.score - leftQuality.score;
@@ -1200,6 +1183,37 @@ async function saveMappings(mappings) {
   return request("/api/assign", { method: "PUT", body: JSON.stringify({ mappings }) });
 }
 
+function compactPortMappings(startPort) {
+  const entries = Object.entries(ports)
+    .sort(([leftPort], [rightPort]) => Number(leftPort) - Number(rightPort));
+  const mappings = {};
+  entries.forEach(([, item], index) => {
+    mappings[String(startPort + index)] = item.node_tag;
+  });
+  return mappings;
+}
+
+async function assertCompactPortsAvailable(mappings) {
+  const currentPorts = new Set(Object.keys(ports).map(String));
+  const targetPorts = Object.keys(mappings).map(Number);
+  const checked = await request("/api/ports/check", {
+    method: "POST",
+    body: JSON.stringify({ ports: targetPorts })
+  });
+  const blocked = (checked.ports || []).filter((item) => {
+    const port = String(item.port);
+    if (item.available) return false;
+    return !(currentPorts.has(port) && item.reason === "project-listening");
+  });
+  if (blocked.length) {
+    const detail = blocked
+      .slice(0, 6)
+      .map((item) => `${item.port} ${item.label || item.reason || "不可用"}`)
+      .join("，");
+    throw new Error(`目标端口不可用：${detail}`);
+  }
+}
+
 async function removePortMapping(port) {
   await runTask(`移除端口 ${port} 映射`, async () => {
     const mappings = {};
@@ -1528,6 +1542,30 @@ $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用�
   });
   const skippedCount = Object.keys(allocation.skipped || {}).length;
   return `已分配 ${targets.length} 个可用端口${skippedCount ? `，已避让 ${skippedCount} 个不可用端口` : ""}`;
+}));
+
+$("compactPortsBtn").addEventListener("click", () => runTask("重排端口", async () => {
+  const entries = Object.entries(ports);
+  if (!entries.length) throw new Error("没有可重排的端口映射");
+  const startPort = Number($("startPort").value || 8001);
+  if (!Number.isInteger(startPort) || startPort < 1024 || startPort > 65535) {
+    throw new Error("起始端口无效");
+  }
+  const endPort = startPort + entries.length - 1;
+  if (endPort > 65535) throw new Error(`端口范围超过 65535：${startPort}-${endPort}`);
+  const mappings = compactPortMappings(startPort);
+  const before = Object.keys(ports).sort((left, right) => Number(left) - Number(right)).join(",");
+  const after = Object.keys(mappings).sort((left, right) => Number(left) - Number(right)).join(",");
+  if (before === after) return `端口已经集中：${after}`;
+  await assertCompactPortsAvailable(mappings);
+  const result = await saveMappings(mappings);
+  validationDetails = {};
+  validatingPorts.clear();
+  localProxyCheckResults = {};
+  await refresh();
+  if (result.engine_restarted) return `端口已重排为 ${after}，已自动重启引擎`;
+  if (result.engine_stopped) return `端口已重排为 ${after}，已停止引擎`;
+  return `端口已重排为 ${after}`;
 }));
 
 $("clearAssignBtn").addEventListener("click", () => runTask("清空端口分配", async () => {

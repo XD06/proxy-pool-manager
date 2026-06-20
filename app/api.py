@@ -1372,11 +1372,23 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if tag not in known:
                 raise HTTPException(status_code=400, detail=f"Unknown node tag: {tag}")
             mappings[str(port)] = PortMapping(node_tag=tag)
+        previous_mappings = app_state.port_mappings
         app_state.port_mappings = dict(sorted(mappings.items(), key=lambda item: int(item[0])))
+
+        def same_port_node(port: str) -> bool:
+            previous = previous_mappings.get(port)
+            current = app_state.port_mappings.get(port)
+            return bool(previous and current and previous.node_tag == current.node_tag)
+
         app_state.exit_ip_cache = {
             port: cache
             for port, cache in app_state.exit_ip_cache.items()
-            if port in app_state.port_mappings
+            if same_port_node(port)
+        }
+        app_state.local_proxy_check_results = {
+            port: result
+            for port, result in app_state.local_proxy_check_results.items()
+            if same_port_node(port)
         }
         save()
         restarted = False

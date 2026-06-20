@@ -200,6 +200,55 @@ def test_api_assign_orders_mappings_by_port(tmp_path):
     assert list(store.load().port_mappings.keys()) == ["8001", "8010"]
 
 
+def test_api_assign_clears_port_caches_when_node_changes(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    nodes = [
+        ProxyNode(
+            tag="node-a",
+            name="A",
+            type="vless",
+            server="a.example.com",
+            server_port=443,
+            outbound={"type": "vless", "tag": "node-a", "server": "a.example.com", "server_port": 443},
+        ),
+        ProxyNode(
+            tag="node-b",
+            name="B",
+            type="vless",
+            server="b.example.com",
+            server_port=443,
+            outbound={"type": "vless", "tag": "node-b", "server": "b.example.com", "server_port": 443},
+        ),
+    ]
+    store.save(
+        AppState(
+            nodes=nodes,
+            port_mappings={
+                "8001": PortMapping(node_tag="node-a"),
+                "8003": PortMapping(node_tag="node-b"),
+            },
+            exit_ip_cache={
+                "8001": ExitIpCache(ip="203.0.113.1"),
+                "8003": ExitIpCache(ip="203.0.113.3"),
+            },
+            local_proxy_check_results={
+                "8001": {"id": 8001, "grade": "A"},
+                "8003": {"id": 8003, "grade": "B"},
+            },
+        )
+    )
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.put("/api/assign", json={"mappings": {"8001": "node-a", "8002": "node-b"}})
+
+    assert response.status_code == 200
+    state = store.load()
+    assert set(state.exit_ip_cache) == {"8001"}
+    assert state.exit_ip_cache["8001"].ip == "203.0.113.1"
+    assert state.local_proxy_check_results == {"8001": {"id": 8001, "grade": "A"}}
+
+
 def test_api_import_zero_nodes_returns_error(tmp_path):
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store)
