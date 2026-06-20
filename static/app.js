@@ -522,6 +522,7 @@ function renderPortsTable() {
           <th>状态</th>
           <th>延迟</th>
           <th>验证结果</th>
+          <th>本地检测</th>
           <th>出口 IP</th>
           <th>地区</th>
           <th>curl 验证</th>
@@ -541,6 +542,7 @@ function renderPortsTable() {
           <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
           <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}" title="${escapeHtml(latencyTitle(item.latency))}">${escapeHtml(latencyText(item.latency))}</span></td>
           <td data-label="验证结果" class="result-preview" title="${escapeHtml(targetResponseText(item.latency))}">${escapeHtml(targetResponsePreview(item.latency))}</td>
+          <td data-label="本地检测">${localProxyPortSummary(port) || '<span class="muted">-</span>'}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
           <td data-label="地区"><span class="geoip-chip" id="geo-${port}" title="${escapeHtml(geoIpTitle(item))}">${escapeHtml(geoIpText(item))}</span></td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
