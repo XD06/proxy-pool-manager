@@ -201,8 +201,8 @@
         </section>
         <section class="tool-section">
           <header>
-            <strong>本地检测</strong>
-            <span>调用本机 proxycheck-api</span>
+            <strong>AI 连通性检测</strong>
+            <span>通过代理测试 GPT / Claude / Gemini 可达性</span>
           </header>
           <div class="actions">
             <label class="inline-field">
@@ -212,8 +212,9 @@
             <button id="localProxyCheckBtn">检测</button>
             <button id="localProxyCheckAllBtn">全部检测</button>
             <button id="cancelLocalProxyCheckBtn" class="hidden">取消</button>
-            <span id="localProxyCheckResult" class="local-check-result muted">未检测</span>
           </div>
+          <div id="localProxyCheckResult" class="local-check-result muted">未检测</div>
+          <div id="localProxyCheckGrid" class="ai-check-grid"></div>
         </section>
         <section class="tool-section wide">
           <header>

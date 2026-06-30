@@ -552,6 +552,79 @@ function renderLocalProxyCheckResult(result) {
   box.title = targets || result.summary || failedMessage || "";
 }
 
+const AI_SERVICE_TARGETS = [
+  { key: "openai", label: "GPT", icon: "🤖" },
+  { key: "anthropic", label: "Claude", icon: "🧠" },
+  { key: "gemini", label: "Gemini", icon: "💎" },
+];
+
+function renderLocalProxyCheckGrid() {
+  const grid = $("localProxyCheckGrid");
+  if (!grid) return;
+  const portList = Object.keys(ports).sort((a, b) => Number(a) - Number(b));
+  if (!portList.length) {
+    grid.innerHTML = "";
+    return;
+  }
+  let html = "";
+  for (const port of portList) {
+    const checking = localProxyCheckingPorts.has(String(port));
+    const result = localProxyCheckResults[String(port)];
+    html += renderAiCheckCard(port, result, checking);
+  }
+  grid.innerHTML = html;
+}
+
+function renderAiCheckCard(port, result, checking) {
+  if (checking) {
+    return `
+      <div class="ai-check-card ai-check-pending">
+        <div class="ai-check-header">
+          <span class="ai-check-port">${escapeHtml(port)}</span>
+          <span class="ai-check-grade checking">检测中…</span>
+        </div>
+        <div class="ai-check-services">${AI_SERVICE_TARGETS.map((s) => `<span class="ai-service-chip idle">${s.icon} ${s.label}</span>`).join("")}</div>
+      </div>`;
+  }
+  if (!result) {
+    return `
+      <div class="ai-check-card ai-check-pending">
+        <div class="ai-check-header">
+          <span class="ai-check-port">${escapeHtml(port)}</span>
+          <span class="ai-check-grade idle">未检测</span>
+        </div>
+        <div class="ai-check-services">${AI_SERVICE_TARGETS.map((s) => `<span class="ai-service-chip idle">${s.icon} ${s.label}</span>`).join("")}</div>
+      </div>`;
+  }
+  const items = result.items || [];
+  const failed = localProxyCheckFailed(result);
+  const grade = result.grade || (failed ? "ERR" : "-");
+  const title = items
+    .map((item) => `${item.target}: ${item.status} ${item.http_status || "-"} ${item.latency_ms || "-"}ms ${item.message || ""}`)
+    .join("\n");
+  const serviceChips = AI_SERVICE_TARGETS.map((svc) => {
+    const item = items.find((it) => it.target === svc.key);
+    const status = item?.status || "idle";
+    const latency = item?.latency_ms ? `${item.latency_ms}ms` : "";
+    return `<span class="ai-service-chip ${escapeHtml(status)}" title="${escapeHtml(item?.message || "")}">${svc.icon} ${svc.label}${latency ? " " + escapeHtml(latency) : ""}</span>`;
+  }).join("");
+  const baseItem = items.find((it) => it.target === "base_connectivity");
+  const baseLatency = baseItem?.latency_ms ? `${baseItem.latency_ms}ms` : "";
+  return `
+    <div class="ai-check-card" title="${escapeHtml(title)}">
+      <div class="ai-check-header">
+        <span class="ai-check-port">${escapeHtml(port)}</span>
+        <span class="ai-check-grade ${escapeHtml(grade)}">${escapeHtml(grade)} · ${escapeHtml(result.score ?? "-")}</span>
+      </div>
+      <div class="ai-check-services">${serviceChips}</div>
+      <div class="ai-check-meta">
+        ${result.exit_ip ? `<span class="mono">${escapeHtml(result.exit_ip)}</span>` : ""}
+        ${result.country || result.country_code ? `<span>${escapeHtml(result.country || result.country_code || "-")}</span>` : ""}
+        ${baseLatency ? `<span>延迟 ${escapeHtml(baseLatency)}</span>` : ""}
+      </div>
+    </div>`;
+}
+
 function setCancelButton(id, visible) {
   const button = $(id);
   if (button) button.classList.toggle("hidden", !visible);
@@ -560,6 +633,7 @@ function setCancelButton(id, visible) {
 async function runLocalProxyCheckForPort(port) {
   localProxyCheckingPorts.add(String(port));
   renderPortsTable();
+  renderLocalProxyCheckGrid();
   try {
     const result = await request("/api/proxy-check", {
       method: "POST",
@@ -584,12 +658,14 @@ async function runLocalProxyCheckForPort(port) {
   } finally {
     localProxyCheckingPorts.delete(String(port));
     renderPortsTable();
+    renderLocalProxyCheckGrid();
   }
 }
 
 async function runLocalProxyCheckForPorts(portList, concurrency = 3) {
   portList.forEach((port) => localProxyCheckingPorts.add(String(port)));
   renderPortsTable();
+  renderLocalProxyCheckGrid();
   const started = await request("/api/proxy-check/start", {
     method: "POST",
     body: JSON.stringify({ ports: portList.map(Number), timeout: 30, concurrency })
@@ -612,6 +688,7 @@ async function pollLocalProxyCheckJob(jobId, portList) {
       portList.forEach((port) => localProxyCheckingPorts.delete(String(port)));
     }
     renderPortsTable();
+    renderLocalProxyCheckGrid();
     $("localProxyCheckResult").textContent = `批量 ${job.completed}/${job.total}`;
     if (job.status === "done") break;
     if (job.status === "canceled") break;
@@ -925,6 +1002,7 @@ async function refresh() {
   renderAssignTable();
   renderLocalProxyCheckPorts();
   renderPortsTable();
+  renderLocalProxyCheckGrid();
 }
 
 async function loadProxyAdminConfig() {
