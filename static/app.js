@@ -8,6 +8,7 @@ let assignFilterTags = null;
 let validatingPorts = new Set();
 let nodeSearchQuery = "";
 let nodeStatusFilter = "all";
+let _nodeTableFingerprint = "";
 let proxyAdminResults = {};
 let proxyAdminImported = [];
 let proxyAdminConfigLoaded = false;
@@ -422,6 +423,7 @@ function proxyAuthority(port) {
 function renderNodeTable() {
   renderNodeTestOverview();
   if (!nodes.length) {
+    _nodeTableFingerprint = "";
     $("nodeTable").innerHTML = `<div class="empty">还没有节点。先在导入页粘贴订阅或单节点链接。</div>`;
     $("nodeFilterCount").textContent = "";
     return;
@@ -443,9 +445,15 @@ function renderNodeTable() {
   });
   $("nodeFilterCount").textContent = filtered.length !== nodes.length ? `${filtered.length} / ${nodes.length}` : `${nodes.length}`;
   if (!filtered.length) {
+    _nodeTableFingerprint = "";
     $("nodeTable").innerHTML = `<div class="empty">没有匹配的节点。${query ? `搜索「${escapeHtml(nodeSearchQuery)}」` : "当前过滤条件"}无结果。</div>`;
     return;
   }
+  // Skip expensive DOM rebuild if data hasn't changed
+  const fingerprint = `${nodeStatusFilter}|${nodeSearchQuery}|${filtered.map((n) => `${n.tag}:${n.latency?.alive ?? ""}:${n.latency?.delay ?? ""}:${n.latency?.exit_ip ?? ""}`).join(",")}`;
+  if (fingerprint === _nodeTableFingerprint) return;
+  _nodeTableFingerprint = fingerprint;
+
   $("nodeTable").innerHTML = `
     <table>
       <thead>
@@ -478,11 +486,6 @@ function renderNodeTable() {
         </tr>`).join("")}
       </tbody>
     </table>`;
-  $("checkAllNodes").addEventListener("change", (event) => {
-    document.querySelectorAll(".node-check").forEach((box) => {
-      box.checked = event.target.checked;
-    });
-  });
 }
 
 function renderAssignTable() {
@@ -580,45 +583,44 @@ function renderPortsTable() {
         </tr>`;
       }).join("")}</tbody>
     </table>`;
-  document.querySelectorAll("[data-ip-port]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const port = button.dataset.ipPort;
-      await runTask(`查询端口 ${port} 出口 IP`, async () => {
-        const result = await request(`/api/ports/${port}/ip`);
-        $("ip-" + port).textContent = result.exit_ip || result.error || "失败";
-        const geoCell = $("geo-" + port);
-        if (geoCell) {
-          geoCell.textContent = result.geoip_compact || geoIpCompact(result.geoip) || "-";
-          geoCell.title = result.geoip_summary || geoIpSummary(result.geoip) || geoCell.textContent;
-        }
-        showQuickResult(
-          `端口 ${port}`,
-          result.exit_ip ? `出口 IP：${result.exit_ip}；地区：${result.geoip_compact || geoIpCompact(result.geoip) || "-"}` : `失败：${result.error || "未知错误"}`,
-          Boolean(result.exit_ip)
-        );
-        await refresh();
-      });
-    });
-  });
-  document.querySelectorAll("[data-validate-port]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const port = Number(button.dataset.validatePort);
-      await runSinglePortValidation(port);
-    });
-  });
-  document.querySelectorAll("[data-remove-port]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const port = button.dataset.removePort;
-      await removePortMapping(port);
-    });
-  });
-  document.querySelectorAll("[data-copy]").forEach((item) => {
-    item.addEventListener("click", () => {
-      copyText(item.dataset.copy, item.dataset.copyLabel || "内容");
-    });
-  });
   renderValidationResults();
 }
+
+// Event delegation for ports table — avoids re-attaching listeners on every render
+$("portsTable").addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) {
+    const copyEl = event.target.closest("[data-copy]");
+    if (copyEl) {
+      copyText(copyEl.dataset.copy, copyEl.dataset.copyLabel || "内容");
+    }
+    return;
+  }
+  if (button.dataset.ipPort) {
+    const port = button.dataset.ipPort;
+    await runTask(`查询端口 ${port} 出口 IP`, async () => {
+      const result = await request(`/api/ports/${port}/ip`);
+      $("ip-" + port).textContent = result.exit_ip || result.error || "失败";
+      const geoCell = $("geo-" + port);
+      if (geoCell) {
+        geoCell.textContent = result.geoip_compact || geoIpCompact(result.geoip) || "-";
+        geoCell.title = result.geoip_summary || geoIpSummary(result.geoip) || geoCell.textContent;
+      }
+      showQuickResult(
+        `端口 ${port}`,
+        result.exit_ip ? `出口 IP：${result.exit_ip}；地区：${result.geoip_compact || geoIpCompact(result.geoip) || "-"}` : `失败：${result.error || "未知错误"}`,
+        Boolean(result.exit_ip)
+      );
+      await refresh();
+    });
+  } else if (button.dataset.validatePort) {
+    await runSinglePortValidation(Number(button.dataset.validatePort));
+  } else if (button.dataset.removePort) {
+    await removePortMapping(button.dataset.removePort);
+  } else if (button.dataset.copy) {
+    copyText(button.dataset.copy, button.dataset.copyLabel || "内容");
+  }
+});
 
 function renderLocalProxyCheckPorts() {
   const select = $("localProxyCheckPort");
@@ -1521,6 +1523,16 @@ document.querySelectorAll(".node-filter-tab").forEach((tab) => {
     nodeStatusFilter = tab.dataset.filter;
     renderNodeTable();
   });
+});
+
+// Event delegation for node table — avoids re-attaching listeners on every render
+$("nodeTable").addEventListener("change", (event) => {
+  const target = event.target;
+  if (target.id === "checkAllNodes") {
+    document.querySelectorAll(".node-check").forEach((box) => {
+      box.checked = target.checked;
+    });
+  }
 });
 
 $("deleteSelectedBtn").addEventListener("click", () => confirmTask("删除选中节点", `将删除 ${selectedNodeTags().length} 个选中节点，此操作不可撤销。`, async () => {
