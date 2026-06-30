@@ -6,6 +6,8 @@ let validationDetails = {};
 let autoSelectAliveForAssign = true;
 let assignFilterTags = null;
 let validatingPorts = new Set();
+let nodeSearchQuery = "";
+let nodeStatusFilter = "all";
 let proxyAdminResults = {};
 let proxyAdminImported = [];
 let proxyAdminConfigLoaded = false;
@@ -421,6 +423,27 @@ function renderNodeTable() {
   renderNodeTestOverview();
   if (!nodes.length) {
     $("nodeTable").innerHTML = `<div class="empty">还没有节点。先在导入页粘贴订阅或单节点链接。</div>`;
+    $("nodeFilterCount").textContent = "";
+    return;
+  }
+  const query = nodeSearchQuery.trim().toLowerCase();
+  const filtered = nodes.filter((node) => {
+    if (query) {
+      const haystack = [node.name, node.tag, node.type, node.server, String(node.server_port || "")].join(" ").toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    if (nodeStatusFilter === "alive") {
+      return node.latency && node.latency.alive;
+    } else if (nodeStatusFilter === "failed") {
+      return node.latency && !node.latency.alive;
+    } else if (nodeStatusFilter === "untested") {
+      return !node.latency;
+    }
+    return true;
+  });
+  $("nodeFilterCount").textContent = filtered.length !== nodes.length ? `${filtered.length} / ${nodes.length}` : `${nodes.length}`;
+  if (!filtered.length) {
+    $("nodeTable").innerHTML = `<div class="empty">没有匹配的节点。${query ? `搜索「${escapeHtml(nodeSearchQuery)}」` : "当前过滤条件"}无结果。</div>`;
     return;
   }
   $("nodeTable").innerHTML = `
@@ -438,7 +461,7 @@ function renderNodeTable() {
           <th>目标结果</th>
         </tr>
       </thead>
-      <tbody>${nodes.map((node) => `
+      <tbody>${filtered.map((node) => `
         <tr>
           <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" aria-label="选择节点 ${escapeHtml(node.name)}" checked></td>
           <td data-label="节点">
@@ -1082,6 +1105,11 @@ async function runTask(label, task) {
   }
 }
 
+async function confirmTask(label, message, task) {
+  if (!confirm(`${message}\n\n确认执行「${label}」？`)) return;
+  await runTask(label, task);
+}
+
 async function runNodeTest(pruneSameIp, overrideTags = null) {
   const tags = overrideTags || selectedNodeTags();
   if (!tags.length) {
@@ -1477,7 +1505,25 @@ $("selectAliveBtn").addEventListener("click", () => {
   showNotice(`已筛选可用节点：${aliveTags.length} 个`, aliveTags.length ? "ok" : "bad");
 });
 
-$("deleteSelectedBtn").addEventListener("click", () => runTask("删除选中节点", async () => {
+let _nodeSearchTimer = null;
+$("nodeSearchInput").addEventListener("input", (event) => {
+  clearTimeout(_nodeSearchTimer);
+  _nodeSearchTimer = setTimeout(() => {
+    nodeSearchQuery = event.target.value;
+    renderNodeTable();
+  }, 200);
+});
+
+document.querySelectorAll(".node-filter-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".node-filter-tab").forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    nodeStatusFilter = tab.dataset.filter;
+    renderNodeTable();
+  });
+});
+
+$("deleteSelectedBtn").addEventListener("click", () => confirmTask("删除选中节点", `将删除 ${selectedNodeTags().length} 个选中节点，此操作不可撤销。`, async () => {
   const tags = selectedNodeTags();
   if (!tags.length) throw new Error("没有选中节点");
   await request("/api/nodes/delete", {
@@ -1487,7 +1533,7 @@ $("deleteSelectedBtn").addEventListener("click", () => runTask("删除选中节�
   await refresh();
 }));
 
-$("deleteFailedBtn").addEventListener("click", () => runTask("删除测试失败节点", async () => {
+$("deleteFailedBtn").addEventListener("click", () => confirmTask("删除测试失败节点", `将删除所有测试失败的节点，此操作不可撤销。`, async () => {
   const tags = nodes.filter((node) => node.latency && !node.latency.alive).map((node) => node.tag);
   if (!tags.length) throw new Error("没有测试失败节点");
   await request("/api/nodes/delete", {
@@ -1497,7 +1543,7 @@ $("deleteFailedBtn").addEventListener("click", () => runTask("删除测试失败
   await refresh();
 }));
 
-$("clearNodesBtn").addEventListener("click", () => runTask("清空节点", async () => {
+$("clearNodesBtn").addEventListener("click", () => confirmTask("清空节点", `将删除所有已导入的节点（共 ${nodes.length} 个），此操作不可撤销。`, async () => {
   await request("/api/nodes/delete", {
     method: "POST",
     body: JSON.stringify({ all: true })
@@ -1574,7 +1620,7 @@ $("compactPortsBtn").addEventListener("click", () => runTask("重排端口", asy
   return `端口已重排为 ${after}`;
 }));
 
-$("clearAssignBtn").addEventListener("click", () => runTask("清空端口分配", async () => {
+$("clearAssignBtn").addEventListener("click", () => confirmTask("清空端口分配", `将清空所有端口映射（共 ${Object.keys(ports).length} 个），此操作不可撤销。`, async () => {
   autoSelectAliveForAssign = false;
   assignFilterTags = null;
   document.querySelectorAll(".assign-check").forEach((box) => {
@@ -1697,7 +1743,7 @@ $("proxyAdminRetryFailedBtn").addEventListener("click", () => runTask("ProxyAdmi
   return "ProxyAdmin 失败项已重试";
 }));
 
-$("proxyAdminDeleteFailedBtn").addEventListener("click", () => runTask("ProxyAdmin 删除失败", async () => {
+$("proxyAdminDeleteFailedBtn").addEventListener("click", () => confirmTask("ProxyAdmin 删除失败", `将从远端 ProxyAdmin 平台删除所有检测失败的代理，此操作不可撤销。`, async () => {
   await saveProxyAdminConfig();
   const ids = Object.values(proxyAdminResults)
     .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
@@ -1720,7 +1766,7 @@ $("proxyAdminDeleteFailedBtn").addEventListener("click", () => runTask("ProxyAdm
   return `ProxyAdmin 删除失败完成：${result.count} 个`;
 }));
 
-$("proxyAdminDeleteUnusedBtn").addEventListener("click", () => runTask("ProxyAdmin 删除未使用", async () => {
+$("proxyAdminDeleteUnusedBtn").addEventListener("click", () => confirmTask("ProxyAdmin 删除未使用", `将从远端 ProxyAdmin 平台删除所有未使用的代理，此操作不可撤销。`, async () => {
   await saveProxyAdminConfig();
   const result = await request("/api/proxy-admin/remove", {
     method: "POST",

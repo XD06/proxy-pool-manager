@@ -491,6 +491,56 @@ label span {
   margin: 0 0 12px;
 }
 
+.node-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.node-filter-bar input[type="search"] {
+  flex: 1;
+  min-width: 200px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+.node-filter-bar input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.node-filter-tabs {
+  display: flex;
+  gap: 4px;
+}
+.node-filter-tab {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.node-filter-tab:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.node-filter-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.node-filter-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .overview-metric,
 .overview-target {
   min-height: 52px;

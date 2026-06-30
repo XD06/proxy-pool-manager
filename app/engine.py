@@ -33,6 +33,7 @@ class EngineManager:
         self.last_error: str | None = None
         self.fatal = False
         self._lock = asyncio.Lock()
+        self._monitor_failures = 0
 
     def _binary_name(self) -> str:
         return "sing-box.exe" if platform.system().lower() == "windows" else "sing-box"
@@ -262,6 +263,7 @@ class EngineManager:
             if self.process is proc:
                 self.fatal = False
                 self.last_error = None
+                self._monitor_failures = 0
 
     async def stop(self, config_path: Path | None = None) -> None:
         async with self._lock:
@@ -321,22 +323,22 @@ class EngineManager:
         )
 
     async def monitor(self, config_path: Path) -> None:
-        failures = 0
         while True:
             await asyncio.sleep(5)
             if not self.process:
                 continue
             if self.process.poll() is None:
+                if not self.fatal and self._monitor_failures > 0:
+                    self._monitor_failures = 0
                 continue
-            failures += 1
+            self._monitor_failures += 1
             self.last_error = "sing-box process exited"
-            if failures >= 3:
+            if self._monitor_failures >= 3:
                 self.fatal = True
                 self.process = None
                 continue
             try:
                 await self.start(config_path)
-                failures = 0
             except Exception as exc:
                 self.last_error = str(exc)
 

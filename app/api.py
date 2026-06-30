@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .engine import EngineError, EngineManager
+from .jobs import JobManager
 from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config
 from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
@@ -215,23 +216,30 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
     engine_manager = engine or EngineManager(SING_BOX_CONFIG_PATH)
     performance = current_performance_settings()
-    test_jobs: dict[str, TestJob] = {}
-    test_job_lock = asyncio.Lock()
+    test_mgr = JobManager()
+    test_jobs = test_mgr.jobs
+    test_job_lock = test_mgr.lock
     active_test_job: dict[str, str | None] = {"id": None}
-    port_test_jobs: dict[str, PortTestJob] = {}
-    port_test_job_lock = asyncio.Lock()
+    canceled_test_jobs = test_mgr.canceled
+    port_test_mgr = JobManager()
+    port_test_jobs = port_test_mgr.jobs
+    port_test_job_lock = port_test_mgr.lock
     active_port_test_job: dict[str, str | None] = {"id": None}
-    proxy_admin_jobs: dict[str, ProxyAdminJob] = {}
-    proxy_admin_job_lock = asyncio.Lock()
+    canceled_port_test_jobs = port_test_mgr.canceled
+    proxy_admin_mgr = JobManager()
+    proxy_admin_jobs = proxy_admin_mgr.jobs
+    proxy_admin_job_lock = proxy_admin_mgr.lock
     active_proxy_admin_job: dict[str, str | None] = {"id": None}
-    local_proxy_check_jobs: dict[str, LocalProxyCheckJob] = {}
-    local_proxy_check_job_lock = asyncio.Lock()
+    canceled_proxy_admin_jobs = proxy_admin_mgr.canceled
+    local_proxy_check_mgr = JobManager()
+    local_proxy_check_jobs = local_proxy_check_mgr.jobs
+    local_proxy_check_job_lock = local_proxy_check_mgr.lock
     active_local_proxy_check_job: dict[str, str | None] = {"id": None}
-    canceled_test_jobs: set[str] = set()
-    canceled_port_test_jobs: set[str] = set()
-    canceled_proxy_admin_jobs: set[str] = set()
-    canceled_local_proxy_check_jobs: set[str] = set()
+    canceled_local_proxy_check_jobs = local_proxy_check_mgr.canceled
     auth_sessions: set[str] = set()
+    auth_failures: dict[str, list[float]] = {}
+    AUTH_MAX_FAILURES = 5
+    AUTH_LOCK_WINDOW_SECONDS = 60
     geoip_tasks: dict[str, asyncio.Task] = {}
     geoip_semaphore = asyncio.Semaphore(performance.max_geoip_concurrency)
     subscription_refresh_lock = asyncio.Lock()
@@ -307,6 +315,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         state_store.save(app_state)
         state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
 
+    async def save_async() -> None:
+        await asyncio.to_thread(save_now)
+
     def save() -> None:
         save_now()
 
@@ -315,7 +326,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             await asyncio.sleep(performance.state_save_debounce_ms / 1000)
             if save_dirty["value"]:
                 save_dirty["value"] = False
-                save_now()
+                await asyncio.to_thread(save_now)
         finally:
             try:
                 current_task = asyncio.current_task()
@@ -340,7 +351,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             await asyncio.gather(task, return_exceptions=True)
         if save_dirty["value"]:
             save_dirty["value"] = False
-            save_now()
+            await asyncio.to_thread(save_now)
 
     def touch_job(job) -> None:
         job.touched_at = time.monotonic()
@@ -355,32 +366,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             return []
         return content[-max(1, lines):]
 
-    def cleanup_job_map(jobs: dict[str, BaseModel], active_id: str | None) -> None:
-        now = time.monotonic()
-        retention_seconds = performance.job_retention_minutes * 60
-        inactive_statuses = {"done", "error", "canceled"}
-        removable = [
-            (job_id, job)
-            for job_id, job in jobs.items()
-            if job_id != active_id and getattr(job, "status", "") in inactive_statuses
-        ]
-        for job_id, job in list(removable):
-            if now - getattr(job, "touched_at", now) > retention_seconds:
-                jobs.pop(job_id, None)
-        removable = [
-            (job_id, job)
-            for job_id, job in jobs.items()
-            if job_id != active_id and getattr(job, "status", "") in inactive_statuses
-        ]
-        removable.sort(key=lambda item: getattr(item[1], "touched_at", 0), reverse=True)
-        for job_id, _job in removable[performance.max_jobs_per_type:]:
-            jobs.pop(job_id, None)
-
     def cleanup_all_jobs() -> None:
-        cleanup_job_map(test_jobs, active_test_job["id"])
-        cleanup_job_map(port_test_jobs, active_port_test_job["id"])
-        cleanup_job_map(proxy_admin_jobs, active_proxy_admin_job["id"])
-        cleanup_job_map(local_proxy_check_jobs, active_local_proxy_check_job["id"])
+        retention = performance.job_retention_minutes * 60
+        test_mgr.cleanup(active_test_job["id"], retention, performance.max_jobs_per_type)
+        port_test_mgr.cleanup(active_port_test_job["id"], retention, performance.max_jobs_per_type)
+        proxy_admin_mgr.cleanup(active_proxy_admin_job["id"], retention, performance.max_jobs_per_type)
+        local_proxy_check_mgr.cleanup(active_local_proxy_check_job["id"], retention, performance.max_jobs_per_type)
 
     async def job_cleanup_loop() -> None:
         while True:
@@ -583,19 +574,31 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     def mapped_ports() -> list[int]:
         return sorted(int(port) for port in app_state.port_mappings)
 
+    _configured_ports_cache: dict[str, object] = {"mtime": None, "ports": []}
+
     def configured_ports() -> list[int]:
         if not SING_BOX_CONFIG_PATH.exists():
+            _configured_ports_cache["mtime"] = None
+            _configured_ports_cache["ports"] = []
             return []
+        try:
+            mtime = SING_BOX_CONFIG_PATH.stat().st_mtime_ns
+        except OSError:
+            return list(_configured_ports_cache["ports"])  # type: ignore[arg-type]
+        if _configured_ports_cache["mtime"] == mtime:
+            return list(_configured_ports_cache["ports"])  # type: ignore[arg-type]
         try:
             config = json.loads(SING_BOX_CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
-            return []
-        ports = [
+            return list(_configured_ports_cache["ports"])  # type: ignore[arg-type]
+        ports = sorted(
             item.get("listen_port")
             for item in config.get("inbounds", [])
             if isinstance(item, dict) and isinstance(item.get("listen_port"), int)
-        ]
-        return sorted(ports)
+        )
+        _configured_ports_cache["mtime"] = mtime
+        _configured_ports_cache["ports"] = ports
+        return list(ports)
 
     def proxy_connect_host(request: Request | None = None) -> str:
         proxy_public_host = current_proxy_public_host()
@@ -916,12 +919,29 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         return auth_payload(request)
 
     @app.post("/api/auth/login")
-    async def auth_login(payload: LoginRequest):
+    async def auth_login(payload: LoginRequest, request: Request):
         if not auth_enabled():
             return {"enabled": False, "authenticated": True}
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        failures = auth_failures.get(client_ip, [])
+        failures = [t for t in failures if now - t < AUTH_LOCK_WINDOW_SECONDS]
+        if len(failures) >= AUTH_MAX_FAILURES:
+            retry_after = int(AUTH_LOCK_WINDOW_SECONDS - (now - failures[0]))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many failed attempts. Try again in {max(retry_after, 1)}s.",
+            )
         expected = admin_key()
         if not hmac.compare_digest(payload.key or "", expected):
-            raise HTTPException(status_code=401, detail="Invalid admin key")
+            failures.append(now)
+            auth_failures[client_ip] = failures
+            remaining = AUTH_MAX_FAILURES - len(failures)
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid admin key. {remaining} attempt(s) remaining.",
+            )
+        auth_failures.pop(client_ip, None)
         token = secrets.token_urlsafe(32)
         auth_sessions.add(token)
         response = JSONResponse({"enabled": True, "authenticated": True})
@@ -1122,12 +1142,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.post("/api/test/jobs/{job_id}/cancel")
     async def cancel_test_job(job_id: str):
-        job = test_jobs.get(job_id)
+        job = test_mgr.request_cancel(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Test job not found")
-        canceled_test_jobs.add(job_id)
-        if job.status == "running":
-            job.status = "canceling"
         return job.model_dump()
 
     async def run_test_job(job_id: str, selected, prune_same_ip: bool, include_geoip: bool, target_url: str | None, target_urls: list[str] | None) -> None:
@@ -1307,12 +1324,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.post("/api/test-ports/jobs/{job_id}/cancel")
     async def cancel_port_test_job(job_id: str):
-        job = port_test_jobs.get(job_id)
+        job = port_test_mgr.request_cancel(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Port validation job not found")
-        canceled_port_test_jobs.add(job_id)
-        if job.status == "running":
-            job.status = "canceling"
         return job.model_dump()
 
     async def run_port_test_job(job_id: str, tag_ports: list[tuple[str, int]], urls: list[str] | None) -> None:
@@ -1543,12 +1557,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.post("/api/proxy-check/jobs/{job_id}/cancel")
     async def cancel_local_proxy_check_job(job_id: str):
-        job = local_proxy_check_jobs.get(job_id)
+        job = local_proxy_check_mgr.request_cancel(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Local proxy check job not found")
-        canceled_local_proxy_check_jobs.add(job_id)
-        if job.status == "running":
-            job.status = "canceling"
         return job.model_dump()
 
     async def run_local_proxy_check_job(job_id: str, ports: list[int], timeout: int, concurrency: int) -> None:
@@ -1622,12 +1633,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.post("/api/proxy-admin/jobs/{job_id}/cancel")
     async def cancel_proxy_admin_job(job_id: str):
-        job = proxy_admin_jobs.get(job_id)
+        job = proxy_admin_mgr.request_cancel(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="ProxyAdmin job not found")
-        canceled_proxy_admin_jobs.add(job_id)
-        if job.status == "running":
-            job.status = "canceling"
         return job.model_dump()
 
     async def run_proxy_admin_job(job_id: str, payload: ProxyAdminRequest, proxy_items: list[dict]) -> None:

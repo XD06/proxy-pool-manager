@@ -134,6 +134,16 @@
         </div>
       </div>
       <div id="nodeTestOverview" class="node-test-overview"></div>
+      <div class="node-filter-bar">
+        <input id="nodeSearchInput" type="search" placeholder="搜索节点名称 / 标签 / 服务器 / 协议…" autocomplete="off">
+        <div class="node-filter-tabs">
+          <button class="node-filter-tab active" data-filter="all">全部</button>
+          <button class="node-filter-tab" data-filter="alive">可用</button>
+          <button class="node-filter-tab" data-filter="failed">失败</button>
+          <button class="node-filter-tab" data-filter="untested">未测</button>
+        </div>
+        <span id="nodeFilterCount" class="node-filter-count"></span>
+      </div>
       <div id="nodeTable" class="table-card"></div>
     </section>
 
