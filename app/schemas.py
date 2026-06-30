@@ -1,0 +1,156 @@
+"""Pydantic request/response models and job models extracted from api.py."""
+
+from __future__ import annotations
+
+import time
+
+from pydantic import BaseModel, Field
+
+
+# ── Request models ──────────────────────────────────────────────────────────
+
+
+class ImportRequest(BaseModel):
+    url: str | None = None
+    text: str | None = None
+
+
+class LoginRequest(BaseModel):
+    key: str
+
+
+class SubscriptionConfigRequest(BaseModel):
+    url: str | None = None
+    refresh_interval_minutes: int = 0
+
+
+class AssignRequest(BaseModel):
+    mappings: dict[str, str]
+
+
+class DeleteNodesRequest(BaseModel):
+    node_tags: list[str] | None = None
+    all: bool = False
+
+
+class TestRequest(BaseModel):
+    node_tags: list[str] | None = None
+    prune_same_ip: bool = False
+    include_geoip: bool = False
+    target_url: str | None = None
+    target_urls: list[str] | None = None
+
+
+class PortTestRequest(BaseModel):
+    ports: list[int] | None = None
+    urls: list[str] | None = None
+
+
+class PortAvailabilityRequest(BaseModel):
+    ports: list[int]
+
+
+class PortAllocateRequest(BaseModel):
+    start_port: int = 8001
+    count: int
+    exclude: list[int] = []
+
+
+class ProxyAdminRequest(BaseModel):
+    base_url: str
+    token: str
+    proxy_host: str | None = None
+    replace_from: str | None = None
+    replace_to: str | None = None
+    proxy_name_prefix: str | None = "代理"
+    ports: list[int] | None = None
+    concurrency: int = 10
+    check_only: bool = False
+    proxy_ids_by_port: dict[str, int] | None = None
+
+
+class ProxyAdminRemoveRequest(BaseModel):
+    base_url: str
+    token: str
+    ids: list[int] | None = None
+    unused: bool = False
+    concurrency: int = 5
+
+
+class ProxyAdminConfig(BaseModel):
+    base_url: str = ""
+    token: str = ""
+    proxy_host: str = ""
+    replace_from: str = "127.0.0.1"
+    replace_to: str = ""
+    proxy_name_prefix: str = "代理"
+    concurrency: int = 10
+
+
+class LocalProxyCheckRequest(BaseModel):
+    port: int | None = None
+    proxy_url: str | None = None
+    timeout: int = 30
+
+
+class LocalProxyCheckStartRequest(BaseModel):
+    ports: list[int] | None = None
+    timeout: int = 30
+    concurrency: int = 3
+
+
+class GeoIpConfig(BaseModel):
+    enabled: bool = True
+    cache_ttl_hours: int = 168
+    concurrency: int = 4
+
+
+class DoctorRequest(BaseModel):
+    timeout: int = 30
+
+
+# ── Job models ──────────────────────────────────────────────────────────────
+
+
+class TestJob(BaseModel):
+    id: str
+    status: str = "running"
+    total: int = 0
+    completed: int = 0
+    results: dict[str, dict] = {}
+    details: dict[str, dict] = {}
+    removed: list[str] = []
+    error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
+
+
+class PortTestJob(BaseModel):
+    id: str
+    status: str = "running"
+    total: int = 0
+    completed: int = 0
+    results: dict[str, dict] = {}
+    details: dict[str, dict] = {}
+    error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
+
+
+class ProxyAdminJob(BaseModel):
+    id: str
+    status: str = "running"
+    total: int = 0
+    completed: int = 0
+    imported: list[dict] = []
+    results: dict[str, dict] = {}
+    error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
+
+
+class LocalProxyCheckJob(BaseModel):
+    id: str
+    status: str = "running"
+    total: int = 0
+    completed: int = 0
+    results: dict[str, dict] = {}
+    error: str | None = None
+    touched_at: float = Field(default_factory=time.monotonic, exclude=True)

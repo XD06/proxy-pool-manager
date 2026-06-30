@@ -22,11 +22,44 @@ from pydantic import BaseModel, Field
 
 from .engine import EngineError, EngineManager
 from .jobs import JobManager
+from .routes.auth import AuthContext, create_auth_router
 from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config
 from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping, utc_now_iso
 from .parser import import_nodes
+from .schemas import (
+    AssignRequest,
+    DoctorRequest,
+    DeleteNodesRequest,
+    GeoIpConfig,
+    ImportRequest,
+    LocalProxyCheckJob,
+    LocalProxyCheckRequest,
+    LocalProxyCheckStartRequest,
+    LoginRequest,
+    PortAllocateRequest,
+    PortAvailabilityRequest,
+    PortTestJob,
+    PortTestRequest,
+    ProxyAdminConfig,
+    ProxyAdminJob,
+    ProxyAdminRemoveRequest,
+    ProxyAdminRequest,
+    SubscriptionConfigRequest,
+    TestJob,
+    TestRequest,
+)
+from .utils import (
+    PRIMARY_TEST_URL,
+    _doctor_command,
+    _extract_ip_from_targets,
+    _first_target_error,
+    _listening_local_ports,
+    _write_json_if_changed,
+    default_port_validation_urls,
+    run_doctor_script,
+)
 from .proxy_admin import (
     proxy_admin_client_scope,
     proxy_admin_import,
@@ -51,7 +84,6 @@ from .settings import (
 from .store import StateStore
 from .tester import (
     DEFAULT_VALIDATION_URLS,
-    PRIMARY_TEST_URL,
     measure_port_latency,
     prune_same_exit_ip,
     query_exit_ip,
@@ -59,154 +91,6 @@ from .tester import (
     test_nodes_with_temporary_engine,
     validate_proxy_targets,
 )
-
-
-class ImportRequest(BaseModel):
-    url: str | None = None
-    text: str | None = None
-
-
-class LoginRequest(BaseModel):
-    key: str
-
-
-class SubscriptionConfigRequest(BaseModel):
-    url: str | None = None
-    refresh_interval_minutes: int = 0
-
-
-class AssignRequest(BaseModel):
-    mappings: dict[str, str]
-
-
-class DeleteNodesRequest(BaseModel):
-    node_tags: list[str] | None = None
-    all: bool = False
-
-
-class TestRequest(BaseModel):
-    node_tags: list[str] | None = None
-    prune_same_ip: bool = False
-    include_geoip: bool = False
-    target_url: str | None = None
-    target_urls: list[str] | None = None
-
-
-class PortTestRequest(BaseModel):
-    ports: list[int] | None = None
-    urls: list[str] | None = None
-
-
-def default_port_validation_urls(urls: list[str] | None) -> list[str]:
-    selected = [url.strip() for url in (urls or []) if str(url).strip()]
-    return selected or [PRIMARY_TEST_URL]
-
-
-class PortAvailabilityRequest(BaseModel):
-    ports: list[int]
-
-
-class PortAllocateRequest(BaseModel):
-    start_port: int = 8001
-    count: int
-    exclude: list[int] = []
-
-
-class ProxyAdminRequest(BaseModel):
-    base_url: str
-    token: str
-    proxy_host: str | None = None
-    replace_from: str | None = None
-    replace_to: str | None = None
-    proxy_name_prefix: str | None = "代理"
-    ports: list[int] | None = None
-    concurrency: int = 10
-    check_only: bool = False
-    proxy_ids_by_port: dict[str, int] | None = None
-
-
-class ProxyAdminRemoveRequest(BaseModel):
-    base_url: str
-    token: str
-    ids: list[int] | None = None
-    unused: bool = False
-    concurrency: int = 5
-
-
-class ProxyAdminConfig(BaseModel):
-    base_url: str = ""
-    token: str = ""
-    proxy_host: str = ""
-    replace_from: str = "127.0.0.1"
-    replace_to: str = ""
-    proxy_name_prefix: str = "代理"
-    concurrency: int = 10
-
-
-class LocalProxyCheckRequest(BaseModel):
-    port: int | None = None
-    proxy_url: str | None = None
-    timeout: int = 30
-
-
-class LocalProxyCheckStartRequest(BaseModel):
-    ports: list[int] | None = None
-    timeout: int = 30
-    concurrency: int = 3
-
-
-class GeoIpConfig(BaseModel):
-    enabled: bool = True
-    cache_ttl_hours: int = 168
-    concurrency: int = 4
-
-
-class DoctorRequest(BaseModel):
-    timeout: int = 30
-
-
-class TestJob(BaseModel):
-    id: str
-    status: str = "running"
-    total: int = 0
-    completed: int = 0
-    results: dict[str, dict] = {}
-    details: dict[str, dict] = {}
-    removed: list[str] = []
-    error: str | None = None
-    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
-
-
-class PortTestJob(BaseModel):
-    id: str
-    status: str = "running"
-    total: int = 0
-    completed: int = 0
-    results: dict[str, dict] = {}
-    details: dict[str, dict] = {}
-    error: str | None = None
-    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
-
-
-class ProxyAdminJob(BaseModel):
-    id: str
-    status: str = "running"
-    total: int = 0
-    completed: int = 0
-    imported: list[dict] = []
-    results: dict[str, dict] = {}
-    error: str | None = None
-    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
-
-
-class LocalProxyCheckJob(BaseModel):
-    id: str
-    status: str = "running"
-    total: int = 0
-    completed: int = 0
-    results: dict[str, dict] = {}
-    error: str | None = None
-    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 
 
 def create_app(store: StateStore | None = None, engine: EngineManager | None = None) -> FastAPI:
@@ -914,55 +798,15 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         html = index_path.read_text(encoding="utf-8").replace("__ASSET_VERSION__", ASSET_VERSION)
         return HTMLResponse(html)
 
-    @app.get("/api/auth/status")
-    async def auth_status(request: Request):
-        return auth_payload(request)
-
-    @app.post("/api/auth/login")
-    async def auth_login(payload: LoginRequest, request: Request):
-        if not auth_enabled():
-            return {"enabled": False, "authenticated": True}
-        client_ip = request.client.host if request.client else "unknown"
-        now = time.monotonic()
-        failures = auth_failures.get(client_ip, [])
-        failures = [t for t in failures if now - t < AUTH_LOCK_WINDOW_SECONDS]
-        if len(failures) >= AUTH_MAX_FAILURES:
-            retry_after = int(AUTH_LOCK_WINDOW_SECONDS - (now - failures[0]))
-            raise HTTPException(
-                status_code=429,
-                detail=f"Too many failed attempts. Try again in {max(retry_after, 1)}s.",
-            )
-        expected = admin_key()
-        if not hmac.compare_digest(payload.key or "", expected):
-            failures.append(now)
-            auth_failures[client_ip] = failures
-            remaining = AUTH_MAX_FAILURES - len(failures)
-            raise HTTPException(
-                status_code=401,
-                detail=f"Invalid admin key. {remaining} attempt(s) remaining.",
-            )
-        auth_failures.pop(client_ip, None)
-        token = secrets.token_urlsafe(32)
-        auth_sessions.add(token)
-        response = JSONResponse({"enabled": True, "authenticated": True})
-        response.set_cookie(
-            auth_cookie_name(),
-            token,
-            httponly=True,
-            samesite="lax",
-            secure=auth_cookie_secure(),
-            path="/",
-        )
-        return response
-
-    @app.post("/api/auth/logout")
-    async def auth_logout(request: Request):
-        token = request.cookies.get(auth_cookie_name())
-        if token:
-            auth_sessions.discard(token)
-        response = JSONResponse({"enabled": auth_enabled(), "authenticated": False})
-        response.delete_cookie(auth_cookie_name(), path="/")
-        return response
+    auth_ctx = AuthContext(
+        sessions=auth_sessions,
+        failures=auth_failures,
+        auth_enabled=auth_enabled,
+        admin_key=admin_key,
+        cookie_name=auth_cookie_name,
+        cookie_secure=auth_cookie_secure,
+    )
+    app.include_router(create_auth_router(auth_ctx))
 
     @app.get("/api/status")
     async def status(request: Request):
@@ -1867,142 +1711,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     return app
 
 
-def _extract_ip_from_targets(targets: list[dict]) -> str | None:
-    for item in targets:
-        lines = (item.get("body_preview") or "").strip().splitlines()
-        if not lines:
-            continue
-        candidate = lines[0].strip()
-        if re.fullmatch(r"[0-9]{1,3}(\.[0-9]{1,3}){3}", candidate):
-            return candidate
-    return None
-
-
-def _first_target_error(targets: list[dict]) -> str | None:
-    for item in targets:
-        if item.get("error"):
-            return item["error"]
-    return "all validation targets failed"
-
-
-def _listening_local_ports(ports: list[int]) -> list[int]:
-    if not ports:
-        return []
-    with ThreadPoolExecutor(max_workers=min(32, len(ports))) as executor:
-        results = executor.map(_is_local_port_listening, ports)
-    return sorted(port for port, is_listening in zip(ports, results) if is_listening)
-
-
-def _is_local_port_listening(port: int) -> bool:
-    if platform.system().lower() != "windows" and _proc_tcp_port_listening(port):
-        return True
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
-
-
-def _proc_tcp_port_listening(port: int) -> bool:
-    port_hex = f"{int(port):04X}"
-    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                lines = handle.readlines()[1:]
-        except OSError:
-            continue
-        for line in lines:
-            columns = line.split()
-            if len(columns) < 4 or columns[3] != "0A":
-                continue
-            local_address = columns[1]
-            if local_address.rsplit(":", 1)[-1].upper() == port_hex:
-                return True
-    return False
-
-
-def _write_json_if_changed(path, data: dict) -> bool:
-    serialized = json.dumps(data, ensure_ascii=False, indent=2)
-    try:
-        if path.exists() and path.read_text(encoding="utf-8") == serialized:
-            return False
-    except OSError:
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialized, encoding="utf-8")
-    return True
-
-
-def _doctor_command() -> list[str]:
-    if platform.system().lower() == "windows":
-        return [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(ROOT_DIR / "scripts" / "doctor.ps1"),
-        ]
-    return ["bash", str(ROOT_DIR / "scripts" / "doctor.sh")]
-
-
-def _parse_doctor_output(output: str) -> dict:
-    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
-    ok = sum(1 for line in lines if line.startswith("[OK]"))
-    warn = sum(1 for line in lines if line.startswith("[WARN]"))
-    fail = sum(1 for line in lines if line.startswith("[FAIL]"))
-    summary = ""
-    for line in reversed(lines):
-        if line.startswith("=== Summary:"):
-            summary = line.strip("= ").strip()
-            break
-    return {
-        "ok": ok,
-        "warn": warn,
-        "fail": fail,
-        "summary": summary or f"ok={ok} warn={warn} fail={fail}",
-        "lines": lines,
-    }
-
-
 def run_doctor_script(timeout: int = 30) -> dict:
-    timeout = max(5, min(int(timeout or 30), 120))
-    command = _doctor_command()
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=ROOT_DIR,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        output = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
-        parsed = _parse_doctor_output(output)
-        return {
-            **parsed,
-            "exit_code": completed.returncode,
-            "timed_out": False,
-            "command": " ".join(command),
-        }
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        parsed = _parse_doctor_output("\n".join(part for part in [stdout, stderr] if part).strip())
-        return {
-            **parsed,
-            "fail": max(parsed["fail"], 1),
-            "summary": f"doctor timed out after {timeout}s",
-            "exit_code": None,
-            "timed_out": True,
-            "command": " ".join(command),
-        }
-    except OSError as exc:
-        return {
-            "ok": 0,
-            "warn": 0,
-            "fail": 1,
-            "summary": str(exc),
-            "lines": [f"[FAIL] doctor script could not run: {exc}"],
-            "exit_code": None,
-            "timed_out": False,
-            "command": " ".join(command),
-        }
+    """Wrapper that delegates to utils.run_doctor_script but uses this module's
+    _doctor_command so test monkeypatching of api_module._doctor_command works."""
+    from .utils import run_doctor_script as _impl
+    return _impl(timeout, command_fn=_doctor_command)
