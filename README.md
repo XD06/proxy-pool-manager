@@ -1,5 +1,16 @@
 # Proxy Pool Manager
 
+![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
+![sing-box](https://img.shields.io/badge/sing-box-1.13+-orange?logo=singbox&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Docker-lightgrey)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
+
+> 本地代理端口管理工具 · 导入订阅/测速去重/端口固定映射/sing-box 引擎/AI 连通性检测
+
+![控制台截图](assets/1.png)
+
 本项目是一个本地代理端口管理工具。它把多个代理节点固定绑定到不同本地 SOCKS5 端口，让不同账户可以稳定使用不同出口 IP。
 
 核心原则：
