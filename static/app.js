@@ -43,8 +43,15 @@ async function request(path, options = {}) {
   return data;
 }
 
+let _noticeTimer = null;
+
 function showNotice(message, tone = "info") {
   const notice = $("notice");
+  if (!notice) return;
+  if (_noticeTimer) {
+    clearTimeout(_noticeTimer);
+    _noticeTimer = null;
+  }
   if (!message) {
     notice.className = "notice hidden";
     notice.textContent = "";
@@ -53,6 +60,15 @@ function showNotice(message, tone = "info") {
   notice.className = `notice ${tone}`;
   notice.textContent = tone === "bad" ? compactCheckMessage(message) : message;
   notice.title = String(message || "");
+  // ponytail: auto-dismiss; errors get more time to read
+  const ms = tone === "bad" ? 6000 : 3500;
+  _noticeTimer = setTimeout(() => {
+    if (notice.textContent) {
+      notice.className = "notice hidden";
+      notice.textContent = "";
+    }
+    _noticeTimer = null;
+  }, ms);
 }
 
 function showAuthGate(message = "") {
@@ -97,6 +113,31 @@ function nodeStatusBadge(node) {
   return statusBadge(node.latency);
 }
 
+function localProxyCheckForNodeTag(tag) {
+  if (!tag) return null;
+  for (const [port, item] of Object.entries(ports || {})) {
+    if (item?.node_tag !== tag) continue;
+    return item.local_proxy_check || localProxyCheckResults[String(port)] || null;
+  }
+  return null;
+}
+
+function geoContextForNode(node) {
+  return {
+    latency: node?.latency || null,
+    geoip: node?.latency?.geoip || null,
+    local_proxy_check: localProxyCheckForNodeTag(node?.tag)
+  };
+}
+
+function geoContextForPort(port, item) {
+  return {
+    latency: item?.latency || null,
+    geoip: item?.geoip || item?.latency?.geoip || null,
+    local_proxy_check: item?.local_proxy_check || localProxyCheckResults[String(port)] || null
+  };
+}
+
 function nodeTestStats() {
   const total = nodes.length;
   const testing = testingTags.size;
@@ -117,40 +158,45 @@ function renderNodeTestOverview() {
   const targetUrls = selectedNodeTestUrls();
   const targetText = targetUrls?.length ? targetUrls.map(compactUrl).join(" / ") : "Cloudflare 204";
   const geoText = $("nodeTestGeo")?.checked ? "查出口/地区" : "只测速";
+  const alivePct = stats.total ? Math.round((stats.alive / stats.total) * 100) : 0;
+  const pct = (n) => (stats.total ? Math.round((n / stats.total) * 100) : 0);
   box.innerHTML = `
+    <div class="health" title="可用率">
+      <div class="ring" style="--p:${alivePct}">
+        <div>
+          <strong>${alivePct}%</strong>
+          <small>可用率</small>
+        </div>
+      </div>
+    </div>
     <div class="overview-metric">
-      <span>总节点</span>
+      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M7 12h10M9 17h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>总节点</span>
       <strong>${stats.total}</strong>
+      <span class="spark"><i style="width:100%"></i></span>
     </div>
     <div class="overview-metric ok">
-      <span>可用</span>
+      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>可用</span>
       <strong>${stats.alive}</strong>
+      <span class="spark"><i style="width:${pct(stats.alive)}%"></i></span>
     </div>
     <div class="overview-metric bad">
-      <span>失败</span>
+      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>失败</span>
       <strong>${stats.failed}</strong>
+      <span class="spark"><i style="width:${pct(stats.failed)}%"></i></span>
     </div>
     <div class="overview-metric idle">
-      <span>未测</span>
+      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><path d="M12 8v4l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>未测</span>
       <strong>${stats.untested}</strong>
+      <span class="spark"><i style="width:${pct(stats.untested)}%;background:var(--faint,#94a3b8)"></i></span>
     </div>
     <div class="overview-metric testing">
-      <span>测速中</span>
+      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13 3 4 14h7l-1 7 10-12h-7l0-6z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>测速中</span>
       <strong>${stats.testing}</strong>
-    </div>
-    <div class="overview-metric">
-      <span>平均延迟</span>
-      <strong>${stats.avgDelay === null ? "-" : stats.avgDelay + "ms"}</strong>
-    </div>
-    <div class="overview-target" title="${escapeHtml(targetText)}">
-      <span>本次目标</span>
-      <strong>${escapeHtml(targetText)}</strong>
-    </div>
-    <div class="overview-metric">
-      <span>地区模式</span>
-      <strong>${escapeHtml(geoText)}</strong>
+      <span class="spark"><i style="width:${stats.testing ? 40 : 0}%"></i></span>
     </div>
   `;
+  // target line stays compact under filter via title on overview container
+  box.title = `${targetText} · ${geoText}${stats.avgDelay === null ? "" : ` · 平均 ${stats.avgDelay}ms`}`;
 }
 
 // function renderSummary() {
@@ -251,24 +297,41 @@ function renderSubscription(subscription) {
 function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
   const box = $("engineHealth");
   if (!box) return;
-  const web = statusSnapshot.web || {};
-  const configuredPorts = statusSnapshot.config_ports || [];
   const configMismatch = statusSnapshot.config_matches_state === false;
   const hasIssue = configMismatch || missingPorts.length > 0 || (statusSnapshot.running && statusSnapshot.ready === false);
   const repairButton = $("repairEngineBtn");
   if (repairButton) repairButton.classList.toggle("hidden", !hasIssue);
-  const tone = !statusSnapshot.running ? "idle" : hasIssue ? "bad" : "ok";
-  const missingText = missingPorts.length ? missingPorts.join(", ") : "-";
-  const configText = configMismatch ? `${configuredPorts.length}/${expectedPorts.length} 不一致` : "一致";
+
+  let statusText = "未运行";
+  let tone = "idle";
+  if (statusSnapshot.running && configMismatch) {
+    statusText = "需重启";
+    tone = "bad";
+  } else if (statusSnapshot.running && statusSnapshot.ready === false) {
+    statusText = "启动中";
+    tone = "bad";
+  } else if (statusSnapshot.running) {
+    statusText = "运行中";
+    tone = hasIssue ? "bad" : "ok";
+  }
+  if (missingPorts.length) tone = "bad";
+
+  const listen = `${listeningPorts.length}/${expectedPorts.length}`;
+  const bits = [
+    `<span class="eh-status">${escapeHtml(statusText)}</span>`,
+    `<span>监听 <strong>${escapeHtml(listen)}</strong></span>`,
+  ];
+  if (missingPorts.length) {
+    const missingText = missingPorts.join(", ");
+    bits.push(`<span class="eh-issue" title="${escapeHtml(missingText)}">缺失 ${missingPorts.length}</span>`);
+  } else if (configMismatch) {
+    bits.push(`<span class="eh-issue">配置不一致</span>`);
+  }
   box.className = `engine-health ${tone}`;
-  box.innerHTML = `
-    <span>期望 <strong>${expectedPorts.length}</strong></span>
-    <span>监听 <strong>${listeningPorts.length}</strong></span>
-    <span>缺失 <strong title="${escapeHtml(missingText)}">${missingPorts.length ? escapeHtml(missingPorts.slice(0, 12).join(", ")) : "-"}</strong></span>
-    <span>配置 <strong>${escapeHtml(configText)}</strong></span>
-    <span>Web <strong title="${escapeHtml(web.started_at || "")}">${escapeHtml(web.pid ? `#${web.pid}` : "-")}</strong></span>
-    <span>资源 <strong title="${escapeHtml(web.asset_version || "")}">${escapeHtml(shortAssetVersion(web.asset_version))}</strong></span>
-  `;
+  box.innerHTML = bits.join("");
+  box.title = missingPorts.length
+    ? `异常端口：${missingPorts.join(", ")}`
+    : (statusSnapshot.pid ? `PID #${statusSnapshot.pid}` : "");
 }
 
 function renderDoctorResult(result) {
@@ -316,7 +379,7 @@ function renderNodeTable() {
   renderNodeTestOverview();
   if (!nodes.length) {
     _nodeTableFingerprint = "";
-    $("nodeTable").innerHTML = `<div class="empty">还没有节点。先在导入页粘贴订阅或单节点链接。</div>`;
+    $("nodeTable").innerHTML = `<div class="empty"><strong>还没有节点</strong><span>在上方导入订阅 URL，或展开粘贴单节点链接。</span></div>`;
     $("nodeFilterCount").textContent = "";
     return;
   }
@@ -338,7 +401,7 @@ function renderNodeTable() {
   $("nodeFilterCount").textContent = filtered.length !== nodes.length ? `${filtered.length} / ${nodes.length}` : `${nodes.length}`;
   if (!filtered.length) {
     _nodeTableFingerprint = "";
-    $("nodeTable").innerHTML = `<div class="empty">没有匹配的节点。${query ? `搜索「${escapeHtml(nodeSearchQuery)}」` : "当前过滤条件"}无结果。</div>`;
+    $("nodeTable").innerHTML = `<div class="empty"><strong>没有匹配节点</strong><span>${query ? `搜索「${escapeHtml(nodeSearchQuery)}」` : "当前过滤条件"}无结果，试试切换筛选。</span></div>`;
     return;
   }
   // Skip expensive DOM rebuild if data hasn't changed
@@ -368,12 +431,12 @@ function renderNodeTable() {
             <strong>${escapeHtml(node.name)}</strong>
             <small>${escapeHtml(node.tag)}</small>
           </td>
-          <td data-label="协议">${escapeHtml(node.type)}</td>
+          <td data-label="协议">${protocolChip(node.type)}</td>
           <td data-label="服务器"><span class="mono">${escapeHtml(node.server)}:${node.server_port}</span></td>
           <td data-label="状态">${nodeStatusBadge(node)}</td>
-          <td data-label="延迟"><span class="latency-pill ${latencyClass(node.latency)}" title="${escapeHtml(latencyTitle(node.latency))}">${escapeHtml(latencyText(node.latency))}</span></td>
+          <td data-label="延迟">${latencyBarHtml(node.latency)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
-          <td data-label="地区"><span class="geoip-chip" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
+          <td data-label="地区">${geoChipHtml(geoContextForNode(node))}</td>
           <td data-label="目标结果" class="result-preview" title="${escapeHtml(targetResponseText(node.latency))}">${escapeHtml(targetResponsePreview(node.latency))}</td>
         </tr>`).join("")}
       </tbody>
@@ -394,7 +457,7 @@ function renderAssignTable() {
       return left.index - right.index;
     });
   if (!assignNodes.length) {
-    $("assignTable").innerHTML = `<div class="empty">没有可分配节点。</div>`;
+    $("assignTable").innerHTML = `<div class="empty"><strong>没有可分配节点</strong><span>先到节点页导入并测速，再回来分配端口。</span></div>`;
     return;
   }
   $("assignTable").innerHTML = `
@@ -416,7 +479,7 @@ function renderAssignTable() {
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
           <td data-label="节点">${escapeHtml(node.name)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
-          <td data-label="地区"><span class="geoip-chip" title="${escapeHtml(geoIpTitle(node.latency))}">${escapeHtml(geoIpText(node.latency))}</span></td>
+          <td data-label="地区">${geoChipHtml(geoContextForNode(node))}</td>
           <td data-label="状态">${statusBadge(node.latency)}</td>
         </tr>`;
       }).join("")}</tbody>
@@ -427,7 +490,7 @@ function renderPortsTable() {
   const entries = sortedPortEntries();
   const curlTarget = activeValidationUrl();
   if (!entries.length) {
-    $("portsTable").innerHTML = `<div class="empty">还没有端口映射。先到分配页保存端口。</div>`;
+    $("portsTable").innerHTML = `<div class="empty"><strong>还没有端口映射</strong><span>到「分配」页勾选节点、填端口并保存映射。</span></div>`;
     return;
   }
   $("portsTable").innerHTML = `
@@ -456,13 +519,13 @@ function renderPortsTable() {
         <tr>
           <td data-label="端口" class="mono copyable" data-copy="${escapeHtml(httpProxy)}" data-copy-label="HTTP 代理" title="copy ${escapeHtml(httpProxy)}">${port}</td>
           <td data-label="节点">${escapeHtml(item.node_name || item.node_tag)}</td>
-          <td data-label="协议">${escapeHtml(item.type || "-")}</td>
+          <td data-label="协议">${protocolChip(item.type || "-")}</td>
           <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
-          <td data-label="延迟"><span class="latency-pill ${latencyClass(item.latency)}" title="${escapeHtml(latencyTitle(item.latency))}">${escapeHtml(latencyText(item.latency))}</span></td>
+          <td data-label="延迟">${latencyBarHtml(item.latency)}</td>
           <td data-label="验证结果" class="result-preview" title="${escapeHtml(targetResponseText(item.latency))}">${escapeHtml(targetResponsePreview(item.latency))}</td>
           <td data-label="本地检测">${localProxyPortSummary(port) || '<span class="muted">-</span>'}</td>
           <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
-          <td data-label="地区"><span class="geoip-chip" id="geo-${port}" title="${escapeHtml(geoIpTitle(item))}">${escapeHtml(geoIpText(item))}</span></td>
+          <td data-label="地区"><span id="geo-${port}">${geoChipHtml(geoContextForPort(port, item))}</span></td>
           <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
           <td data-label="操作">
             <div class="table-actions">
@@ -495,8 +558,13 @@ $("portsTable").addEventListener("click", async (event) => {
       $("ip-" + port).textContent = result.exit_ip || result.error || "失败";
       const geoCell = $("geo-" + port);
       if (geoCell) {
-        geoCell.textContent = result.geoip_compact || geoIpCompact(result.geoip) || "-";
-        geoCell.title = result.geoip_summary || geoIpSummary(result.geoip) || geoCell.textContent;
+        const compact = result.geoip_compact || geoIpCompact(result.geoip) || "-";
+        const summary = result.geoip_summary || geoIpSummary(result.geoip) || compact;
+        const code = String(result.geoip?.country_code || compact).slice(0, 2).toLowerCase();
+        const flagCls = ["hk", "jp", "us", "tw", "sg", "de", "kr", "gb", "uk", "cn"].includes(code) ? code : "";
+        geoCell.innerHTML = compact === "-"
+          ? `<span class="badge idle">—</span>`
+          : `<span class="geoip-chip" title="${escapeHtml(summary)}"><span class="flag ${flagCls}"></span>${escapeHtml(compact)}</span>`;
       }
       showQuickResult(
         `端口 ${port}`,
@@ -1287,6 +1355,8 @@ function generateExport() {
 }
 
 function activateTab(tabId, persist = true) {
+  // ponytail: import merged into nodes (test); keep old localStorage keys working
+  if (tabId === "import") tabId = "test";
   const button = document.querySelector(`.tab[data-tab="${CSS.escape(tabId)}"]`);
   const panel = $(tabId);
   if (!button || !panel) return false;
@@ -1304,7 +1374,7 @@ document.querySelectorAll(".tab").forEach((button) => {
   });
 });
 
-activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "import", false);
+activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "test", false);
 
 document.querySelectorAll(".node-target-check").forEach((item) => {
   item.addEventListener("change", renderNodeTestOverview);
