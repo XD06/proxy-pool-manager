@@ -10,51 +10,45 @@
 > 本地代理端口管理工具 · 导入订阅/测速去重/端口固定映射/sing-box 引擎/AI 连通性检测
 
 ![控制台截图](assets/1.png)
+![控制台截图](assets/2.png)
+![控制台截图](assets/3.png)
 
 本项目是一个本地代理端口管理工具。它把多个代理节点固定绑定到不同本地 SOCKS5 端口，让不同账户可以稳定使用不同出口 IP。
 
-核心原则：
+## 特性
+
+- **3 Tab 控制台**：节点（导入+测速）/ 分配 / 运行，浅色 Toolbench 风格
+- **多协议导入**：vless / vmess / ss / trojan / hysteria2 / Clash YAML / Base64 订阅
+- **测速去重**：临时启动 sing-box 验证延迟和出口 IP，同 IP 自动保留最快节点
+- **端口固定映射**：一端口一节点，sing-box `mixed` inbound 同时支持 HTTP + SOCKS5
+- **GeoIP 多源回退**：geojs → ipwho → freeipapi → ipinfo → ip-api，失败 1h 自动重试
+- **AI 连通性检测**：通过代理端口测试 GPT / Claude / Gemini 可达性
+- **可视化管理**：可用率圆环、协议分色 chip、延迟进度条、地区 flag chip
+
+## 核心原则
 
 - 每个本地端口固定对应一个节点。
 - 正式代理流量只经过 sing-box。
 - Python 只负责导入、解析、生成配置、启动进程和 Web 管理。
 - 状态和映射持久化到 `config/assignments.json`。
 
-## 当前实现范围
+## 功能清单
 
-已实现：
-
-- FastAPI 管理服务。
-- 纯 HTML/CSS/JS Web UI（3 Tab：节点 / 分配 / 运行）。
-- 节点导入：
-  - `vless://`
-  - `vmess://`
-  - `ss://`
-  - `trojan://`
-  - `hysteria2://`
-  - Clash YAML 中的 `ss/vmess/vless/trojan/hysteria2`
-  - Base64 订阅文本
-- 端口映射保存。
-- sing-box 配置生成。
-- sing-box 二进制自动下载路径。
-- `sing-box check` 校验后启动。
-- 出口 IP 查询。
-- GeoIP 地区查询：多源回退（geojs → ipwho → freeipapi → ipinfo → ip-api），失败缓存 1 小时自动重试。
-- 节点测速：临时启动 sing-box，把节点挂到测试端口验证可用性、延迟和出口 IP。
-- 同出口 IP 去重：测速后可自动只保留同一出口 IP 中最快的可用节点。
-- 运行后端口验证：对已分配端口重新测试延迟和出口 IP。
-- 节点清理：支持删除选中节点或清空已导入节点。
-- 代理端口使用 sing-box `mixed` inbound，同时支持 HTTP proxy 和 SOCKS proxy。
-- 单元测试和 API smoke test。
-
-暂未实现：
-
-- SSR。
-- TUIC。
-- 多订阅合并。
-- HTTP 代理端口。
-- 流量统计。
-- 系统代理或 TUN 模式。
+| 功能 | 状态 |
+|------|------|
+| FastAPI 管理服务 | ✅ |
+| 纯 HTML/CSS/JS Web UI（3 Tab） | ✅ |
+| 节点导入（vless/vmess/ss/trojan/hysteria2/Clash/Base64） | ✅ |
+| 端口映射保存 | ✅ |
+| sing-box 配置生成 + 自动下载 + check 校验 | ✅ |
+| 出口 IP 查询 | ✅ |
+| GeoIP 多源回退（geojs/ipwho/freeipapi/ipinfo/ip-api） | ✅ |
+| 节点测速 + 同 IP 去重 | ✅ |
+| 运行后端口验证 | ✅ |
+| AI 连通性检测（GPT/Claude/Gemini） | ✅ |
+| HTTP + SOCKS5 混合代理端口 | ✅ |
+| 单元测试 + API smoke test（116 passed） | ✅ |
+| SSR / TUIC / 多订阅合并 / 流量统计 / TUN 模式 | ❌ |
 
 ## 快速安装
 
@@ -172,97 +166,39 @@ config/app.json
 docs/operation.md
 ```
 
-## sing-box
+## sing-box 路径
 
-启动引擎时，程序会按以下顺序寻找 sing-box：
+按以下顺序寻找：环境变量 `SING_BOX_PATH` → `bin/sing-box.exe` → 系统 PATH → 自动从 [SagerNet/sing-box](https://github.com/SagerNet/sing-box/releases) 下载。
 
-1. 环境变量 `SING_BOX_PATH`
-2. `bin/sing-box.exe` 或 `bin/sing-box`
-3. 系统 PATH 中的 `sing-box`
-4. 自动从 `SagerNet/sing-box` GitHub Releases 下载
-
-如果自动下载失败，可以手动下载对应平台的 sing-box，并放到：
-
-```text
-bin/sing-box.exe
-```
-
-Windows 使用 `.exe`，Linux 使用无后缀二进制。项目内置安装脚本会按系统下载：
-
-- Windows x64：`sing-box-版本-windows-amd64.zip`
-- Linux x64：`sing-box-版本-linux-amd64.tar.gz`
-- Linux ARM64：`sing-box-版本-linux-arm64.tar.gz`
-
-如果你已经安装 v2rayN，并且想复用它自带的 sing-box，可以这样启动：
-
-```powershell
-$env:SING_BOX_PATH="D:\dsk\Documents\v2rayN-windows-64-desktop\v2rayN-windows-64\bin\sing_box\sing-box.exe"
-python main.py
-```
+> 已安装 v2rayN 可直接复用其 sing-box：
+> ```powershell
+> $env:SING_BOX_PATH="路径\v2rayN\bin\sing_box\sing-box.exe"
+> python main.py
+> ```
 
 ## 使用流程
 
-1. 启动 `python main.py`。
-2. 打开 Web UI。
-3. 在「节点」页粘贴订阅 URL 或节点文本。
-4. 点击「测速选中」验证节点可用性和延迟。
-   - 展开「测速选项」可选择测速目标 URL、是否查询出口/地区。
-   - 如果填写自定义测速 URL，所有选中节点只访问这个 URL。
-   - 如果留空，则执行默认出口 IP/连通性测速。
-5. 如需去重，点击「去重」（测速并按 IP 去重）。
-6. 在「分配」页把可用节点分配到端口。
-7. 保存映射。
-8. 点击顶栏「启动」。
-9. 在「运行」页点击「验证全部端口」。
-10. 使用本地 SOCKS5 端口：
+1. **导入** → 「节点」页粘贴订阅 URL 或节点文本
+2. **测速** → 点击「测速选中」，可选展开「测速选项」设目标 URL / 出口查询
+3. **去重** → 点击「去重」自动按出口 IP 保留最快节点
+4. **分配** → 「分配」页勾选节点 → 填端口 → 保存映射
+5. **启动** → 顶栏「启动」按钮
+6. **验证** → 「运行」页「验证全部端口」
+7. **使用** → 本地 SOCKS5 / HTTP 端口：
 
 ```powershell
 curl.exe --socks5 127.0.0.1:8001 https://api.ipify.org
 ```
 
-也可以用 HTTP proxy 方式验证端口出口 IP：
-
 ```powershell
+# SOCKS5
+curl.exe --socks5 127.0.0.1:8001 https://api.ipify.org
+
+# HTTP proxy
 curl.exe --proxy "http://127.0.0.1:8001/" https://ipv4.webshare.io/
 ```
 
-出口 IP 查询会按顺序尝试多个服务：
-
-- `https://ipv4.webshare.io/`
-- `https://api.ipify.org?format=text`
-- `https://ipv4.icanhazip.com/`
-- `https://ifconfig.me/ip`
-- `https://checkip.amazonaws.com/`
-- `https://ident.me/`
-
-运行页的“验证全部端口”会显示每个目标的：
-
-- 是否成功
-- HTTP 状态码
-- 耗时
-- 响应片段
-- 错误信息
-
-默认验证目标：
-
-- `https://ipv4.webshare.io/`
-- `https://www.google.com/generate_204`
-- `https://www.gstatic.com/generate_204`
-- `https://www.cloudflare.com/cdn-cgi/trace`
-
-也可以输入自定义 URL 一起验证。
-
-运行页也支持单端口操作：
-
-- “查出口”：只查询当前端口出口 IP，结果显示在上方简洁结果区。
-- “验证”：只验证当前端口的多个目标，简洁结果显示在上方，详细结果合并到下方验证表。
-
-导出支持：
-
-- 代理列表
-- CSV
-- JSON
-- curl 命令
+> 运行页支持单端口「查出口」「验证」，以及导出为代理列表 / CSV / JSON / curl 命令。验证目标默认 `webshare.io` / `google/gstatic 204` / `cloudflare trace`，也可自定义 URL。
 
 ## API
 
@@ -307,3 +243,7 @@ python -m pytest -q
 - sing-box inbound 默认只监听 `127.0.0.1`。
 - `config/assignments.json` 会保存代理凭据，不要提交到 git。
 - 本项目不记录代理请求内容。
+
+## License
+
+MIT
