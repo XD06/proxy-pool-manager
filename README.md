@@ -14,7 +14,7 @@
 已实现：
 
 - FastAPI 管理服务。
-- 纯 HTML/CSS/JS Web UI。
+- 纯 HTML/CSS/JS Web UI（3 Tab：节点 / 分配 / 运行）。
 - 节点导入：
   - `vless://`
   - `vmess://`
@@ -28,7 +28,8 @@
 - sing-box 二进制自动下载路径。
 - `sing-box check` 校验后启动。
 - 出口 IP 查询。
-- 导入后节点测速：临时启动 sing-box，把节点挂到测试端口验证可用性、延迟和出口 IP。
+- GeoIP 地区查询：多源回退（geojs → ipwho → freeipapi → ipinfo → ip-api），失败缓存 1 小时自动重试。
+- 节点测速：临时启动 sing-box，把节点挂到测试端口验证可用性、延迟和出口 IP。
 - 同出口 IP 去重：测速后可自动只保留同一出口 IP 中最快的可用节点。
 - 运行后端口验证：对已分配端口重新测试延迟和出口 IP。
 - 节点清理：支持删除选中节点或清空已导入节点。
@@ -63,11 +64,55 @@ Linux：
 
 ```bash
 chmod +x scripts/*.sh
+sudo bash scripts/install-linux.sh --systemd --start
+```
+
+安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，构建 Linux 版 `proxycheck-api/proxycheck`，生成默认 `config/app.json`，并注册 `proxy-pool-manager` systemd 服务为开机自启。
+
+后续更新：
+
+```bash
+bash scripts/update-linux.sh
+```
+
+这会执行 `git pull --ff-only`、同步 Python 依赖，并重启 systemd 服务。没有 systemd 的环境仍可手动运行：
+
+```bash
 ./scripts/install-linux.sh
 ./scripts/start-service.sh
 ```
 
-安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，并生成默认 `config/app.json`。
+Docker / VPS：
+
+```bash
+cp config/app.docker.example.json config/app.json
+sed -i 's/change-this-admin-key/你的强管理密钥/' config/app.json
+docker compose up -d --build
+```
+
+默认 compose 只把控制台绑定到宿主机 `127.0.0.1:9100`，适合在 VPS 上用 Nginx/Caddy 反代 HTTPS。代理端口需要给外部用户使用时，再在 `docker-compose.yml` 里打开对应端口范围，例如 `8001-8062:8001-8062`。
+
+如果你要把 `9100:9100` 直接暴露到公网，必须设置 `admin_key` 或环境变量 `PPM_ADMIN_KEY`，否则控制台没有登录保护。
+前端样式或登录页改动后，记得 `docker compose up -d --build`，并确认页面底部资源版本号已经更新。
+
+如果 Linux 服务器没有安装 Go，本地 proxycheck 检测会不可用。安装 Go 后执行：
+
+```bash
+cd proxycheck-api
+go build -o proxycheck ./cmd/proxycheck
+```
+
+环境自检：
+
+```bash
+./scripts/doctor.sh
+```
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
+```
 
 手动安装依赖也可以：
 
@@ -98,9 +143,10 @@ Windows 使用脚本：
 Linux 使用脚本：
 
 ```bash
-./scripts/start-service.sh
-./scripts/status-service.sh
-./scripts/stop-service.sh
+sudo systemctl start proxy-pool-manager
+sudo systemctl status proxy-pool-manager
+sudo systemctl stop proxy-pool-manager
+journalctl -u proxy-pool-manager -f
 ```
 
 Web 端口和监听地址在这里改：
@@ -147,16 +193,16 @@ python main.py
 
 1. 启动 `python main.py`。
 2. 打开 Web UI。
-3. 在“导入”页粘贴订阅 URL 或节点文本。
-4. 在“测试”页点击“测速选中节点”。
-   - 如果填写“测试目标 URL”，所有选中节点只访问这个 URL。
-   - 这时排序依据是目标 URL 的响应时间。
+3. 在「节点」页粘贴订阅 URL 或节点文本。
+4. 点击「测速选中」验证节点可用性和延迟。
+   - 展开「测速选项」可选择测速目标 URL、是否查询出口/地区。
+   - 如果填写自定义测速 URL，所有选中节点只访问这个 URL。
    - 如果留空，则执行默认出口 IP/连通性测速。
-5. 如需去重，点击“测速并按 IP 去重”。
-6. 在“分配”页把可用节点分配到端口。
+5. 如需去重，点击「去重」（测速并按 IP 去重）。
+6. 在「分配」页把可用节点分配到端口。
 7. 保存映射。
-8. 点击“启动引擎”。
-9. 在“运行”页点击“验证全部端口”。
+8. 点击顶栏「启动」。
+9. 在「运行」页点击「验证全部端口」。
 10. 使用本地 SOCKS5 端口：
 
 ```powershell
@@ -221,6 +267,7 @@ curl.exe --proxy "http://127.0.0.1:8001/" https://ipv4.webshare.io/
 | `PUT` | `/api/assign` | 保存端口映射 |
 | `GET` | `/api/ports` | 查询端口映射 |
 | `GET` | `/api/ports/{port}/ip` | 查询端口出口 IP |
+| `GET` | `/api/proxy/fastest` | 返回最快可用代理；可加 `check=true` 做实时验证 |
 | `POST` | `/api/start` | 启动 sing-box |
 | `POST` | `/api/stop` | 停止 sing-box |
 
@@ -240,6 +287,8 @@ python -m pytest -q
 - 状态持久化。
 - API 导入、分配、状态查询 smoke test。
 - 同出口 IP 去重逻辑。
+- GeoIP 多源回退查询（geojs / ipwho / freeipapi / ipinfo / ip-api）。
+- 前端 DOM 契约锁定（`app.js` 引用的 `id` / `data-tab` / API 路径必须在 `index.html` 和后端路由中存在）。
 
 ## 安全说明
 

@@ -5,83 +5,180 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Bind proxy nodes to fixed local SOCKS5 ports and verify each route.">
   <title>Proxy Pool Manager</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260605-perf-1">
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%230f172a"/><path d="M16 22h32M16 32h22M16 42h32" stroke="%235eead4" stroke-width="6" stroke-linecap="round"/></svg>'>
+  <link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
 </head>
-<body>
+<body class="auth-pending">
+  <section id="authGate" class="auth-gate" aria-live="polite">
+    <form id="authForm" class="auth-card">
+      <span class="auth-eyebrow">restricted console</span>
+      <h1>Proxy Pool Manager</h1>
+      <label>
+        <span>管理密钥</span>
+        <input id="adminKeyInput" type="password" autocomplete="current-password" placeholder="输入 PPM_ADMIN_KEY">
+      </label>
+      <button class="primary" type="submit">登录</button>
+      <p id="authError" class="auth-error"></p>
+    </form>
+  </section>
   <main class="app-shell">
     <header class="hero">
-      <div>
-        <p class="eyebrow">local proxy control</p>
+      <div class="hero-brand">
+        <span class="hero-mark" aria-hidden="true">
+          <svg viewBox="0 0 64 64" role="img" focusable="false">
+            <rect width="64" height="64" rx="14" fill="#0f172a"></rect>
+            <path d="M16 22h32M16 32h22M16 42h32" stroke="#5eead4" stroke-width="6" stroke-linecap="round"></path>
+          </svg>
+        </span>
+        <div>
+        <p class="eyebrow">local ports</p>
         <h1>Proxy Pool Manager</h1>
-        <p class="summary">导入节点，测速验证出口 IP，按端口固定绑定给不同账户使用。</p>
+        <p class="summary">固定本地端口 · 一端口一出口</p>
+        </div>
       </div>
       <div class="status-grid">
         <article>
-          <span>引擎</span>
+          <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><path d="M12 8v4l2.5 1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>引擎</span>
           <strong id="engineState">读取中</strong>
         </article>
         <article>
-          <span>节点</span>
+          <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M7 12h10M9 17h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>节点</span>
           <strong id="nodeCount">0</strong>
         </article>
         <article>
-          <span>映射</span>
+          <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>映射</span>
           <strong id="mappingCount">0</strong>
         </article>
+        <article>
+          <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>监听</span>
+          <strong id="listeningCount">0/0</strong>
+        </article>
+      </div>
+      <div class="top-actions">
+        <button id="refreshBtn" class="icon-btn" title="刷新" aria-label="刷新">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14.2-5M20 12a8 8 0 0 1-14.2 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="startBtn" class="primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 5v14l11-7L8 5z" fill="currentColor"/></svg>
+          启动
+        </button>
+        <button id="stopBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+          停止
+        </button>
+        <button id="repairEngineBtn" class="hidden">重启修复</button>
       </div>
     </header>
 
     <nav class="tabs" aria-label="main sections">
-      <button class="tab active" data-tab="import">导入</button>
-      <button class="tab" data-tab="test">测试</button>
-      <button class="tab" data-tab="assign">分配</button>
-      <button class="tab" data-tab="dashboard">运行</button>
+      <button class="tab active" data-tab="test">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="6" cy="12" r="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="7" r="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="17" r="2.2" stroke="currentColor" stroke-width="1.8"/><path d="M8 12h6.5M15.5 8.2 8.8 11.2M15.5 15.8 8.8 12.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        节点
+      </button>
+      <button class="tab" data-tab="assign">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h10M4 12h16M4 17h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 5v4M18 7h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        分配
+      </button>
+      <button class="tab" data-tab="dashboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 5v14l11-7L8 5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        运行
+      </button>
     </nav>
 
-    <section id="notice" class="notice hidden"></section>
+    <section id="notice" class="notice hidden" role="status" aria-live="polite"></section>
 
-    <section id="import" class="panel active">
-      <div class="split">
+    <section id="test" class="panel active">
+      <div class="section-head">
         <div>
-          <h2>导入节点</h2>
-          <p class="panel-copy">支持订阅 URL、Clash YAML、Base64 订阅和单节点链接。导入后先去“测试”页验证可用性。</p>
+          <h2>
+            <span class="ico" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="6" cy="12" r="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="7" r="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="17" r="2.2" stroke="currentColor" stroke-width="1.8"/><path d="M8 12h6.5M15.5 8.2 8.8 11.2M15.5 15.8 8.8 12.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </span>
+            节点
+          </h2>
+          <p class="panel-copy">导入 · 测速 · 去重 · 清理</p>
         </div>
-        <div class="form-stack">
+        <div class="test-control-panel">
+          <div class="test-actions">
+            <button id="testSelectedBtn" class="primary">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13 3 4 14h7l-1 7 10-12h-7l0-6z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              测速选中
+            </button>
+            <button id="testUntestedBtn">测未测</button>
+            <button id="testFailedOnlyBtn">测失败</button>
+            <button id="testPruneBtn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              去重
+            </button>
+            <button id="cancelNodeTestBtn" class="hidden">取消测速</button>
+            <span class="toolbar-sep"></span>
+            <button id="selectAliveBtn" class="ghost">只选可用</button>
+            <button id="deleteSelectedBtn">删除</button>
+            <button id="deleteFailedBtn" class="ghost">删失败</button>
+            <button id="clearNodesBtn" class="ghost">清空</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="import" class="import-block">
+        <div class="import-strip">
           <label>
             <span>订阅 URL</span>
             <div class="input-row">
               <input id="urlInput" type="url" placeholder="https://example.com/sub">
-              <button id="importUrlBtn">导入</button>
+              <button id="importUrlBtn" class="primary">导入</button>
             </div>
           </label>
           <label>
-            <span>配置文本</span>
-            <textarea id="textInput" rows="8" placeholder="vless://..."></textarea>
+            <span>自动刷新（分钟）</span>
+            <div class="input-row">
+              <input id="subscriptionInterval" type="number" min="0" max="10080" value="0" style="max-width:100px">
+              <button id="saveSubscriptionBtn">保存</button>
+              <button id="refreshSubscriptionBtn">刷新</button>
+            </div>
           </label>
-          <button id="importTextBtn" class="primary">解析文本</button>
+          <span id="subscriptionSummary" class="local-check-result muted">未配置</span>
         </div>
+        <details class="import-more">
+          <summary>粘贴配置文本 / 单节点链接</summary>
+          <div class="import-more-body">
+            <textarea id="textInput" rows="4" placeholder="vless://..."></textarea>
+            <button id="importTextBtn" class="primary">解析文本</button>
+          </div>
+        </details>
       </div>
-    </section>
 
-    <section id="test" class="panel">
-      <div class="section-head">
-        <div>
-          <h2>节点测试</h2>
-          <p class="panel-copy">临时启动 sing-box，逐个节点验证延迟和出口 IP。同一个出口 IP 可自动只保留最快可用节点。</p>
-        </div>
-        <div class="actions">
+      <details class="test-options">
+        <summary>测速选项 · 目标 / 出口</summary>
+        <div class="test-options-body">
+          <div class="test-targets" id="nodeTestTargets" aria-label="测速链接">
+            <span>测速链接</span>
+            <label class="target-option"><input class="node-target-check" type="checkbox" value="http://cp.cloudflare.com/generate_204">Cloudflare <small>默认</small></label>
+            <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.gstatic.com/generate_204">gstatic</label>
+            <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.google.com/generate_204">Google</label>
+          </div>
           <label class="inline-field wide">
-            测试目标 URL
-            <input id="nodeTestUrl" type="url" placeholder="留空则测出口 IP；填入则只测这个 URL">
+            自定义测速 URL
+            <input id="nodeTestUrl" type="url" placeholder="可选；不选则默认 Cloudflare 204">
           </label>
-          <button id="selectAliveBtn">只选可用</button>
-          <button id="testSelectedBtn" class="primary">测速选中节点</button>
-          <button id="testUntestedBtn">测试未测速</button>
-          <button id="testPruneBtn">测速并按 IP 去重</button>
-          <button id="deleteSelectedBtn">删除选中</button>
-          <button id="deleteFailedBtn">删除失败</button>
-          <button id="clearNodesBtn">清空节点</button>
+          <label class="target-option test-geo-toggle">
+            <input id="nodeTestGeo" type="checkbox" checked>
+            出口/地区
+            <small>可关掉提速</small>
+          </label>
         </div>
+      </details>
+
+      <div id="nodeTestOverview" class="node-test-overview"></div>
+      <div class="node-filter-bar">
+        <input id="nodeSearchInput" type="search" placeholder="搜索节点名称 / 标签 / 服务器 / 协议…" autocomplete="off">
+        <div class="node-filter-tabs">
+          <button class="node-filter-tab active" data-filter="all">全部</button>
+          <button class="node-filter-tab" data-filter="alive">可用</button>
+          <button class="node-filter-tab" data-filter="failed">失败</button>
+          <button class="node-filter-tab" data-filter="untested">未测</button>
+        </div>
+        <span id="nodeFilterCount" class="node-filter-count"></span>
       </div>
       <div id="nodeTable" class="table-card"></div>
     </section>
@@ -89,8 +186,13 @@
     <section id="assign" class="panel">
       <div class="section-head">
         <div>
-          <h2>端口分配</h2>
-          <p class="panel-copy">建议只分配测试通过的节点。每个端口固定对应一个节点。</p>
+          <h2>
+            <span class="ico" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M4 7h10M4 12h16M4 17h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 5v4M18 7h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </span>
+            端口分配
+          </h2>
+          <p class="panel-copy">一端口一节点 · 建议只分配可用节点</p>
         </div>
         <div class="actions">
           <label class="inline-field">
@@ -98,6 +200,8 @@
             <input id="startPort" type="number" value="8001" min="1024" max="65535">
           </label>
           <button id="autoAssignBtn">自动分配</button>
+          <button id="compactPortsBtn">重排端口</button>
+          <button id="clearAssignBtn">清空分配</button>
           <button id="saveAssignBtn" class="primary">保存映射</button>
         </div>
       </div>
@@ -107,36 +211,129 @@
     <section id="dashboard" class="panel">
       <div class="section-head">
         <div>
-          <h2>运行验证</h2>
-          <p class="panel-copy">启动引擎后，在这里验证每个端口是否真正可用，并查看对应出口 IP。端口支持 HTTP 和 SOCKS 代理。</p>
+          <h2>
+            <span class="ico" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7L8 5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+            </span>
+            运行验证
+          </h2>
+          <p class="panel-copy">HTTP / SOCKS · 出口 IP · 质量检测 · 导出</p>
         </div>
         <div class="actions">
-          <button id="startBtn" class="primary">启动引擎</button>
-          <button id="stopBtn">停止引擎</button>
+          <button id="testPortsBtn" class="primary">验证全部端口</button>
+          <button id="exportBtn">生成导出</button>
+        </div>
+      </div>
+      <div class="dashboard-tools">
+        <div id="engineHealth" class="engine-health" aria-live="polite"></div>
+        <section class="tool-section">
+          <header>
+            <strong>
+              <span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 12l2 2 4-4M7 20h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+              系统自检
+            </strong>
+          </header>
+          <div class="actions">
+            <button id="doctorBtn">运行自检</button>
+            <span id="doctorSummary" class="local-check-result muted">未运行</span>
+          </div>
+        </section>
+        <section class="tool-section">
+          <header>
+            <strong>
+              <span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v4M12 17v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M3 12h4M17 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              AI 连通
+            </strong>
+          </header>
+          <div class="actions">
+            <label class="inline-field">
+              端口
+              <select id="localProxyCheckPort"></select>
+            </label>
+            <button id="localProxyCheckBtn">检测</button>
+            <button id="localProxyCheckAllBtn">全部</button>
+            <button id="cancelLocalProxyCheckBtn" class="hidden">取消</button>
+            <span id="localProxyCheckResult" class="local-check-result muted">未检测</span>
+          </div>
+        </section>
+        <section class="tool-section">
+          <header>
+            <strong>验证目标</strong>
+          </header>
+          <div class="actions">
           <label class="inline-field wide">
             自定义 URL
             <input id="customTestUrl" type="url" placeholder="https://example.com/">
           </label>
-          <button id="testPortsBtn">验证全部端口</button>
           <label class="inline-field">
             导出
             <select id="exportFormat">
-              <option value="proxy-list">代理列表</option>
+              <option value="proxy-list">HTTP 列表</option>
+              <option value="socks-list">SOCKS5 列表</option>
+              <option value="mixed-list">HTTP+SOCKS5</option>
               <option value="csv">CSV</option>
               <option value="json">JSON</option>
               <option value="curl">curl 命令</option>
             </select>
           </label>
-          <button id="exportBtn">生成导出</button>
-          <button id="refreshBtn">刷新</button>
+          <button id="cancelPortValidationBtn" class="hidden">取消验证</button>
+          </div>
+        </section>
         </div>
-      </div>
-      <div id="quickResult" class="quick-result hidden"></div>
+      <div id="quickResult" class="quick-result hidden" role="status" aria-live="polite"></div>
+      <div id="doctorResult" class="doctor-result hidden" role="status" aria-live="polite"></div>
+      <details class="advanced-box hidden" hidden>
+        <summary>
+          <strong>高级 · ProxyAdmin</strong>
+          <span id="proxyAdminSummary" class="muted">未检测</span>
+        </summary>
+        <div class="proxy-admin-box">
+          <div class="proxy-admin-controls">
+            <label class="inline-field wide">
+              API 地址
+              <input id="proxyAdminBaseUrl" type="url" placeholder="http://127.0.0.1:8081">
+            </label>
+            <label class="inline-field wide">
+              Bearer Token
+              <input id="proxyAdminToken" type="password" placeholder="Bearer Token">
+            </label>
+            <label class="inline-field">
+              代理 Host
+              <input id="proxyAdminHost" type="text" placeholder="自动">
+            </label>
+            <label class="inline-field">
+              替换 From
+              <input id="proxyAdminReplaceFrom" type="text" placeholder="127.0.0.1">
+            </label>
+            <label class="inline-field">
+              替换 To
+              <input id="proxyAdminReplaceTo" type="text" placeholder="服务器 IP">
+            </label>
+            <label class="inline-field">
+              名称前缀
+              <input id="proxyAdminNamePrefix" type="text" value="代理" placeholder="代理">
+            </label>
+            <label class="inline-field">
+              并发
+              <input id="proxyAdminConcurrency" type="number" value="10" min="1" max="30">
+            </label>
+            <button id="proxyAdminCheckBtn">导入并检测</button>
+            <button id="proxyAdminSaveConfigBtn">保存配置</button>
+            <button id="proxyAdminRetryFailedBtn">重试失败</button>
+            <button id="proxyAdminCancelBtn" class="hidden">取消检测</button>
+            <button id="proxyAdminDeleteFailedBtn">删除失败</button>
+            <button id="proxyAdminDeleteUnusedBtn">删除未使用</button>
+          </div>
+          <p class="proxy-admin-note">配置会保存到本机 config/app.json；如果 Web 面板暴露到公网，请不要保存长期有效 Token。</p>
+          <div id="proxyAdminResults" class="proxy-admin-results"></div>
+        </div>
+      </details>
       <div id="portsTable" class="table-card"></div>
       <textarea id="exportOutput" class="export-output hidden" rows="8" readonly></textarea>
       <div id="validationResults" class="validation-results"></div>
     </section>
   </main>
-  <script src="/static/app.js?v=20260605-perf-1"></script>
+  <script src="/static/helpers.js?v=__ASSET_VERSION__"></script>
+<script src="/static/app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

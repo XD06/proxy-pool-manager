@@ -1289,3 +1289,1509 @@ node --check static/app.js -> passed
 python -m pytest -q -> 35 passed
 测试前后 config/sing-box.json SHA256 一致 -> 测试不污染真实配置
 ```
+
+## 自定义 URL 后 curl 验证命令仍固定为出口 IP URL
+
+用户反馈：
+
+```text
+自定义url填入后，curl验证不会改变，还是固定为
+curl --proxy "http://127.0.0.1:8006/" https://ipv4.webshare.io/
+```
+
+根因：
+
+- 之前为了让“查出口”始终使用 `https://ipv4.webshare.io/`，新增了 `EXIT_IP_CHECK_URL`。
+- 但表格里的“curl 验证”和导出 curl 也误用了这个固定常量。
+- 导致自定义验证 URL 只影响实际验证请求，不影响 UI 中展示/复制/导出的 curl 命令。
+
+处理：
+
+- `renderPortsTable()` 中的 curl 验证命令改为使用 `activeValidationUrl()`。
+- `exportRows()` 中的 curl 导出也改为使用 `activeValidationUrl()`。
+- “查出口”仍保留固定出口 IP 查询目标。
+- 静态资源版本更新到 `20260605-curl-target-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 35 passed
+```
+
+## 代理列表导出格式去除注释并增加 SOCKS5 列表
+
+用户反馈：
+
+```text
+优化一下订阅导出的格式，不要在后面加一些奇奇怪怪的东西
+socks5://user:pass@192.168.1.1:1080
+http://192.168.1.1:8080
+这种标准格式每行一个
+```
+
+处理：
+
+- “HTTP 列表”导出改为每行一个标准 URI：
+  - `http://host:port`
+- 新增 “SOCKS5 列表”：
+  - `socks5://host:port`
+- 新增 “HTTP+SOCKS5”：
+  - 每个端口输出两行，分别是 HTTP 和 SOCKS5。
+- 去掉原来的尾部注释：
+  - 不再输出 `# 节点名 出口IP`。
+- CSV/JSON/curl 导出保留结构化字段。
+- 静态资源版本更新到 `20260605-export-clean-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 35 passed
+```
+
+## 分配界面增加一键清空端口分配
+
+用户反馈：
+
+```text
+分配界面需要有一个一键清空的按钮，清空原有的端口分配
+```
+
+处理：
+
+- “分配”页新增 `清空分配` 按钮。
+- 点击后：
+  - 清空所有端口输入框。
+  - 取消所有分配勾选。
+  - 调用 `PUT /api/assign` 保存空映射。
+  - 运行页端口表同步变为空。
+  - 状态栏刷新映射数量。
+- 清空后禁用分配表的“自动勾选可用节点”行为，避免刚清空又被 UI 自动勾回。
+- 静态资源版本更新到 `20260605-clear-assign-1`。
+- 新增测试：`test_api_assign_can_clear_mappings`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 36 passed
+```
+
+## 测试/分配/运行界面联动细节修复
+
+用户反馈：
+
+```text
+1. 测试界面只选可用按钮失灵，应让没通过的节点不出现在分配界面。
+2. 测试界面新增一键测试失败节点。
+3. 分配界面保存新映射后应自动重启引擎。
+4. 运行界面测试自定义 URL，刚点击有绿色，测完全部红色。
+5. 运行界面自定义 URL 验证结果太详细，破坏布局；需要能移除不想要的映射并重启引擎。
+```
+
+处理：
+
+- 测试页 `只选可用`：
+  - 选中测试通过节点。
+  - 设置分配页过滤器，只显示可用节点。
+  - 自动切换到分配页。
+- 测试页新增 `测试失败节点`：
+  - 只重新测速已有失败结果的节点。
+  - 不再需要重新测试全部节点。
+- 分配页保存映射：
+  - 继续复用后端 `PUT /api/assign` 的自动重启逻辑。
+  - 前端完成提示会明确显示 `已自动重启引擎` 或 `已停止引擎`。
+- 运行页验证状态：
+  - 增加 `validatingPorts` 状态。
+  - 验证中端口显示 `验证中`，不再沿用旧的绿色可用状态造成误解。
+- 运行页验证结果：
+  - 由大表格改成紧凑 chip 摘要。
+  - 只显示目标、成功/失败、状态码、耗时。
+  - 不再展示长响应体/错误文本撑破布局。
+- 运行页新增 `移除映射`：
+  - 端口行和验证结果卡片都可移除当前端口映射。
+  - 调用 `PUT /api/assign` 保存剩余映射。
+  - 如果引擎运行中，后端自动重启引擎。
+- 静态资源版本更新到 `20260605-flow-polish-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 36 passed
+```
+
+## curl 验证命令恢复简洁出口 IP 查询
+
+用户要求：
+
+```text
+把 curl --proxy "http://127.0.0.1:8006/" https://ipv4.webshare.io/ 恢复简洁模式
+```
+
+处理：
+
+- 前端新增固定常量：
+  - `EXIT_IP_CHECK_URL = "https://ipv4.webshare.io/"`
+- 运行页“curl 验证”列固定生成：
+  - `curl --proxy "http://host:port/" https://ipv4.webshare.io/`
+- 导出格式中的 curl 命令也固定使用 `https://ipv4.webshare.io/`。
+- 自定义验证 URL 仍只影响“验证”按钮和“验证全部端口”，不再影响表格里的简洁 curl。
+- 静态资源版本更新为 `20260605-curl-simple-1`。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+python -m pytest -q -> 35 passed
+测试前后 config/sing-box.json SHA256 一致 -> 测试不污染真实配置
+```
+
+## 启动引擎时报端口占用并伴随测速临时进程残留
+
+用户反馈：
+
+```text
+FATAL start service: start inbound/mixed[port-8001]:
+listen tcp4 0.0.0.0:8001: bind: Only one usage of each socket address...
+
+运行界面验证端口全部失败，提示引擎没开，然后打开不了。
+初步判断是上面几个功能修改造成的。
+```
+
+诊断：
+
+- 日志中先发现 `EngineManager.start()` 并发 `start/stop` 时出现：
+  - `AttributeError: 'NoneType' object has no attribute 'poll'`
+- 这是后端生命周期竞态：
+  - 前端新增“保存映射自动重启”“运行页移除映射”“测速失败节点”“验证任务”等功能后，请求更容易交错。
+  - 一个请求正在 `start()` 的 settle 阶段，另一个请求可能执行 `stop()` 并把 `self.process` 清空。
+- 现场还发现本项目 `config/sing-box-test.json` 的测速临时 sing-box 进程残留。
+- 同时 Windows 上 `8001-8004` 和 `10000` 没有显示监听进程，但 Python 直接 bind 也失败，说明端口已处于系统不可绑定状态。
+
+处理：
+
+- `EngineManager` 增加 `asyncio.Lock`：
+  - 串行化 `start()` / `stop()`。
+  - `start()` 使用局部 `proc` 检查进程状态，避免 `self.process` 被并发清空。
+- `EngineManager.start()` 新增启动前端口预检查：
+  - 解析 sing-box 配置中的 inbound `listen_port`。
+  - 同时解析 `experimental.clash_api.external_controller` 端口。
+  - 启动前最多等待 6 秒，直到端口可 bind。
+  - 如果仍不可用，返回明确错误：
+    - `Ports are not available: ...`
+  - 不再让 sing-box 半启动后抛 FATAL。
+- 正式引擎启动/运行中保存映射重启时，若节点测速任务正在运行，返回 409：
+  - 避免测速临时引擎与正式引擎生命周期互相踩。
+- 增加回归测试：
+  - 并发 `start/stop` 不再污染 `self.process`。
+  - 配置端口解析包含 inbound 和 clash API。
+  - 端口不可用时不会调用 `Popen` 拉起 sing-box。
+  - 节点测速运行中启动正式引擎会返回 409。
+
+验证：
+
+```text
+python -m pytest -q -> 40 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 端口容错增强与节点快速测速
+
+用户反馈：
+
+```text
+确实增加更多容错，比如端口是否占用等等问题。
+测速的我觉得有点问题，我在 v2ray 中测速很快，控制台测速慢的要死，测出来的速度也不准确。
+```
+
+诊断：
+
+- 原节点测速同时做了两件事：
+  - 访问 `https://www.gstatic.com/generate_204` 测响应。
+  - 继续访问多个出口 IP 查询站点。
+- 出口 IP 查询会被远端限流、超时或重置，导致普通测速被拖慢。
+- 节点多时原实现同时发起所有测试，容易造成本机 sing-box、系统端口和远端节点拥塞。
+- 原节点测速使用 SOCKS 代理路径，而运行页和用户 curl 主要使用 HTTP mixed 代理路径，测试路径不一致。
+
+处理：
+
+- 普通节点测速改为“快速 URL 延迟”：
+  - 默认只测 `https://www.gstatic.com/generate_204`。
+  - 自定义 URL 存在时只测自定义 URL。
+  - 不再默认查询出口 IP。
+  - 改用 HTTP mixed 代理路径：`http://127.0.0.1:port`。
+  - 单节点超时缩短到 5-6 秒。
+  - 并发限制为 12，避免大量节点同时压垮本地临时 sing-box。
+- `测速并按 IP 去重` 才额外查询出口 IP：
+  - 只有需要同出口 IP 去重时才付出出口 IP 查询成本。
+- 新增端口可用性 API：
+  - `POST /api/ports/check`
+  - 返回每个端口 `available/busy/invalid`。
+- 正式引擎未运行时，如果 Clash API 端口已被占用：
+  - 自动生成不带 `experimental.clash_api` 的 sing-box 配置。
+  - 代理端口优先启动，不再因为非核心控制端口被占用而整体失败。
+- 分配页“自动分配”改为异步分配可用端口：
+  - 调用 `/api/ports/check`。
+  - 自动跳过当前系统不可绑定端口。
+  - 可用端口不足时给出明确提示。
+- 静态资源版本更新为：
+  - `20260605-speed-port-guard-1`
+
+验证：
+
+```text
+python -m pytest -q -> 43 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 端口分配深度容错与状态语义整理
+
+用户反馈：
+
+```text
+10000 原来就是配置文件中的值，现在说它忙碌？
+状态太混乱，bug 太多，尤其是端口分配上：
+一不能清楚，二不能自己避让，需要深刻优化。
+```
+
+问题：
+
+- `10000` 是 `config/app.json` 中的 Clash API 控制端口，不是代理映射端口。
+- Windows 返回 `10000` 不可绑定时，旧 UI 只显示 busy，未解释它是控制端口。
+- 前端原“自动分配”只是从起始端口递增，无法真正知道系统是否可绑定。
+- 清空分配后，前端仍可能保留分配筛选、验证结果、验证中状态，造成“看起来没清干净”。
+
+处理：
+
+- `/api/ports/check` 的状态语义细化：
+  - `available`：可绑定。
+  - `busy`：系统不可绑定。
+  - `reserved-clash-api`：配置中的 Clash API 控制端口，不能分配给代理。
+  - `project-listening`：本项目引擎正在监听。
+  - `invalid`：端口非法。
+- 新增 `/api/ports/allocate`：
+  - 后端从起始端口开始扫描。
+  - 自动跳过已使用端口。
+  - 自动跳过 `reserved-clash-api`。
+  - 自动跳过系统不可绑定端口。
+  - 返回实际分配端口和被避让端口详情。
+- 前端“自动分配”改为调用 `/api/ports/allocate`：
+  - 不再自己猜端口。
+  - 成功后提示避让了多少不可用端口。
+- 前端“清空分配”增强：
+  - 清空端口输入。
+  - 清空端口映射。
+  - 清空验证结果。
+  - 清空验证中状态。
+  - 解除“只显示可用节点”的分配过滤。
+- Web 后端重启后，如果检测到已有本项目 sing-box 进程：
+  - 状态仍显示运行中。
+  - 不再把 `project sing-box process detected` 塞进 `last_error`，避免误导为异常。
+- 静态资源版本更新为：
+  - `20260605-port-allocator-1`
+
+验证：
+
+```text
+python -m pytest -q -> 44 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 清空分配后无法再次自动分配
+
+用户反馈：
+
+```text
+分配界面，点击清除分配后，无法再分配端口
+```
+
+根因：
+
+- 清空分配时前端会取消所有节点勾选。
+- 自动分配只处理已勾选且没有端口的节点。
+- 所以清空后再点自动分配，会出现没有目标节点可分配的状态。
+
+处理：
+
+- 自动分配增强：
+  - 如果当前没有已勾选目标，自动选择当前分配表中的可用节点。
+  - 如果没有可用节点，则选择当前分配表中的全部节点。
+  - 再调用后端 `/api/ports/allocate` 分配可用端口。
+- 静态资源版本更新为：
+  - `20260605-auto-assign-after-clear-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 44 passed
+```
+
+## 集成 ProxyAdmin 质量检测 API
+
+用户要求：
+
+```text
+了解 proxy-port-api 的接口，内容可靠。
+集成到运行界面，参数暴露给用户填写，并把返回结果好好展示。
+```
+
+文档确认：
+
+- `import(urls, replace?)`
+  - 导入 HTTP 代理端口。
+  - 返回 `url / host / port / id`。
+- `query(ids, concurrency?)`
+  - 对 ID 做质量检测。
+  - 逐个返回检测结果。
+  - 包含 `exit_ip / country / score / grade / items[]`。
+- `remove(options, concurrency?)`
+  - 删除指定 ID、失败节点或未使用节点。
+
+处理：
+
+- 后端新增 ProxyAdmin 集成接口：
+  - `POST /api/proxy-admin/check/start`
+  - `GET /api/proxy-admin/jobs/{job_id}`
+  - `POST /api/proxy-admin/remove`
+- 后端直接用 Python `httpx` 调用 ProxyAdmin HTTP API，不依赖 Node 运行时。
+- 运行界面新增 ProxyAdmin 检测区域，暴露参数：
+  - API 地址
+  - Bearer Token
+  - 代理 Host
+  - 替换 From
+  - 替换 To
+  - 并发数
+- 支持操作：
+  - 导入并检测
+  - 重试失败
+  - 删除失败
+  - 删除未使用
+- 检测结果展示：
+  - ID
+  - host:port
+  - 出口 IP
+  - 国家
+  - score
+  - grade
+  - 每个 target 的 `pass / warn / fail`、HTTP 状态码、延迟、message
+- 结果按 job 轮询更新，一个结果返回一个结果展示。
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-1`
+
+验证：
+
+```text
+python -m pytest -q -> 46 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 结果合并到端口表
+
+用户反馈：
+
+```text
+功能可以，显示不行。
+需要将 proxyAdminResults 集成到 id="portsTable"，集成到它们自己对应的行。
+现在太乱了，错误折叠展开破坏布局。
+```
+
+处理：
+
+- 前端新增端口级索引：
+  - 根据 `proxyAdminImported[].port` 与 `proxyAdminResults[id]` 建立映射。
+- `portsTable` 新增 `ProxyAdmin` 列：
+  - 每个端口行直接展示对应质量检测结果。
+  - 展示 `grade / score / exit_ip / country`。
+  - 目标检测以短标签展示：
+    - `base`
+    - `oa`
+    - `claude`
+    - `gemini`
+  - `pass / warn / fail` 用颜色区分。
+- 详细错误不再展开成大块内容：
+  - 放入行内 `title` tooltip。
+  - 避免撑破表格和移动端布局。
+- 原独立结果区改成紧凑摘要：
+  - 通过数量
+  - 失败数量
+  - 提示“详细结果已合并到端口表”
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-inline-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 46 passed
+```
+
+## 保存 ProxyAdmin 检测配置
+
+用户反馈：
+
+```text
+优化一下保存配置，ProxyAdmin 检测的配置，api，token 等，不然每次都要重新输入
+```
+
+处理：
+
+- 后端新增配置接口：
+  - `GET /api/proxy-admin/config`
+  - `PUT /api/proxy-admin/config`
+- 配置保存到 `config/app.json` 的 `proxy_admin` 子对象。
+- 保存内容：
+  - `base_url`
+  - `token`
+  - `proxy_host`
+  - `replace_from`
+  - `replace_to`
+  - `concurrency`
+- 写入时保留 `app.json` 原有字段，例如：
+  - `host`
+  - `port`
+  - `proxy_listen_host`
+  - `clash_api_addr`
+- 前端运行页：
+  - 页面加载自动读取并回填 ProxyAdmin 配置。
+  - 新增 `保存配置` 按钮。
+  - 执行导入检测、重试失败、删除失败、删除未使用前会自动保存当前配置。
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-config-1`
+
+验证：
+
+```text
+python -m pytest -q -> 47 passed
+node --check static/app.js -> passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 配置与结果展示细节优化
+
+处理：
+
+- CSS 静态资源版本从旧的 `20260605-flow-polish-1` 更新到：
+  - `20260606-proxy-admin-config-1`
+  - 避免浏览器继续缓存旧样式。
+- 删除失败节点后：
+  - 前端同步移除已删除 ID 对应的 ProxyAdmin 结果。
+  - 端口表立即刷新，不再残留旧失败状态。
+- 删除未使用节点后：
+  - 如果返回 ID 命中当前展示结果，也同步清理。
+- ProxyAdmin 配置区新增提示：
+  - 配置保存到本机 `config/app.json`。
+  - 如果 Web 面板暴露到公网，不建议保存长期有效 Token。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 47 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 运行表排序与行内删除
+
+用户反馈：
+
+```text
+运行界面 ProxyAdmin 检测测试后，等级和分数高的，能通过的，放前面，fail 的放后面。
+curl SOCKS 按钮去掉，换成移除代理，点击会删除远端的数据，调用删除接口。
+```
+
+处理：
+
+- 运行页端口表排序新增 ProxyAdmin 优先级：
+  - 已通过检测的端口排最前。
+  - 同为通过时按等级 `A/B/C/D/F` 排序。
+  - 同等级按分数高低排序。
+  - 失败或包含失败目标的结果排最后。
+  - 没有 ProxyAdmin 检测结果的端口放在通过和失败之间，并继续按本地延迟排序。
+- 移除端口表里的 `curl SOCKS` / `socks5h://...` 复制按钮。
+- 新增 `移除代理` 按钮：
+  - 按当前端口找到对应 ProxyAdmin 导入 ID。
+  - 调用 `/api/proxy-admin/remove` 删除远端代理。
+  - 成功后同步清理当前页面中的 ProxyAdmin 检测结果和导入记录。
+  - 不删除本地端口映射，避免误伤本地分配。
+- 静态资源版本更新为：
+  - `20260606-proxy-admin-actions-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+```
+
+## GeoIP 地区检测
+
+用户希望在测试阶段兼顾性能和准确性地检测地区。
+
+处理：
+
+- 新增 `app/geoip.py`：
+  - 使用在线 `ip-api.com` 查询国家、城市、ASN、运营商。
+  - 跳过内网、保留地址等非公网 IPv4。
+  - 结果缓存到状态文件，默认 TTL 为 168 小时。
+  - 查询失败只记录错误，不影响测速主流程。
+- 状态模型新增：
+  - `LatencyResult.geoip`
+  - `ExitIpCache.geoip`
+  - `AppState.geoip_cache`
+- 后端接入：
+  - 节点测速拿到出口 IP 后调度后台 GeoIP 查询。
+  - 端口验证拿到出口 IP 后附带已缓存地区，并触发后台查询。
+  - 单独“查出口”接口会同步查询 GeoIP，方便立即看到地区。
+- 前端展示：
+  - 节点测试表新增地区列。
+  - 分配表新增地区列。
+  - 运行端口表新增地区列。
+  - 导出 JSON/CSV 增加 `geoip` 字段。
+- 静态资源版本更新为：
+  - `20260606-geoip-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 51 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 临时测速端口占用修复
+
+问题：
+
+```text
+Ports are not available: 19001, 19002, ...
+```
+
+说明：
+
+- `19001+` 不是用户分配给账号使用的映射端口。
+- 它们是节点测速时临时 sing-box 使用的内部端口。
+- 正常情况下测速完成后会自动停止，不应该长期占用。
+
+原因：
+
+- 如果上一次测速的临时 sing-box 残留，下一次测速可能遇到 `19001+` 占用。
+- 原端口探测只检查单一绑定场景，和 sing-box 启动前的端口检查不完全一致，可能误判端口可用。
+
+处理：
+
+- 每次节点测速前，先清理 `sing-box-test.json` 对应的残留临时 sing-box。
+- 测速临时端口分配时同时检查：
+  - `0.0.0.0`
+  - `127.0.0.1`
+- 如果某个 `19001+` 被占用，会自动跳过，不会影响用户映射端口池。
+
+验证：
+
+```text
+python -m pytest tests/test_tester.py tests/test_api.py -q -> 40 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 节点测试表长错误和出口 IP 展示优化
+
+问题：
+
+```html
+<span class="latency-pill latency-unknown">http://cp.cloudflare.com/generate_204: HTTP 502; ...</span>
+```
+
+以及节点测试表只显示地区，看不到出口 IP。
+
+处理：
+
+- 延迟列失败时只显示 `失败`，不再把完整错误塞进小标签。
+- 完整错误保留在 `title`，鼠标悬停可查看。
+- 节点测试表新增 `出口 IP` 列。
+- 运行验证表的延迟列也加上相同的 hover 详情。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 64 passed
+```
+
+## ProxyAdmin 名称前缀去重和补空位
+
+问题：
+
+```text
+名称前缀不能重复。远端如果已有代理12/代理13，或者删除了代理12，下次新增不能和已有名称冲突。
+```
+
+处理：
+
+- ProxyAdmin 上传前先拉取远端代理列表。
+- 按当前 `名称前缀` 提取已有编号。
+- 新增名称使用最小可用编号，并追加地区后缀：
+  - `代理1-jp.Tokyo`
+  - `代理2-US.LosAngeles`
+  - `代理3-none`
+- 已有名称会按编号占位：
+  - 已有 `代理1-jp.Tokyo, 代理2-US.LosAngeles, 代理4-none` -> 新增先用 `代理3-...`
+  - 已有 `代理12-US.xx, 代理13-JP.xx` -> 不会重复使用 `代理12/代理13`
+  - 删除了 `代理12-...` 但 `代理13-...` 还在 -> 下次可补 `代理12-...`
+- 地区后缀来源：
+  - 优先使用端口对应节点的 GeoIP。
+  - 有国家和城市：`国家.城市`
+  - 只有国家：`国家`
+  - 没有地区：`none`
+- 自定义前缀单独计算，不受其他前缀影响。
+- 创建后如果远端返回的名称仍是 `default` 或不是期望名称：
+  - 自动尝试 `PUT /api/v1/admin/proxies/{id}` 更新名称。
+  - 如果 `PUT` 不可用，再尝试 `PATCH /api/v1/admin/proxies/{id}`。
+  - 更新失败不影响整批检测，但会在导入结果中记录 `name_update_error`。
+
+验证：
+
+```text
+python -m pytest tests/test_api.py tests/test_proxy_admin.py -q -> 33 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 节点测速出口 IP 和地区空白修复
+
+问题：
+
+```text
+测速界面查询地区和出口 IP 没有生效，结果全是空白。
+```
+
+原因：
+
+- 前端已传 `include_geoip=true`，问题不在开关。
+- 出口 IP 查询直接使用响应正文，遇到 `Found`、HTML、空响应或非 IP 文本时，容易得不到有效 IP。
+- GeoIP 查询之前是后台异步补充，测速任务刚完成时前端立即刷新，可能还没写回 `job.results`。
+
+处理：
+
+- 新增 `extract_public_ipv4()`：
+  - 从响应正文中提取 IPv4。
+  - 跳过内网、回环、保留地址和无效文本。
+  - 当前查询服务无有效 IP 时自动尝试下一个出口 IP 服务。
+- 节点测速任务在 `include_geoip=true` 时，会在任务完成前同步补齐 GeoIP，并更新 `job.results`。
+- 前端最终拿到的测速结果会直接包含：
+  - `exit_ip`
+  - `geoip`
+
+验证：
+
+```text
+python -m pytest tests/test_api.py tests/test_tester.py -q -> 40 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 自动分配端口后输入框被清空修复
+
+问题：
+
+```text
+分配端口提示已分配成功，但分配表里看不见端口。
+```
+
+原因：
+
+- 自动分配端口时，端口先写入当前页面的输入框。
+- 这时映射还没有点击保存，内存里的 `ports` 状态仍是旧状态。
+- 之前为了立即排序，在自动分配后调用了 `renderAssignTable()`。
+- 表格重绘时从旧 `ports` 状态读取端口，导致刚写入输入框的未保存端口被清空。
+
+处理：
+
+- 取消自动分配后的即时重绘。
+- 自动分配结果保留在输入框中，用户点击保存映射后再由后端状态刷新并排序。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 63 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## GeoIP 覆盖率与布局修复
+
+用户反馈：
+
+```text
+地区很多没有显示，7 个只有 1 个显示了地区；结果太长破坏布局。
+```
+
+原因：
+
+- 端口验证自定义 URL 时，如果目标页面不是 IP 查询接口，响应体里不会包含出口 IP。
+- 没有出口 IP 就无法查询 GeoIP，所以只有之前查过出口 IP 或命中缓存的少数端口显示地区。
+- 前端直接显示完整地区、ASN、运营商文本，容易撑宽表格。
+
+处理：
+
+- 端口验证成功但没有解析到出口 IP 时，兜底调用已有出口 IP 查询逻辑。
+- 兜底查询增加 3 秒超时，避免某个端口拖慢整个批量验证。
+- `/api/ports` 发现已有出口 IP 但没有 GeoIP 时，会触发后台补查。
+- GeoIP 结果增加：
+  - `summary`：完整说明，用于 hover title。
+  - `compact`：短格式，用于表格显示。
+- 前端地区列改成短标签，例如：
+  - `US · Mountain View · Google`
+  - `JP · Tokyo`
+  - `未知`
+- CSS 限制地区标签最大宽度，超出省略，完整信息放 hover。
+- 静态资源版本更新为：
+  - `20260606-geoip-compact-1`
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 52 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## Cloudflare 204 主测速与自动回退
+
+用户提供新测速命令：
+
+```text
+curl -o /dev/null -s -w "... timing ..." http://cp.cloudflare.com/generate_204
+```
+
+验证：
+
+- 当前机器直连 `http://cp.cloudflare.com/generate_204`：
+  - HTTP 204
+  - total 约 0.44s
+- 当前机器直连旧 `https://www.gstatic.com/generate_204`：
+  - HTTP 000
+  - 该环境下不如 Cloudflare 稳定
+
+处理：
+
+- 新增主测速 URL：
+  - `http://cp.cloudflare.com/generate_204`
+- 节点测速默认顺序改为：
+  - Cloudflare 204
+  - gstatic 204
+  - Google 204
+- 默认端口验证 URL 把 Cloudflare 204 放到第一位。
+- 如果主测速 URL 失败：
+  - 自动尝试备用 URL。
+  - 控制台输出 `[测速] primary test URL failed; switched to ...`。
+  - 返回结果记录 fallback notice，便于排查。
+- 自定义 URL 不使用 fallback，保持用户指定目标的精确验证语义。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 54 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 节点测速目标选择与多目标综合排序
+
+用户反馈：
+
+```text
+测速界面有好几个测速按钮是否都替换成新的测速逻辑？
+保留几个测速链接，测速界面用户可以自己选择测速链接作为本次测速。
+不选择默认 http://cp.cloudflare.com/generate_204。
+如果用户选择多种测速，需要统计不同的延迟，综合排序。
+```
+
+处理：
+
+- 测试页新增“测速链接”多选框：
+  - Cloudflare 204：`http://cp.cloudflare.com/generate_204`
+  - gstatic 204：`https://www.gstatic.com/generate_204`
+  - Google 204：`https://www.google.com/generate_204`
+- 自定义测速 URL 仍保留，可以和内置目标一起参与本次测速。
+- 不选择任何测速链接、也不填写自定义 URL 时：
+  - 默认使用 Cloudflare 204。
+  - 如果失败，自动 fallback 到 gstatic / Google。
+- 选择一个或多个测速链接时：
+  - 严格按用户选择的目标测试。
+  - 多目标会保存每个目标的状态、HTTP 状态码和延迟。
+  - 节点表显示 `成功 x/y · 平均 nms`。
+- 综合排序规则：
+  - 可用节点排前。
+  - 多目标成功数量越多越靠前。
+  - 成功数量相同，平均延迟越低越靠前。
+  - 失败节点排后。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 56 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 测试页 UX 打磨
+
+用户反馈：
+
+```text
+测试界面还是需要打磨优化，nodeTestTargets 这部分显示不行。
+前面找个地方显示多少节点可用、不可用的总览信息，不然用户要向下翻。
+```
+
+处理：
+
+- 测试页顶部新增结果总览：
+  - 总节点
+  - 可用
+  - 失败
+  - 未测
+  - 测速中
+  - 平均延迟
+  - 本次测速目标
+- 原生多选框改为更紧凑的目标 chip：
+  - Cloudflare
+  - gstatic
+  - Google
+- 操作按钮拆到独立按钮区，减少和输入控件混在一起的视觉噪音。
+- 自定义测速 URL 保留，目标 chip 和自定义 URL 会实时更新“本次目标”总览。
+- 手机端：
+  - 汇总区自动两列排列。
+  - 目标 chip 和按钮自动换行。
+  - 避免横向挤出屏幕。
+- 静态资源版本更新为：
+  - `20260606-test-ux-1`
+
+验证：
+
+```text
+GET / -> contains 20260606-test-ux-1, nodeTestOverview, node-target-check
+node --check static/app.js -> passed
+python -m pytest -q -> 56 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 测试页出口与地区查询开关
+
+用户反馈：
+
+```text
+地区很多时候没有正确显示，兼顾速度和完整信息。
+```
+
+处理：
+
+- 测试页新增默认开启的 `出口/地区` 开关。
+- 普通节点测速：
+  - 开启时：测速成功后同时查询出口 IP，并触发 GeoIP 地区查询。
+  - 关闭时：只测目标 URL 延迟，速度更快。
+- `测速并按 IP 去重` 仍然强制查询出口 IP，保证去重逻辑可靠。
+- 顶部总览新增“地区模式”：
+  - `查出口/地区`
+  - `只测速`
+- API 新增 `include_geoip` 参数，兼容旧 `prune_same_ip` 逻辑。
+- 静态资源版本更新为：
+  - `20260606-test-geo-toggle-1`
+
+验证：
+
+```text
+GET / -> contains 20260606-test-geo-toggle-1, nodeTestGeo, 出口/地区
+node --check static/app.js -> passed
+python -m pytest -q -> 57 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 获取最快可用代理 API
+
+用户需求：
+
+```text
+添加一个 api，访问可以获得一个最快可用的代理
+```
+
+处理：
+
+- 新增接口：
+  - `GET /api/proxy/fastest`
+- 默认只在引擎运行且映射端口 ready 时返回代理，避免返回实际不可连接的端口。
+- 可选参数：
+  - `scheme=http|socks5`，默认 `http`
+  - `require_running=true|false`，默认 `true`
+- 选择规则：
+  - 只从已分配端口里选择。
+  - 只选择最近测速可用的节点。
+  - 多目标测速时，目标成功数量多的优先。
+  - 成功数量相同，延迟低的优先。
+  - 延迟相同，端口小的优先。
+- 返回内容包括：
+  - `proxy`
+  - `http_proxy`
+  - `socks5_proxy`
+  - `host`
+  - `port`
+  - `node_tag`
+  - `node_name`
+  - `delay`
+  - `exit_ip`
+  - `geoip`
+  - `latency`
+
+示例：
+
+```text
+GET /api/proxy/fastest
+GET /api/proxy/fastest?scheme=socks5
+GET /api/proxy/fastest?require_running=false
+```
+
+验证：
+
+```text
+python -m pytest -q -> 59 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 最快代理 API 状态同步修复
+
+问题：
+
+```text
+api 能正常运行但是无法拉取最新的引擎和最新节点信息
+```
+
+原因：
+
+- 服务启动时只加载一次 `config/assignments.json` 到内存。
+- 如果节点、映射、测速缓存被其他流程或重启后的新实例写入文件，当前进程里的 `/api/nodes`、`/api/ports`、`/api/proxy/fastest` 仍可能读取旧快照。
+- `/api/proxy/fastest` 之前只返回代理和简要节点字段，外部调用方无法直接看到本次选择时的引擎状态和完整节点摘要。
+
+处理：
+
+- 增加状态文件热同步：
+  - `GET /api/status`
+  - `GET /api/nodes`
+  - `GET /api/ports`
+  - `GET /api/proxy/fastest`
+- 读取接口执行前检查 `assignments.json` 修改时间；如果文件比内存新，就自动重载到当前进程。
+- `/api/proxy/fastest` 响应新增：
+  - `node`：完整节点摘要，不包含 sing-box outbound 原始配置。
+  - `engine`：当前引擎状态。
+  - `state_updated_at`：状态文件更新时间。
+  - `state_refreshed`：本次请求是否触发了状态文件重载。
+
+验证：
+
+```text
+python -m pytest tests/test_api.py -q -> 28 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 分配界面端口排序
+
+问题：
+
+```text
+分配界面也需要自动按端口大小排序
+```
+
+处理：
+
+- 分配表渲染时按端口数值升序排序。
+- 已分配端口的节点排在前面，未分配节点排在后面并保持原节点顺序。
+- 自动分配新端口后立即重新渲染分配表，让新增端口顺序马上生效。
+- 前端收集映射时按端口升序提交。
+- 后端 `/api/assign` 保存和返回映射时也按端口升序，保证 API、状态文件和界面顺序一致。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest tests/test_api.py -q -> 29 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 管理与本地检测模块边界整理
+
+问题：
+
+```text
+ProxyAdmin 和本地 proxycheck-api 都有检测能力，如果混在一个流程里，后续会很难删除或替换其中任意一块。
+```
+
+处理：
+
+- 新增 `app/proxy_check.py`：
+  - 调用本地 `proxycheck-api/proxycheck.exe` 或 Linux 下的 `proxycheck-api/proxycheck`。
+  - 支持通过 `PROXYCHECK_BIN` 指定自定义二进制路径。
+  - Linux 部署时如果没有无扩展名二进制，需要在 `proxycheck-api` 目录执行 `go build -o proxycheck ./cmd/proxycheck`。
+  - 将本地检测结果规范化为前端已有的 `score`、`grade`、`exit_ip`、`country`、`items` 结构。
+- `app/proxy_admin.py` 保留 ProxyAdmin 远端职责：
+  - 拉取远端代理列表。
+  - 创建代理。
+  - 修正远端名称。
+  - 删除代理。
+  - 调用远端 `/quality-check`。
+- `/api/proxy-admin/check/start` 的流程改为：
+  - 先上传代理到 ProxyAdmin。
+  - 上传成功后，使用 ProxyAdmin 远端 `/quality-check` 检测。
+- `重试失败` 改为 `check_only` 模式：
+  - 前端传入失败端口和已有 `port -> ProxyAdmin id` 映射。
+  - 后端跳过远端上传，只对已有远端 id 重跑 ProxyAdmin 远端质量检测。
+  - 避免失败重试时在 ProxyAdmin 里重复创建代理。
+- 本地 `proxycheck-api` 检测模块暂时独立保留，后续应接到单独的本地检测区域，不混入 `proxy-admin-box`。
+- 运行页 section-head 新增本地检测入口：
+  - 端口下拉框自动使用当前映射端口。
+  - `检测` 按钮调用 `POST /api/proxy-check`。
+  - `一键本地检测` 按当前端口排序并发检测全部映射端口，测完一个更新一行。
+  - 后端通过本地 `proxycheck-api` 检测 `http://127.0.0.1:{port}/`。
+  - 本地检测结果写入端口表 `ProxyAdmin` 列，和远端 ProxyAdmin 结果分层展示。
+  - 端口表会按本地检测结果排序：通过优先，未检测居中，失败/ERR 放后面。
+  - 结果紧凑展示 `grade / score / exit_ip / country` 和 `gpt / claude / gemini` 状态。
+  - 长错误信息只展示短摘要，完整内容保留在 hover title，避免 TLS 证书错误等长文本撑坏布局。
+  - 检测前先检查 `127.0.0.1:{port}` 是否监听；未监听直接返回 `ERR` 和明确原因，避免显示误导性的 `B / 78`。
+
+本地验证：
+
+```text
+proxycheck-api\proxycheck.exe -proxy http://127.0.0.1:8001/ -json -timeout 30
+-> score 100, grade A, exit_ip 108.181.23.255, country 美国/US
+
+python adapter check_proxy_quality("http://127.0.0.1:8001/", 8001, 30)
+-> 8001 A 100 108.181.23.255 美国
+```
+
+验证：
+
+```text
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+proxycheck-api\proxycheck.exe -h -> passed
+```
+
+## Linux proxycheck 二进制构建修复
+
+问题：
+
+```text
+base_connectivity: fail -ms proxycheck binary not found.
+Build it with `go build -o proxycheck ./cmd/proxycheck` inside proxycheck-api, or set PROXYCHECK_BIN.
+```
+
+原因：
+
+- 仓库里提交的是 Windows `proxycheck-api/proxycheck.exe`。
+- Linux 不能执行 `.exe`，后端会查找 `proxycheck-api/proxycheck`。
+- Linux 服务器没有这个无扩展名二进制时，本地检测不可用。
+
+处理：
+
+- `scripts/install-linux.sh` 新增自动构建：
+  - 如果 `proxycheck-api/proxycheck` 已存在则跳过。
+  - 如果系统有 `go`，执行 `go build -o proxycheck ./cmd/proxycheck`。
+  - 如果没有 Go，输出明确安装/构建提示。
+- `app/proxy_check.py` 增加运行时兜底：
+  - 找不到平台二进制时，如果系统有 `go`，自动构建一次。
+  - 仍支持 `PROXYCHECK_BIN` 指定外部二进制。
+- README 和 `docs/operation.md` 补充 Linux proxycheck 构建说明。
+
+验证：
+
+```text
+proxycheck-api\proxycheck.exe -h -> passed
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## Linux proxycheck 执行权限修复
+
+问题：
+
+```text
+[Errno 13] Permission denied: '/home/dsk/proxy-pool-manager/proxycheck-api/proxycheck'
+```
+
+原因：
+
+- Linux 二进制文件存在，但没有执行位。
+- Windows 上提交二进制时容易保留为 `100644`，Linux 运行时无法执行。
+
+处理：
+
+- Git 文件模式设置为 `100755`：
+  - `proxycheck-api/proxycheck`
+  - Linux 服务脚本
+- `app/proxy_check.py` 在 Linux 下找到二进制后会尝试自动补 `+x` 执行位，作为运行时兜底。
+
+验证：
+
+```text
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## Doctor 自检脚本
+
+目标：
+
+- 快速定位安装、权限、二进制、服务和端口监听问题。
+- Linux/Windows 都能运行，不依赖 Web UI。
+
+处理：
+
+- 新增 `scripts/doctor.sh`：
+  - 检查 `python3`、`.venv`、`requirements.txt`、`config/app.json`。
+  - 检查 `bin/sing-box`、`proxycheck-api/proxycheck` 是否存在且可执行。
+  - 检查 `tmp/server.pid`、`/api/status`、项目 sing-box 进程。
+  - 输出 `running/ready/listening/expected/missing ports` 摘要。
+- 新增 `scripts/doctor.ps1`：
+  - Windows 下检查 Python、venv、sing-box.exe、proxycheck.exe、Web API 和项目 sing-box 进程。
+- README 和 `docs/operation.md` 增加自检命令。
+
+验证：
+
+```text
+bash -n scripts/doctor.sh -> passed
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/doctor.ps1 -> fail=0
+python -m pytest -q -> 72 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## 本地 proxycheck 后台任务
+
+目标：
+
+- “全部检测”不再由前端逐个请求端口。
+- 后端统一管理本地检测进度和结果，前端轮询任务。
+
+处理：
+
+- 新增后端模型 `LocalProxyCheckJob`。
+- 新增接口：
+  - `POST /api/proxy-check/start`
+  - `GET /api/proxy-check/jobs/{job_id}`
+- 后端任务支持：
+  - 默认检测全部映射端口。
+  - 端口去重并按端口号排序。
+  - 并发上限 10，默认 3。
+  - 单端口失败不会中断整批，失败结果写入对应端口。
+- 前端“全部检测”改为启动后台任务并轮询：
+  - 测完一个端口就更新表格对应行。
+  - 任务完成后统计通过/失败数量。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## 引擎与端口监听状态增强
+
+目标：
+
+- 避免“显示运行中但端口连不上”的状态误导。
+- 在运行页直接看到期望端口、实际监听端口、缺失端口和配置一致性。
+
+处理：
+
+- `/api/status` 增加字段：
+  - `missing_ports`
+  - `expected_count`
+  - `listening_count`
+- 运行页新增 `engineHealth` 状态条：
+  - 期望端口数。
+  - 实际监听数。
+  - 缺失端口摘要。
+  - 配置是否一致。
+- 新增 `重启修复` 按钮：
+  - 当配置不一致、缺失端口或引擎未 ready 时显示。
+  - 点击后执行 stop -> start -> refresh。
+  - 重启后仍缺失端口会直接提示缺失列表。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## 检测错误摘要标准化
+
+目标：
+
+- 防止 TLS 证书错误、连接错误、超时错误等长文本破坏页面布局。
+- 保留完整错误用于排查。
+
+处理：
+
+- 前端统一使用 `compactCheckMessage()`：
+  - 节点测速目标结果。
+  - 端口验证结果卡片。
+  - ProxyAdmin 行内失败结果。
+  - 本地 proxycheck 行内失败结果。
+  - 全局 notice 错误提示。
+- 常见错误会映射成短中文摘要：
+  - TLS 证书不匹配。
+  - 本地端口未监听或连接被拒绝。
+  - 请求超时。
+  - 代理连接失败。
+- 完整错误保留在 `title`，鼠标悬停可看。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## 运行页 UI 分区整理
+
+目标：
+
+- 避免运行页 section-head 堆积过多按钮。
+- 保持 ProxyAdmin 区域独立，方便未来删除或替换。
+
+处理：
+
+- 运行页拆成三个工具区：
+  - `引擎控制`：启动、停止、重启修复。
+  - `本地检测`：端口选择、单端口检测、全部检测、最近结果。
+  - `验证与导出`：自定义 URL、验证全部端口、导出格式、生成导出。
+- `ProxyAdmin 检测` 保持独立 `proxy-admin-box`。
+- 增加响应式布局：
+  - 桌面三列。
+  - 平板两列，验证与导出占满一行。
+  - 手机单列。
+
+验证：
+
+```text
+python -m pytest -q -> 73 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## 本地检测结果持久化
+
+目标：
+
+- 页面刷新或服务重启后保留本地 proxycheck 检测结果。
+- 端口表继续按上次检测结果排序和展示。
+
+处理：
+
+- `AppState` 增加 `local_proxy_check_results`。
+- `POST /api/proxy-check` 单次检测成功后写入 state。
+- `POST /api/proxy-check/start` 后台任务每完成一个端口就写入 state。
+- `GET /api/ports` 返回：
+  - 每个端口的 `local_proxy_check`。
+  - 当前映射端口过滤后的 `local_proxy_checks`。
+- 前端刷新时从 `/api/ports` 恢复 `localProxyCheckResults`。
+
+验证：
+
+```text
+python -m pytest -q -> 74 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## 长任务取消机制
+
+目标：
+
+- 本地检测、节点测速、端口验证、ProxyAdmin 检测开始后可以取消。
+- 已完成的结果保留，未完成的任务尽快停止。
+
+处理：
+
+- 新增取消接口：
+  - `POST /api/test/jobs/{job_id}/cancel`
+  - `POST /api/test-ports/jobs/{job_id}/cancel`
+  - `POST /api/proxy-check/jobs/{job_id}/cancel`
+  - `POST /api/proxy-admin/jobs/{job_id}/cancel`
+- 任务状态新增运行时状态：
+  - `canceling`
+  - `canceled`
+- 本地 proxycheck 后台任务、端口验证、ProxyAdmin 检测循环都会检查取消标记。
+- 节点测速底层 `test_nodes_with_temporary_engine` 增加 `should_cancel`，取消时停止等待剩余节点并关闭临时 sing-box。
+- 前端新增取消按钮：
+  - 节点测试页：取消测速。
+  - 运行页本地检测：取消。
+  - 运行页验证与导出：取消验证。
+  - ProxyAdmin 检测：取消检测。
+
+验证：
+
+```text
+python -m pytest -q -> 75 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## Web 系统自检
+
+目标：
+
+- 在运行界面直接触发现有 doctor 自检，减少切换到命令行排查环境问题的成本。
+- 复用 `scripts/doctor.ps1` 和 `scripts/doctor.sh`，避免 Web API 与脚本维护两套检查逻辑。
+
+处理：
+
+- 新增 `POST /api/doctor`：
+  - Windows 执行 `scripts/doctor.ps1`。
+  - Linux/macOS 执行 `scripts/doctor.sh`。
+  - 返回 `ok`、`warn`、`fail`、`summary`、`lines`、`exit_code`、`timed_out`、`command`。
+  - 默认 30 秒超时，接口层限制在 5-120 秒。
+- 运行页新增“系统自检”工具：
+  - 点击后显示运行状态。
+  - 自检完成后展示 OK/WARN/FAIL 计数和关键行。
+  - 长错误放入 hover title，页面只显示紧凑摘要，避免破坏布局。
+
+验证：
+
+```text
+python -m pytest -q -> 77 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\doctor.ps1 -> ok=7 warn=2 fail=0
+```
+
+## 订阅定时刷新基础能力
+
+目标：
+
+- 保存订阅 URL 和自动刷新间隔。
+- 支持 Web 界面手动刷新订阅。
+- 服务运行期间按间隔后台刷新订阅，更新节点信息。
+- 刷新过程不自动删除旧节点、不打乱端口映射，避免订阅临时异常影响现有可用代理。
+
+处理：
+
+- `AppState` 新增订阅刷新状态：
+  - `subscription_refresh_interval_minutes`
+  - `subscription_last_refresh_at`
+  - `subscription_last_error`
+  - `subscription_last_count`
+- 新增 API：
+  - `GET /api/subscription`
+  - `PUT /api/subscription`
+  - `POST /api/subscription/refresh`
+- `/api/status` 返回 `subscription` 摘要，前端刷新后恢复订阅配置。
+- 后端增加订阅刷新循环：
+  - 仅在订阅 URL 存在且间隔大于 0 时启用。
+  - 手动刷新和定时刷新共用锁，避免并发写状态文件。
+  - 刷新成功时按 tag 更新已有节点、追加新节点。
+  - 刷新失败时记录 `subscription_last_error`。
+- 导入页新增：
+  - 自动刷新分钟数。
+  - 保存订阅。
+  - 立即刷新。
+  - 订阅状态摘要。
+
+验证：
+
+```text
+python -m pytest -q -> 79 passed
+python -m compileall -q main.py app tests -> passed
+node --check static/app.js -> passed
+```
+
+## ProxyAdmin 容错、最快代理实时验证、状态展示与安装整理
+
+处理内容：
+
+- ProxyAdmin 调用拆到 `app/proxy_admin.py`，减少 `app/api.py` 里直接堆叠外部 API 细节。
+- ProxyAdmin 单个代理上传失败时：
+  - 失败端口会产生对应错误结果。
+  - 其他端口继续上传和质量检测。
+  - 任务最终仍可完成，不会因为一个端口失败中断整批。
+- 运行界面处理无效 ProxyAdmin ID：
+  - 上传失败的本地错误项不会再被拿去远端重试或删除。
+- `/api/proxy/fastest` 增加实时验证参数：
+  - `check=true`
+  - `target_url=https://example.com/ping`
+  - 开启后会按缓存排序逐个验证候选端口，返回第一个实时可用代理。
+- 顶部状态区新增 `监听`：
+  - 显示 `实际监听端口数/期望映射端口数`。
+  - 如果有缺失端口，鼠标悬停可看到异常端口列表。
+- Linux/systemd 安装整理：
+  - `install-systemd.sh` 不再硬编码 `User=dsk`。
+  - 默认使用 `sudo` 发起用户，也可通过 `SERVICE_USER=xxx` 指定。
+  - systemd 环境变量补齐 `PPM_CLASH_API_ADDR` 和 `PPM_DOMAIN_RESOLVE_STRATEGY`。
+  - `install-linux.sh` 默认配置补齐 `domain_resolve_strategy`。
+
+示例：
+
+```text
+GET /api/proxy/fastest?check=true&target_url=https://www.google.com/generate_204
+```
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest tests/test_api.py -q -> 31 passed
+python -m compileall -q main.py app tests -> passed
+```
+
+## ProxyAdmin 命名上传优化
+
+问题：
+
+```text
+批量上传有个问题，上传无法命名，导致上传后 name 都叫 default。
+```
+
+原因：
+
+- 原实现参考 `proxy-port-api` 使用 `POST /api/v1/admin/proxies/batch`。
+- batch 接口适合一次上传多个代理，但无法传每个代理的 `name`。
+- 上传后还需要再拉列表反查 `host:port -> id`，链路更绕。
+
+处理：
+
+- ProxyAdmin 导入改为逐个调用：
+  - `POST /api/v1/admin/proxies`
+- 每个代理创建时传入：
+  - `name`
+  - `protocol`
+  - `host`
+  - `port`
+  - `username`
+  - `password`
+- `name` 默认使用顺序名称：
+  - `代理1`
+  - `代理2`
+  - `代理3`
+- 运行界面新增 `名称前缀` 配置，可自定义为：
+  - `测试1`
+  - `测试2`
+  - `测试3`
+- 创建接口直接返回 `data.id`，后续质量检测直接用这个 ID，不再依赖列表反查。
+- 逐个上传仍保留并发控制，避免大量端口时速度太慢。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest tests/test_api.py -q -> 29 passed
+python -m compileall -q main.py app tests -> passed
+```

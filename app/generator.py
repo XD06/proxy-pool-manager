@@ -28,13 +28,14 @@ def generate_config(
     *,
     include_clash_api: bool = True,
     log_path: Path | None = None,
+    listen_host: str | None = None,
 ) -> dict:
     node_by_tag = {node.tag: node for node in nodes}
     inbounds: list[dict] = []
     outbounds: list[dict] = []
     rules: list[dict] = []
     used_tags: set[str] = set()
-    proxy_listen_host = current_proxy_listen_host()
+    proxy_listen_host = listen_host or current_proxy_listen_host()
     domain_resolve_strategy = current_domain_resolve_strategy()
 
     for port_text, mapping in sorted(mappings.items(), key=lambda item: int(item[0])):
@@ -54,7 +55,12 @@ def generate_config(
                 "tag": inbound_tag,
                 "listen": proxy_listen_host,
                 "listen_port": port,
-                "sniff": False,
+            }
+        )
+        rules.append(
+            {
+                "inbound": [inbound_tag],
+                "action": "sniff",
             }
         )
         if domain_resolve_strategy:
@@ -75,6 +81,7 @@ def generate_config(
         if node.tag not in used_tags:
             outbound = dict(node.outbound)
             outbound["tag"] = node.tag
+            outbound["tcp_fast_open"] = True
             outbounds.append(outbound)
             used_tags.add(node.tag)
 
@@ -95,6 +102,18 @@ def generate_config(
             "auto_detect_interface": True,
         },
     }
+
+    if domain_resolve_strategy:
+        config["dns"] = {
+            "servers": [
+                {
+                    "tag": "dns_direct",
+                    "type": "local"
+                }
+            ],
+            "strategy": domain_resolve_strategy,
+        }
+        config["route"]["default_domain_resolver"] = "dns_direct"
     if include_clash_api:
         config["experimental"] = {
             "clash_api": {
