@@ -182,8 +182,7 @@ def test_index_serves_required_contract_markers(client):
         "nodeTable",
         "assignTable",
         "portsTable",
-        "startBtn",
-        "stopBtn",
+        "engineToggleBtn",
         "engineState",
         "nodeCount",
         "mappingCount",
@@ -220,3 +219,40 @@ def test_status_payload_has_fields_frontend_reads(client):
     assert not missing, f"/api/status missing keys used by frontend: {missing}"
     assert isinstance(payload["web"], dict)
     assert isinstance(payload["subscription"], dict)
+
+
+def test_sing_box_update_controls_are_wired():
+    html = _read(INDEX)
+    js = _read(APP_JS) + "\n" + _read(HELPERS_JS)
+
+    for element_id in ("singBoxVersionSummary", "checkSingBoxUpdateBtn", "updateSingBoxBtn", "rollbackSingBoxBtn"):
+        assert f'id="{element_id}"' in html
+        assert f'$("{element_id}")' in js
+    assert "/api/engine/version" in js
+    assert "/api/engine/update" in js
+    assert "/api/engine/rollback" in js
+
+
+def test_shadowsocks_protocol_uses_ss_chip_style():
+    helpers = _read(HELPERS_JS)
+    assert 'raw === "shadowsocks" ? "ss"' in helpers
+
+
+def test_engine_start_stop_is_one_accessible_switch():
+    html = _read(INDEX)
+    js = _read(APP_JS)
+
+    assert 'id="engineToggleBtn"' in html
+    assert 'role="switch"' in html
+    assert 'aria-checked="false"' in html
+    assert 'engine-switch-label' not in html
+    assert 'id="startBtn"' not in html
+    assert 'id="stopBtn"' not in html
+    assert 'running ? "/api/stop" : "/api/start"' in js
+
+
+def test_dashboard_tool_cards_have_consistent_roles_and_icons():
+    html = _read(INDEX)
+    for cls in ("engine-tool", "doctor-tool", "ai-tool", "target-tool"):
+        assert f'class="tool-section {cls}"' in html
+    assert html.count('class="ico"') >= 4

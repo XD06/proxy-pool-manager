@@ -55,6 +55,11 @@ def _node_tag(protocol: str, outbound: dict[str, Any]) -> str:
     return f"node-{protocol}-{_short_hash(outbound.get('server'), outbound.get('server_port'), credential)}"
 
 
+def _outbound_fingerprint(outbound: dict[str, Any]) -> str:
+    payload = {key: value for key, value in outbound.items() if key != "tag"}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def _query(parsed) -> dict[str, str]:
     return {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()}
 
@@ -539,6 +544,44 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                     outbound["obfs"] = {"type": str(obfs)}
                     if proxy.get("obfs-password"):
                         outbound["obfs"]["password"] = str(proxy["obfs-password"])
+            elif ptype == "tuic":
+                uuid = str(proxy.get("uuid") or "")
+                password = str(proxy.get("password") or proxy.get("token") or "")
+                if not uuid:
+                    raise ValueError("TUIC uuid is required")
+                if not password:
+                    raise ValueError("TUIC password is required")
+                tls: dict[str, Any] = {
+                    "enabled": True,
+                    "server_name": proxy.get("sni") or proxy.get("servername") or proxy["server"],
+                }
+                if proxy.get("skip-cert-verify"):
+                    tls["insecure"] = True
+                fingerprint = proxy.get("client-fingerprint")
+                if fingerprint:
+                    tls["utls"] = {"enabled": True, "fingerprint": str(fingerprint)}
+                alpn = proxy.get("alpn")
+                if alpn:
+                    tls["alpn"] = list(alpn) if isinstance(alpn, list) else [item for item in str(alpn).split(",") if item]
+                outbound = {
+                    "type": "tuic",
+                    "server": proxy["server"],
+                    "server_port": int(proxy["port"]),
+                    "uuid": uuid,
+                    "password": password,
+                    "tls": tls,
+                }
+                congestion = proxy.get("congestion-controller") or proxy.get("congestion-control")
+                if congestion:
+                    outbound["congestion_control"] = str(congestion)
+                udp_relay_mode = proxy.get("udp-relay-mode")
+                if udp_relay_mode:
+                    outbound["udp_relay_mode"] = str(udp_relay_mode)
+                if proxy.get("reduce-rtt") or proxy.get("zero-rtt-handshake"):
+                    outbound["zero_rtt_handshake"] = True
+                heartbeat = proxy.get("heartbeat-interval") or proxy.get("heartbeat")
+                if heartbeat:
+                    outbound["heartbeat"] = str(heartbeat)
             elif ptype == "anytls":
                 password = str(proxy.get("password") or "")
                 if not password:
@@ -676,11 +719,19 @@ def parse_text(text: str) -> ImportResult:
             except Exception as exc:
                 warnings.append(f"Skipped invalid {scheme} link: {exc}")
 
-    deduped: dict[str, ProxyNode] = {}
+    deduped: dict[str, tuple[str, ProxyNode]] = {}
     for node in nodes:
-        key = node.tag
-        deduped.setdefault(key, node)
-    result_nodes = list(deduped.values())
+        fingerprint = _outbound_fingerprint(node.outbound)
+        existing = deduped.get(node.tag)
+        if not existing:
+            deduped[node.tag] = (fingerprint, node)
+            continue
+        if existing[0] == fingerprint:
+            continue
+        node.tag = f"{node.tag}-{_short_hash(fingerprint)}"
+        node.outbound["tag"] = node.tag
+        deduped.setdefault(node.tag, (fingerprint, node))
+    result_nodes = [node for _, node in deduped.values()]
     return ImportResult(nodes=result_nodes, count=len(result_nodes), warnings=warnings)
 
 

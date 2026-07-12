@@ -12,6 +12,7 @@ let _nodeTableFingerprint = "";
 let proxyAdminResults = {};
 let proxyAdminImported = [];
 let proxyAdminConfigLoaded = false;
+let singBoxInfoLoaded = false;
 let localProxyCheckResults = {};
 let localProxyCheckingPorts = new Set();
 let activeNodeTestJobId = null;
@@ -248,6 +249,11 @@ function renderSummary() {
   }
   $("engineState").title = $("engineState").textContent;
   setTone("engineState", tone);
+  const engineToggle = $("engineToggleBtn");
+  const engineRunning = Boolean(statusSnapshot.running);
+  engineToggle.classList.toggle("on", engineRunning);
+  engineToggle.setAttribute("aria-checked", String(engineRunning));
+  engineToggle.setAttribute("aria-label", engineRunning ? "暂停 sing-box" : "启动 sing-box");
   $("nodeCount").textContent = String(statusSnapshot.node_count ?? nodes.length);
   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
   $("listeningCount").textContent = `${listeningPorts.length}/${expectedPorts.length}`;
@@ -980,6 +986,25 @@ function shortAssetVersion(version) {
   return withoutDate || text || "-";
 }
 
+function renderSingBoxInfo(info) {
+  const current = info.current_version ? `v${info.current_version}` : "未安装";
+  const latest = info.latest_version ? ` · 最新 v${info.latest_version}` : "";
+  const backup = info.backup_version ? ` · 备份 v${info.backup_version}` : "";
+  const platform = `${info.platform || "-"}/${info.architecture || "-"}`;
+  $("singBoxVersionSummary").textContent = `${current}${latest}${backup} · ${platform}`;
+  $("singBoxVersionSummary").title = info.path || "";
+  $("updateSingBoxBtn").disabled = !info.managed || !info.update_available;
+  $("rollbackSingBoxBtn").disabled = !info.rollback_available;
+}
+
+async function loadSingBoxInfo(checkLatest = false) {
+  const info = await request(`/api/engine/version?check_latest=${checkLatest ? "true" : "false"}`);
+  singBoxInfoLoaded = true;
+  renderSingBoxInfo(info);
+  return info;
+}
+
+
 async function refresh() {
   await loadProxyAdminConfig();
   const [status, nodeData, portData] = await Promise.all([
@@ -997,7 +1022,13 @@ async function refresh() {
   renderAssignTable();
   renderLocalProxyCheckPorts();
   renderPortsTable();
-  
+  if (!singBoxInfoLoaded) {
+    try {
+      await loadSingBoxInfo(false);
+    } catch (error) {
+      $("singBoxVersionSummary").textContent = `检测失败：${error.message}`;
+    }
+  }
 }
 
 async function loadProxyAdminConfig() {
@@ -1604,15 +1635,13 @@ $("saveAssignBtn").addEventListener("click", () => runTask("保存端口映射",
   return "保存端口映射完成";
 }));
 
-$("startBtn").addEventListener("click", () => runTask("启动引擎", async () => {
-  await request("/api/start", { method: "POST", body: "{}" });
-  await refreshStatusOnly();
-}));
-
-$("stopBtn").addEventListener("click", () => runTask("停止引擎", async () => {
-  await request("/api/stop", { method: "POST", body: "{}" });
-  await refreshStatusOnly();
-}));
+$("engineToggleBtn").addEventListener("click", () => {
+  const running = Boolean(statusSnapshot.running);
+  return runTask(running ? "暂停引擎" : "启动引擎", async () => {
+    await request(running ? "/api/stop" : "/api/start", { method: "POST", body: "{}" });
+    await refreshStatusOnly();
+  });
+});
 
 $("repairEngineBtn").addEventListener("click", () => runTask("重启修复引擎", async () => {
   await request("/api/stop", { method: "POST", body: "{}" });
@@ -1621,6 +1650,31 @@ $("repairEngineBtn").addEventListener("click", () => runTask("重启修复引擎
   const missingPorts = statusSnapshot.missing_ports || [];
   if (missingPorts.length) return `引擎已重启，仍缺失端口：${missingPorts.join(", ")}`;
   return "引擎已重启，端口监听正常";
+}));
+
+$("checkSingBoxUpdateBtn").addEventListener("click", () => runTask("检测 sing-box 更新", async () => {
+  const info = await loadSingBoxInfo(true);
+  return info.update_available
+    ? `发现新版本 v${info.latest_version}`
+    : `当前已是最新版本 v${info.current_version}`;
+}));
+
+$("updateSingBoxBtn").addEventListener("click", () => runTask("更新 sing-box", async () => {
+  if (!confirm("更新时将暂停并在完成后恢复 sing-box，是否继续？")) return "已取消更新";
+  const result = await request("/api/engine/update", { method: "POST", body: "{}" });
+  await loadSingBoxInfo(true);
+  await refreshStatusOnly();
+  return result.updated
+    ? `sing-box 已从 v${result.previous_version} 更新到 v${result.current_version}`
+    : `当前已是最新版本 v${result.current_version}`;
+}));
+
+$("rollbackSingBoxBtn").addEventListener("click", () => runTask("回退 sing-box", async () => {
+  if (!confirm("将当前 sing-box 与备份版本交换，是否继续？")) return "已取消回退";
+  const result = await request("/api/engine/rollback", { method: "POST", body: "{}" });
+  await loadSingBoxInfo(true);
+  await refreshStatusOnly();
+  return `sing-box 已回退到 v${result.current_version}`;
 }));
 
 $("testPortsBtn").addEventListener("click", () => runTask("验证全部端口", runAllPortValidation));

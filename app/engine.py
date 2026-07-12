@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import tarfile
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -33,6 +34,7 @@ class EngineManager:
         self.last_error: str | None = None
         self.fatal = False
         self._lock = asyncio.Lock()
+        self._update_lock = asyncio.Lock()
         self._monitor_failures = 0
 
     def _binary_name(self) -> str:
@@ -138,6 +140,117 @@ class EngineManager:
                 except Exception:
                     pass
 
+    def _platform_spec(self) -> tuple[str, str, str]:
+        system = {
+            "windows": "windows",
+            "linux": "linux",
+            "darwin": "darwin",
+        }.get(platform.system().lower())
+        machine = {
+            "amd64": "amd64",
+            "x86_64": "amd64",
+            "arm64": "arm64",
+            "aarch64": "arm64",
+            "x86": "386",
+            "i386": "386",
+            "i686": "386",
+            "armv7l": "armv7",
+        }.get(platform.machine().lower())
+        if not system or not machine:
+            raise EngineError(
+                f"Unsupported platform for sing-box download: "
+                f"{platform.system().lower()}/{platform.machine().lower()}"
+            )
+        return system, machine, ".zip" if system == "windows" else ".tar.gz"
+
+    def backup_path(self) -> Path:
+        binary = self.binary_path()
+        return binary.with_name(f"{binary.stem}.backup{binary.suffix}")
+
+    def _binary_version(self, binary: Path) -> str:
+        try:
+            completed = subprocess.run(
+                [str(binary), "version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
+            )
+        except Exception as exc:
+            raise EngineError(f"Could not run sing-box binary: {exc}") from exc
+        output = f"{completed.stdout}\n{completed.stderr}"
+        match = re.search(r"sing-box version ([^\s]+)", output)
+        if completed.returncode != 0 or not match:
+            raise EngineError(f"Could not detect sing-box version: {output.strip()[-1000:]}")
+        return match.group(1).lstrip("v")
+
+    @staticmethod
+    def _version_key(version: str | None) -> tuple[int, ...]:
+        return tuple(int(item) for item in re.findall(r"\d+", version or ""))
+
+    async def _latest_release(self) -> dict[str, Any]:
+        api_url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    response = await client.get(api_url, headers={"User-Agent": "ProxyPoolManager"})
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(attempt + 1)
+        assert last_error is not None
+        raise EngineError(
+            f"Could not check sing-box releases: {type(last_error).__name__}: {last_error}"
+        ) from last_error
+
+    def _release_asset(self, release: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        system, machine, extension = self._platform_spec()
+        version = str(release.get("tag_name") or "").lstrip("v")
+        expected = f"sing-box-{version}-{system}-{machine}{extension}"
+        for asset in release.get("assets", []):
+            if asset.get("name") == expected:
+                return asset, version
+        raise EngineError(f"No sing-box release asset found for {system}/{machine}: {expected}")
+
+    async def _download_release_binary(self, release: dict[str, Any], destination: Path) -> str:
+        asset, version = self._release_asset(release)
+        system, _, _ = self._platform_spec()
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryDirectory(prefix="sing-box-update-", dir=BIN_DIR) as temp_dir:
+                archive_path = Path(temp_dir) / str(asset["name"])
+                last_error: httpx.HTTPError | None = None
+                for attempt in range(3):
+                    try:
+                        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+                            response = await client.get(asset["browser_download_url"])
+                            response.raise_for_status()
+                            archive_path.write_bytes(response.content)
+                        break
+                    except httpx.HTTPError as exc:
+                        last_error = exc
+                        if attempt < 2:
+                            await asyncio.sleep(attempt + 1)
+                else:
+                    assert last_error is not None
+                    raise last_error
+                extracted = self._extract_binary(archive_path, system)
+                shutil.copy2(extracted, destination)
+        except httpx.HTTPError as exc:
+            raise EngineError(
+                f"Could not download sing-box {version}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if system != "windows":
+            destination.chmod(0o755)
+        detected = await asyncio.to_thread(self._binary_version, destination)
+        if detected != version:
+            destination.unlink(missing_ok=True)
+            raise EngineError(f"Downloaded sing-box version mismatch: expected {version}, got {detected}")
+        return version
+
     async def ensure_binary(self) -> Path:
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         configured = os.environ.get("SING_BOX_PATH")
@@ -153,52 +266,16 @@ class EngineManager:
         system_binary = shutil.which("sing-box")
         if system_binary:
             return Path(system_binary)
-        system = platform.system().lower()
-        machine = platform.machine().lower()
-        if system not in {"windows", "linux"} or machine not in {"amd64", "x86_64"}:
-            raise EngineError(f"Unsupported platform for auto-download: {system}/{machine}")
-        await self._download_latest(binary, system)
+        await self._download_latest(binary)
         return binary
 
-    async def _download_latest(self, target: Path, system: str) -> None:
-        api_url = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-        try:
-            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-                release = (await client.get(api_url)).raise_for_status()
-                data = release.json()
-                wanted = "windows-amd64" if system == "windows" else "linux-amd64"
-                asset = None
-                for item in data.get("assets", []):
-                    name = item.get("name", "")
-                    if wanted in name and (name.endswith(".zip") or name.endswith(".tar.gz")):
-                        asset = item
-                        break
-                if not asset:
-                    raise EngineError(f"No sing-box release asset found for {wanted}")
-                archive_path = BIN_DIR / asset["name"]
-                response = await client.get(asset["browser_download_url"])
-                response.raise_for_status()
-                archive_path.write_bytes(response.content)
-        except httpx.HTTPStatusError as exc:
-            raise EngineError(
-                "Could not download sing-box from GitHub. "
-                f"GitHub returned {exc.response.status_code}. "
-                "Set SING_BOX_PATH or place sing-box.exe in bin/."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise EngineError(
-                "Could not download sing-box from GitHub. "
-                "Set SING_BOX_PATH or place sing-box.exe in bin/. "
-                f"Network error: {exc}"
-            ) from exc
-        extracted = self._extract_binary(archive_path, system)
-        shutil.copy2(extracted, target)
-        if system != "windows":
-            target.chmod(0o755)
+    async def _download_latest(self, target: Path, system: str | None = None) -> None:
+        release = await self._latest_release()
+        await self._download_release_binary(release, target)
 
     def _extract_binary(self, archive_path: Path, system: str) -> Path:
         expected = "sing-box.exe" if system == "windows" else "sing-box"
-        extract_dir = archive_path.with_suffix("")
+        extract_dir = archive_path.parent / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
         if archive_path.name.endswith(".zip"):
             with zipfile.ZipFile(archive_path) as archive:
@@ -212,8 +289,7 @@ class EngineManager:
             return path
         raise EngineError("Downloaded archive did not contain sing-box binary")
 
-    async def check_config(self, config_path: Path) -> None:
-        binary = await self.ensure_binary()
+    async def _check_config_with_binary(self, binary: Path, config_path: Path) -> None:
         proc = await asyncio.create_subprocess_exec(
             str(binary),
             "check",
@@ -226,6 +302,157 @@ class EngineManager:
         if proc.returncode != 0:
             output = (stderr or stdout).decode(errors="replace")[-4000:]
             raise EngineError(f"sing-box check failed: {output}")
+
+    async def binary_info(self, *, check_latest: bool = False) -> dict[str, Any]:
+        configured = os.environ.get("SING_BOX_PATH")
+        managed_path = self.binary_path()
+        if configured:
+            path = Path(configured)
+            managed = False
+        elif managed_path.exists():
+            path = managed_path
+            managed = True
+        else:
+            system_binary = shutil.which("sing-box")
+            path = Path(system_binary) if system_binary else managed_path
+            managed = False
+        current_version = await asyncio.to_thread(self._binary_version, path) if path.exists() else None
+        backup = self.backup_path()
+        backup_version = None
+        if backup.exists():
+            try:
+                backup_version = await asyncio.to_thread(self._binary_version, backup)
+            except EngineError:
+                backup_version = None
+        latest_version = None
+        if check_latest:
+            _, latest_version = self._release_asset(await self._latest_release())
+        return {
+            "path": str(path),
+            "managed": managed,
+            "platform": platform.system().lower(),
+            "architecture": platform.machine().lower(),
+            "current_version": current_version,
+            "latest_version": latest_version,
+            "update_available": bool(
+                latest_version
+                and (not current_version or self._version_key(latest_version) > self._version_key(current_version))
+            ),
+            "rollback_available": managed and backup_version is not None,
+            "backup_version": backup_version,
+        }
+
+    async def update_binary(self) -> dict[str, Any]:
+        async with self._update_lock:
+            if os.environ.get("SING_BOX_PATH"):
+                raise EngineError("Cannot update a binary configured through SING_BOX_PATH")
+            target = self.binary_path()
+            if not target.exists():
+                await self.ensure_binary()
+            if not target.exists():
+                raise EngineError("Automatic update requires a managed binary in bin/")
+            current_version = await asyncio.to_thread(self._binary_version, target)
+            release = await self._latest_release()
+            _, latest_version = self._release_asset(release)
+            if self._version_key(latest_version) <= self._version_key(current_version):
+                info = await self.binary_info()
+                return {**info, "updated": False, "previous_version": current_version, "restarted": False}
+
+            candidate = target.with_name(f"{target.stem}.download{target.suffix}")
+            candidate.unlink(missing_ok=True)
+            config_path = self.managed_config_path or SING_BOX_CONFIG_PATH
+            try:
+                await self._download_release_binary(release, candidate)
+                if config_path.exists():
+                    await self._check_config_with_binary(candidate, config_path)
+            except Exception:
+                candidate.unlink(missing_ok=True)
+                raise
+            was_running = self.status().running
+            if was_running:
+                await self.stop(config_path=config_path)
+            backup = self.backup_path()
+            shutil.copy2(target, backup)
+            replaced = False
+            try:
+                os.replace(candidate, target)
+                replaced = True
+                if platform.system().lower() != "windows":
+                    target.chmod(0o755)
+                if was_running:
+                    await self.start(config_path)
+            except Exception as exc:
+                if replaced:
+                    shutil.copy2(backup, target)
+                    if platform.system().lower() != "windows":
+                        target.chmod(0o755)
+                if was_running:
+                    try:
+                        await self.start(config_path)
+                    except Exception:
+                        pass
+                raise EngineError(f"sing-box update failed and was rolled back: {exc}") from exc
+            finally:
+                candidate.unlink(missing_ok=True)
+            info = await self.binary_info()
+            return {**info, "updated": True, "previous_version": current_version, "restarted": was_running}
+
+    async def rollback_binary(self) -> dict[str, Any]:
+        async with self._update_lock:
+            if os.environ.get("SING_BOX_PATH"):
+                raise EngineError("Cannot roll back a binary configured through SING_BOX_PATH")
+            target = self.binary_path()
+            backup = self.backup_path()
+            if not target.exists() or not backup.exists():
+                raise EngineError("No sing-box backup is available")
+            config_path = self.managed_config_path or SING_BOX_CONFIG_PATH
+            if config_path.exists():
+                await self._check_config_with_binary(backup, config_path)
+            previous_version = await asyncio.to_thread(self._binary_version, target)
+            rollback_version = await asyncio.to_thread(self._binary_version, backup)
+            was_running = self.status().running
+            if was_running:
+                await self.stop(config_path=config_path)
+            swap = target.with_name(f"{target.stem}.swap{target.suffix}")
+            swap.unlink(missing_ok=True)
+            swapped = False
+            try:
+                os.replace(target, swap)
+                os.replace(backup, target)
+                os.replace(swap, backup)
+                swapped = True
+                if platform.system().lower() != "windows":
+                    target.chmod(0o755)
+                    backup.chmod(0o755)
+                if was_running:
+                    await self.start(config_path)
+            except Exception as exc:
+                if swapped:
+                    os.replace(target, swap)
+                    os.replace(backup, target)
+                    os.replace(swap, backup)
+                elif swap.exists():
+                    if target.exists():
+                        os.replace(target, backup)
+                    os.replace(swap, target)
+                if was_running:
+                    try:
+                        await self.start(config_path)
+                    except Exception:
+                        pass
+                raise EngineError(f"sing-box rollback failed: {exc}") from exc
+            info = await self.binary_info()
+            return {
+                **info,
+                "rolled_back": True,
+                "previous_version": previous_version,
+                "current_version": rollback_version,
+                "restarted": was_running,
+            }
+
+    async def check_config(self, config_path: Path) -> None:
+        binary = await self.ensure_binary()
+        await self._check_config_with_binary(binary, config_path)
 
     async def start(
         self,

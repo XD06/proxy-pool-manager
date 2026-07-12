@@ -1908,3 +1908,37 @@ def test_current_performance_settings_prefers_lower_batch_defaults(monkeypatch):
     assert settings.max_node_test_concurrency == 6
     assert settings.max_port_test_concurrency == 8
     assert settings.state_save_debounce_ms == 500
+
+
+def test_api_sing_box_version_update_and_rollback(tmp_path):
+    class VersionEngine(StoppedEngine):
+        async def binary_info(self, check_latest=False):
+            return {
+                "managed": True,
+                "current_version": "1.13.13",
+                "latest_version": "1.13.14" if check_latest else None,
+                "update_available": check_latest,
+                "rollback_available": True,
+                "backup_version": "1.13.12",
+                "path": "bin/sing-box.exe",
+                "platform": "windows",
+                "architecture": "amd64",
+            }
+
+        async def update_binary(self):
+            return {"updated": True, "previous_version": "1.13.13", "current_version": "1.13.14"}
+
+        async def rollback_binary(self):
+            return {"rolled_back": True, "previous_version": "1.13.14", "current_version": "1.13.13"}
+
+    app = create_app(store=StateStore(tmp_path / "assignments.json"), engine=VersionEngine())
+    client = TestClient(app)
+
+    info = client.get("/api/engine/version?check_latest=true")
+    updated = client.post("/api/engine/update")
+    rolled_back = client.post("/api/engine/rollback")
+
+    assert info.status_code == 200
+    assert info.json()["update_available"] is True
+    assert updated.json()["current_version"] == "1.13.14"
+    assert rolled_back.json()["current_version"] == "1.13.13"

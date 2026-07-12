@@ -58,13 +58,8 @@
         <button id="refreshBtn" class="icon-btn" title="刷新" aria-label="刷新">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14.2-5M20 12a8 8 0 0 1-14.2 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <button id="startBtn" class="primary">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 5v14l11-7L8 5z" fill="currentColor"/></svg>
-          启动
-        </button>
-        <button id="stopBtn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
-          停止
+        <button id="engineToggleBtn" class="engine-switch" role="switch" aria-checked="false" aria-label="启动 sing-box">
+          <span class="engine-switch-knob" aria-hidden="true"></span>
         </button>
         <button id="repairEngineBtn" class="hidden">重启修复</button>
       </div>
@@ -225,8 +220,27 @@
         </div>
       </div>
       <div class="dashboard-tools">
-        <div id="engineHealth" class="engine-health" aria-live="polite"></div>
-        <section class="tool-section">
+        <section class="tool-section engine-tool">
+          <header>
+            <strong>
+              <span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="3" stroke="currentColor" stroke-width="1.8"/><path d="M8 9h8M8 13h5M8 17h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              引擎状态
+            </strong>
+          </header>
+          <div id="engineHealth" class="engine-health" aria-live="polite"></div>
+          <div class="engine-version-block">
+            <header class="engine-version-head">
+              <strong>sing-box</strong>
+              <span id="singBoxVersionSummary" class="muted">检测中...</span>
+            </header>
+            <div class="actions">
+              <button id="checkSingBoxUpdateBtn">检测</button>
+              <button id="updateSingBoxBtn" class="primary" disabled>更新</button>
+              <button id="rollbackSingBoxBtn" disabled>回退</button>
+            </div>
+          </div>
+        </section>
+        <section class="tool-section doctor-tool">
           <header>
             <strong>
               <span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 12l2 2 4-4M7 20h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
@@ -238,7 +252,7 @@
             <span id="doctorSummary" class="local-check-result muted">未运行</span>
           </div>
         </section>
-        <section class="tool-section">
+        <section class="tool-section ai-tool">
           <header>
             <strong>
               <span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v4M12 17v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M3 12h4M17 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
@@ -256,9 +270,12 @@
             <span id="localProxyCheckResult" class="local-check-result muted">未检测</span>
           </div>
         </section>
-        <section class="tool-section">
+        <section class="tool-section target-tool">
           <header>
-            <strong>验证目标</strong>
+            <strong>
+              <span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              验证目标
+            </strong>
           </header>
           <div class="actions">
           <label class="inline-field wide">

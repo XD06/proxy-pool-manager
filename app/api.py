@@ -828,6 +828,32 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             **engine_status,
         }
 
+    @app.get("/api/engine/version")
+    async def engine_version(check_latest: bool = False):
+        try:
+            return await engine_manager.binary_info(check_latest=check_latest)
+        except EngineError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/engine/update")
+    async def update_engine_binary():
+        if node_test_running():
+            raise HTTPException(status_code=409, detail="A node test is running")
+        try:
+            return await engine_manager.update_binary()
+        except EngineError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/engine/rollback")
+    async def rollback_engine_binary():
+        if node_test_running():
+            raise HTTPException(status_code=409, detail="A node test is running")
+        try:
+            return await engine_manager.rollback_binary()
+        except EngineError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
     @app.get("/api/subscription")
     async def get_subscription():
         refresh_state_from_disk()

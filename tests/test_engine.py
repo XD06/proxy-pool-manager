@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.engine import EngineError, EngineManager, _config_listen_ports
+from app.models import EngineStatus
 
 
 def test_status_detects_managed_sing_box_process(monkeypatch):
@@ -149,3 +150,68 @@ def test_managed_processes_parses_linux_ps_output(monkeypatch):
             "CommandLine": f"/usr/bin/sing-box run -c {config_text}",
         }
     ]
+
+
+def test_release_asset_detects_platform_and_architecture(monkeypatch):
+    manager = EngineManager()
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+    release = {
+        "tag_name": "v1.13.14",
+        "assets": [
+            {
+                "name": "sing-box-1.13.14-linux-arm64.tar.gz",
+                "browser_download_url": "https://example.test/sing-box.tar.gz",
+            }
+        ],
+    }
+
+    asset, version = manager._release_asset(release)
+
+    assert version == "1.13.14"
+    assert asset["name"] == "sing-box-1.13.14-linux-arm64.tar.gz"
+
+
+def test_update_and_rollback_managed_binary(monkeypatch, tmp_path):
+    manager = EngineManager(tmp_path / "sing-box.json")
+    monkeypatch.setattr("app.engine.BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr("app.engine.SING_BOX_CONFIG_PATH", tmp_path / "sing-box.json")
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    target = manager.binary_path()
+    target.parent.mkdir(parents=True)
+    target.write_text("old", encoding="utf-8")
+
+    monkeypatch.setattr(manager, "_binary_version", lambda path: "1.13.13" if path.read_text(encoding="utf-8") == "old" else "1.13.14")
+    monkeypatch.setattr(
+        manager,
+        "_latest_release",
+        lambda: asyncio.sleep(0, result={
+            "tag_name": "v1.13.14",
+            "assets": [{
+                "name": "sing-box-1.13.14-windows-amd64.zip",
+                "browser_download_url": "https://example.test/sing-box.zip",
+            }],
+        }),
+    )
+
+    async def fake_download(release, destination):
+        destination.write_text("new", encoding="utf-8")
+        return "1.13.14"
+
+    monkeypatch.setattr(manager, "_download_release_binary", fake_download)
+    monkeypatch.setattr(manager, "status", lambda: EngineStatus(running=False))
+
+    updated = asyncio.run(manager.update_binary())
+
+    assert updated["updated"] is True
+    assert updated["current_version"] == "1.13.14"
+    assert target.read_text(encoding="utf-8") == "new"
+    assert manager.backup_path().read_text(encoding="utf-8") == "old"
+
+    rolled_back = asyncio.run(manager.rollback_binary())
+
+    assert rolled_back["rolled_back"] is True
+    assert rolled_back["current_version"] == "1.13.13"
+    assert target.read_text(encoding="utf-8") == "old"
+    assert manager.backup_path().read_text(encoding="utf-8") == "new"

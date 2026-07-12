@@ -23,6 +23,7 @@
 - **端口固定映射**：一端口一节点，sing-box `mixed` inbound 同时支持 HTTP + SOCKS5
 - **GeoIP 多源回退**：geojs → ipwho → freeipapi → ipinfo → ip-api，失败 1h 自动重试
 - **AI 连通性检测**：通过代理端口测试 GPT / Claude / Gemini 可达性
+- **sing-box 更新管理**：自动识别运行平台与 CPU 架构，控制台检测更新、下载替换及一键回退
 - **可视化管理**：可用率圆环、协议分色 chip、延迟进度条、地区 flag chip
 
 ## 核心原则
@@ -47,7 +48,7 @@
 | 运行后端口验证 | ✅ |
 | AI 连通性检测（GPT/Claude/Gemini） | ✅ |
 | HTTP + SOCKS5 混合代理端口 | ✅ |
-| 单元测试 + API smoke test（121 passed） | ✅ |
+| 单元测试 + API smoke test（131 passed） | ✅ |
 | SSR / 多订阅合并 / 流量统计 / TUN 模式 | ❌ |
 
 ## 快速安装

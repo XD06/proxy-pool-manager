@@ -237,6 +237,61 @@ def test_parse_base64_anytls_subscription():
     assert result.nodes[0].outbound["password"] == "secret"
 
 
+def test_parse_clash_yaml_tuic():
+    text = """
+proxies:
+  - name: SG TUIC
+    type: tuic
+    server: node.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    password: secret
+    sni: cdn.example.com
+    client-fingerprint: chrome
+    skip-cert-verify: true
+    alpn: [h3]
+    congestion-controller: bbr
+    udp-relay-mode: native
+    reduce-rtt: true
+    heartbeat-interval: 10s
+"""
+    result = parse_text(text)
+
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.type == "tuic"
+    assert node.outbound["uuid"] == "00000000-0000-0000-0000-000000000000"
+    assert node.outbound["password"] == "secret"
+    assert node.outbound["tls"]["server_name"] == "cdn.example.com"
+    assert node.outbound["tls"]["insecure"] is True
+    assert node.outbound["tls"]["utls"]["fingerprint"] == "chrome"
+    assert node.outbound["tls"]["alpn"] == ["h3"]
+    assert node.outbound["congestion_control"] == "bbr"
+    assert node.outbound["udp_relay_mode"] == "native"
+    assert node.outbound["zero_rtt_handshake"] is True
+    assert node.outbound["heartbeat"] == "10s"
+
+
+def test_same_credentials_with_different_transport_are_not_deduped():
+    text = "\n".join([
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fa#A",
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=ws&path=%2Fb#B",
+    ])
+
+    result = parse_text(text)
+
+    assert result.count == 2
+    assert len({node.tag for node in result.nodes}) == 2
+    assert {node.outbound["transport"]["path"] for node in result.nodes} == {"/a", "/b"}
+
+
+def test_identical_nodes_are_still_deduped():
+    link = "trojan://secret@example.com:443?sni=example.com#A"
+    result = parse_text(f"{link}\n{link}")
+
+    assert result.count == 1
+
+
 def test_parse_clash_yaml_anytls():
     text = """
 proxies:
