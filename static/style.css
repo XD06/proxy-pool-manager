@@ -543,21 +543,6 @@ svg.mi {
   margin: 0 16px 10px;
 }
 
-.app-sticky-header {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  margin-top: -8px;
-  padding-top: 8px;
-  padding-bottom: 1px;
-  background: color-mix(in srgb, var(--bg) 90%, transparent);
-  backdrop-filter: blur(14px) saturate(1.1);
-}
-
-.app-sticky-header .tabs {
-  position: relative;
-  top: auto;
-}
 #test > .node-test-overview { margin-top: 0; margin-bottom: 10px; }
 #test > .node-filter-bar { margin-top: 0; margin-bottom: 10px; }
 #test > #nodeTable { margin-bottom: 16px; }
