@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "templates" / "index.html"
 APP_JS = ROOT / "static" / "app.js"
 HELPERS_JS = ROOT / "static" / "helpers.js"
+STYLE_CSS = ROOT / "static" / "style.css"
 
 # Visible tab panel ids. "import" was merged into test; activateTab remaps import→test.
 REQUIRED_TABS = ("test", "assign", "dashboard")
@@ -271,3 +272,21 @@ def test_dashboard_results_have_one_visible_home():
     assert 'class="node-identity"' in js
     assert 'class="mono server-address"' in js
     assert 'node-target-result' in js
+
+
+def test_node_test_options_stay_inside_panel_body():
+    css = _read(STYLE_CSS)
+
+    assert "#test > .test-options {" in css
+    assert "width: auto;" in css
+    assert "margin: 0 16px 10px;" in css
+
+
+def test_app_status_header_stays_visible_while_scrolling():
+    html = _read(INDEX)
+    css = _read(STYLE_CSS)
+
+    assert 'class="app-sticky-header"' in html
+    assert ".app-sticky-header {" in css
+    assert "position: sticky;" in css
+    assert "z-index: 30;" in css
