@@ -352,8 +352,8 @@ function renderDoctorResult(result) {
   }
   const tone = result.fail ? "fail" : result.warn ? "warn" : "ok";
   const summaryText = result.summary || `ok=${result.ok || 0} warn=${result.warn || 0} fail=${result.fail || 0}`;
-  summary.textContent = result.timed_out ? "超时" : summaryText;
-  summary.className = `local-check-result ${tone === "ok" ? "ok" : tone === "warn" ? "muted" : "bad"}`;
+  summary.textContent = result.timed_out ? "超时" : tone === "ok" ? "通过" : tone === "warn" ? "有警告" : "需处理";
+  summary.className = `tool-state ${tone === "ok" ? "ok" : tone === "warn" ? "warn" : "bad"}`;
   const lines = (result.lines || [])
     .filter((line) => /^\[(OK|WARN|FAIL)\]/.test(line) || /^status:|^missing ports:|^config:/.test(line))
     .slice(0, 12);
@@ -433,17 +433,17 @@ function renderNodeTable() {
       <tbody>${filtered.map((node) => `
         <tr>
           <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" aria-label="选择节点 ${escapeHtml(node.name)}" checked></td>
-          <td data-label="节点">
-            <strong>${escapeHtml(node.name)}</strong>
-            <small>${escapeHtml(node.tag)}</small>
+          <td data-label="节点" class="node-identity">
+            <strong title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</strong>
+            <small class="mono" title="${escapeHtml(node.tag)}">${escapeHtml(node.tag)}</small>
           </td>
           <td data-label="协议">${protocolChip(node.type)}</td>
-          <td data-label="服务器"><span class="mono">${escapeHtml(node.server)}:${node.server_port}</span></td>
+          <td data-label="服务器"><span class="mono server-address" title="${escapeHtml(node.server)}:${node.server_port}">${escapeHtml(node.server)}:${node.server_port}</span></td>
           <td data-label="状态">${nodeStatusBadge(node)}</td>
           <td data-label="延迟">${latencyBarHtml(node.latency)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
           <td data-label="地区">${geoChipHtml(geoContextForNode(node))}</td>
-          <td data-label="目标结果" class="result-preview" title="${escapeHtml(targetResponseText(node.latency))}">${escapeHtml(targetResponsePreview(node.latency))}</td>
+          <td data-label="目标结果" class="result-preview node-target-result" title="${escapeHtml(targetResponseText(node.latency))}">${escapeHtml(targetResponsePreview(node.latency))}</td>
         </tr>`).join("")}
       </tbody>
     </table>`;
@@ -508,7 +508,7 @@ function renderPortsTable() {
           <th>协议</th>
           <th>状态</th>
           <th>延迟</th>
-          <th>验证结果</th>
+          <th>响应</th>
           <th>本地检测</th>
           <th>出口 IP</th>
           <th>地区</th>
@@ -528,17 +528,19 @@ function renderPortsTable() {
           <td data-label="协议">${protocolChip(item.type || "-")}</td>
           <td data-label="状态">${validatingPorts.has(String(port)) ? '<span class="badge testing">验证中</span>' : statusBadge(item.latency)}</td>
           <td data-label="延迟">${latencyBarHtml(item.latency)}</td>
-          <td data-label="验证结果" class="result-preview" title="${escapeHtml(targetResponseText(item.latency))}">${escapeHtml(targetResponsePreview(item.latency))}</td>
+          <td data-label="响应" class="result-preview" title="${escapeHtml(targetResponseText(item.latency))}">${escapeHtml(targetResponsePreview(item.latency))}</td>
           <td data-label="本地检测">${localProxyPortSummary(port) || '<span class="muted">-</span>'}</td>
-          <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || "-")}</td>
+          <td data-label="出口 IP" class="mono" id="ip-${port}">${escapeHtml(item.exit_ip || item.latency?.exit_ip || localProxyCheckResults[String(port)]?.exit_ip || "-")}</td>
           <td data-label="地区"><span id="geo-${port}">${geoChipHtml(geoContextForPort(port, item))}</span></td>
-          <td data-label="curl"><code class="copyable" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="copy curl 命令">${escapeHtml(curlCommand)}</code></td>
+          <td data-label="curl">
+            <button class="copy-command" data-copy="${escapeHtml(curlCommand)}" data-copy-label="curl 命令" title="${escapeHtml(curlCommand)}" aria-label="复制端口 ${port} 的 curl 验证命令">复制 curl</button>
+          </td>
           <td data-label="操作">
             <div class="table-actions">
-              <button data-ip-port="${port}">查出口</button>
-              <button data-validate-port="${port}">验证</button>
-              <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5">复制 SOCKS</button>
-              <button data-remove-port="${port}">移除映射</button>
+              <button data-ip-port="${port}" title="查询出口 IP" aria-label="查询端口 ${port} 出口 IP">出口</button>
+              <button data-validate-port="${port}" title="验证端口 ${port}">验证</button>
+              <button data-copy="${escapeHtml(socksProxy)}" data-copy-label="标准 SOCKS5" title="复制 SOCKS5 代理" aria-label="复制端口 ${port} 的 SOCKS5 代理">SOCKS</button>
+              <button data-remove-port="${port}" title="移除端口 ${port} 映射" aria-label="移除端口 ${port} 映射">移除</button>
             </div>
           </td>
         </tr>`;
@@ -572,11 +574,8 @@ $("portsTable").addEventListener("click", async (event) => {
           ? `<span class="badge idle">—</span>`
           : `<span class="geoip-chip" title="${escapeHtml(summary)}"><span class="flag ${flagCls}"></span>${escapeHtml(compact)}</span>`;
       }
-      showQuickResult(
-        `端口 ${port}`,
-        result.exit_ip ? `出口 IP：${result.exit_ip}；地区：${result.geoip_compact || geoIpCompact(result.geoip) || "-"}` : `失败：${result.error || "未知错误"}`,
-        Boolean(result.exit_ip)
-      );
+      if (result.exit_ip) clearQuickResult();
+      else showQuickResult(`端口 ${port}`, `失败：${result.error || "未知错误"}`, false);
       await refresh();
     });
   } else if (button.dataset.validatePort) {
@@ -600,30 +599,18 @@ function renderLocalProxyCheckPorts() {
 }
 
 
-function renderLocalProxyCheckResult(result) {
+function renderLocalProxyCheckProgress(message = "", tone = "muted") {
   const box = $("localProxyCheckResult");
   if (!box) return;
-  if (!result) {
-    box.className = "local-check-result muted";
-    box.textContent = "未检测";
+  if (!message) {
+    box.className = "tool-progress hidden";
+    box.textContent = "";
     box.title = "";
     return;
   }
-  const failed = localProxyCheckFailed(result);
-  const items = result.items || [];
-  const failedMessage = result.error || items.find((item) => item.status === "fail")?.message || "";
-  const compactFailedMessage = compactCheckMessage(failedMessage || result.summary || "失败");
-  const targets = items.map((item) => `${item.target}: ${item.status} ${item.latency_ms || "-"}ms ${item.message || ""}`).join("\n");
-  const targetChips = items
-    .filter((item) => item.target !== "base_connectivity")
-    .slice(0, 4)
-    .map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`)
-    .join("");
-  box.className = `local-check-result ${failed ? "bad" : "ok"}`;
-  box.innerHTML = failed
-    ? `<span>${escapeHtml(result.grade || "ERR")} · ${escapeHtml(compactFailedMessage)}</span>`
-    : `<span>${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")} · ${escapeHtml(result.exit_ip || "-")} · ${escapeHtml(result.country || result.country_code || "-")}</span><span class="local-check-targets">${targetChips}</span>`;
-  box.title = targets || result.summary || failedMessage || "";
+  box.className = `tool-progress ${tone}`;
+  box.textContent = message;
+  box.title = message;
 }
 
 function setCancelButton(id, visible) {
@@ -641,7 +628,6 @@ async function runLocalProxyCheckForPort(port) {
       body: JSON.stringify({ port: Number(port), timeout: 30 })
     });
     localProxyCheckResults[String(port)] = result;
-    renderLocalProxyCheckResult(result);
     return result;
   } catch (error) {
     const result = {
@@ -654,7 +640,6 @@ async function runLocalProxyCheckForPort(port) {
       items: [{ target: "base_connectivity", status: "fail", message: error.message }]
     };
     localProxyCheckResults[String(port)] = result;
-    renderLocalProxyCheckResult(result);
     return result;
   } finally {
     localProxyCheckingPorts.delete(String(port));
@@ -690,18 +675,21 @@ async function pollLocalProxyCheckJob(jobId, portList) {
     }
     renderPortsTable();
     
-    $("localProxyCheckResult").textContent = `批量 ${job.completed}/${job.total}`;
+    renderLocalProxyCheckProgress(`检测中 ${job.completed}/${job.total}`);
     if (job.status === "done") break;
     if (job.status === "canceled") break;
     if (job.status === "error") {
       activeLocalProxyCheckJobId = null;
       setCancelButton("cancelLocalProxyCheckBtn", false);
-      throw new Error(job.error || "本地检测任务失败");
+      const message = job.error || "本地检测任务失败";
+      renderLocalProxyCheckProgress(message, "bad");
+      throw new Error(message);
     }
     await new Promise((resolve) => setTimeout(resolve, 700));
   }
   activeLocalProxyCheckJobId = null;
   setCancelButton("cancelLocalProxyCheckBtn", false);
+  renderLocalProxyCheckProgress();
   const results = Object.values(finalJob?.results || {});
   return {
     passed: results.filter((result) => !localProxyCheckFailed(result)).length,
@@ -768,8 +756,6 @@ function localProxyPortSummary(port) {
     <div class="proxy-admin-inline local" title="${escapeHtml(title || failedMessage || result.summary || "")}">
       <span class="badge ${failed ? "bad" : "ok"}">本地 ${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")}</span>
       ${failed ? `<span>${escapeHtml(compactFailedMessage)}</span>` : `
-        <span class="mono">${escapeHtml(result.exit_ip || "-")}</span>
-        <span>${escapeHtml(result.country || result.country_code || "-")}</span>
         <span class="proxy-admin-mini-targets">${targetChips}</span>
       `}
     </div>
@@ -853,6 +839,13 @@ function showQuickResult(title, body, ok = true) {
   const box = $("quickResult");
   box.className = `quick-result ${ok ? "ok" : "bad"}`;
   box.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(body)}</span>`;
+}
+
+function clearQuickResult() {
+  const box = $("quickResult");
+  if (!box) return;
+  box.className = "quick-result hidden";
+  box.innerHTML = "";
 }
 
 async function copyText(text, label = "内容") {
@@ -1260,14 +1253,10 @@ async function runSinglePortValidation(port) {
       body: JSON.stringify({ ports: [port], urls: validationUrls() })
     });
     applyPortValidationResults(result);
-    const detail = result.details?.[String(port)];
-    const okCount = (detail?.targets || []).filter((item) => item.ok).length;
-    const total = (detail?.targets || []).length;
-    const exitIp = detail?.exit_ip || "-";
-    showQuickResult(`端口 ${port}`, `出口 IP：${exitIp}；目标成功 ${okCount}/${total}`, okCount > 0);
     validatingPorts.delete(String(port));
     renderPortsTable();
     renderValidationResults();
+    clearQuickResult();
   } catch (error) {
     validatingPorts.delete(String(port));
     renderPortsTable();
@@ -1320,12 +1309,9 @@ async function pollPortTestJob(jobId, urls) {
     showQuickResult("验证全部端口", `验证中；目标：${urls.join("，")}；进度 ${job.completed}/${job.total}`);
     if (job.status === "done") {
       validatingPorts.clear();
-      const details = Object.values(validationDetails);
-      const total = job.total || details.length;
-      const ok = details.filter((detail) => (detail.targets || []).some((target) => target.ok)).length;
       renderPortsTable();
       renderValidationResults();
-      showQuickResult("验证全部端口", `可用 ${ok}/${total}；目标：${urls.join("，")}`, ok > 0);
+      clearQuickResult();
       return;
     }
     if (job.status === "canceled") {
@@ -1805,7 +1791,6 @@ $("doctorBtn").addEventListener("click", () => runTask("系统自检", async () 
     body: JSON.stringify({ timeout: 30 })
   });
   renderDoctorResult(result);
-  showQuickResult("系统自检", result.summary || `OK ${result.ok || 0} / WARN ${result.warn || 0} / FAIL ${result.fail || 0}`, !result.fail);
   return result.fail ? `自检发现 ${result.fail} 个失败项` : "自检完成";
 }));
 
@@ -1818,22 +1803,17 @@ $("proxyAdminCancelBtn").addEventListener("click", () => runTask("取消 ProxyAd
 $("localProxyCheckBtn").addEventListener("click", () => runTask("本地检测", async () => {
   const port = Number($("localProxyCheckPort").value || 0);
   if (!port) throw new Error("没有可检测端口");
-  renderLocalProxyCheckResult({ grade: "...", score: "-", exit_ip: "检测中", country: "" });
-  const result = await runLocalProxyCheckForPort(port);
-  showQuickResult(
-    `本地检测 ${port}`,
-    `${result.grade || "-"} · ${result.score ?? "-"} · ${result.exit_ip || "-"} · ${result.country || result.country_code || "-"}`,
-    !localProxyCheckFailed(result)
-  );
+  renderLocalProxyCheckProgress(`检测端口 ${port}`);
+  await runLocalProxyCheckForPort(port);
+  renderLocalProxyCheckProgress();
   return `本地检测完成：${port}`;
 }));
 
 $("localProxyCheckAllBtn").addEventListener("click", () => runTask("全部检测", async () => {
   const portList = Object.keys(ports).sort((left, right) => Number(left) - Number(right));
   if (!portList.length) throw new Error("没有可检测端口");
-  renderLocalProxyCheckResult({ grade: "...", score: "-", exit_ip: "批量检测中", country: "" });
+  renderLocalProxyCheckProgress(`检测中 0/${portList.length}`);
   const result = await runLocalProxyCheckForPorts(portList, 3);
-  showQuickResult("一键本地检测", `通过 ${result.passed}，失败 ${result.failed}`, result.failed === 0);
   return `一键本地检测完成：通过 ${result.passed}，失败 ${result.failed}`;
 }));
 

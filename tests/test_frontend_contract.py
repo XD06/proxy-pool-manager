@@ -256,3 +256,18 @@ def test_dashboard_tool_cards_have_consistent_roles_and_icons():
     for cls in ("engine-tool", "doctor-tool", "ai-tool", "target-tool"):
         assert f'class="tool-section {cls}"' in html
     assert html.count('class="ico"') >= 4
+
+
+def test_dashboard_results_have_one_visible_home():
+    html = _read(INDEX)
+    js = _read(APP_JS)
+
+    assert 'id="localProxyCheckResult" class="tool-progress hidden"' in html
+    assert 'showQuickResult("一键本地检测"' not in js
+    assert 'showQuickResult("系统自检"' not in js
+    assert 'localProxyPortSummary(port)' in js
+    assert 'class="copy-command"' in js
+    assert '>复制 curl</button>' in js
+    assert 'class="node-identity"' in js
+    assert 'class="mono server-address"' in js
+    assert 'node-target-result' in js

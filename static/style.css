@@ -1278,7 +1278,7 @@ textarea {
 
 .dashboard-tools {
   display: grid;
-  grid-template-columns: minmax(250px, 1.15fr) minmax(170px, .72fr) minmax(250px, 1fr) minmax(320px, 1.3fr);
+  grid-template-columns: minmax(300px, 1.1fr) minmax(170px, .58fr) minmax(300px, 1fr);
   gap: 0;
   margin: 0 0 14px;
   align-items: stretch;
@@ -1303,12 +1303,8 @@ textarea {
   grid-template-rows: auto 1fr;
 }
 
-.tool-section:last-child {
-  border-right: 0;
-}
-
 .tool-section:nth-child(3) {
-  grid-column: auto;
+  border-right: 0;
 }
 
 .tool-section.wide {
@@ -1428,21 +1424,85 @@ textarea {
   align-self: start;
 }
 
+.tool-state,
+.tool-progress {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  min-height: 26px;
+  border-radius: 7px;
+  padding: 3px 8px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-state.ok { background: var(--pastel-green); color: var(--ok); }
+.tool-state.warn { background: var(--pastel-yellow); color: #8a5a00; }
+.tool-state.bad,
+.tool-progress.bad { background: var(--pastel-red); color: var(--bad); }
+
+.ai-tool .actions {
+  display: grid;
+  grid-template-columns: minmax(108px, 1fr) auto auto auto;
+  align-items: end;
+  justify-content: stretch;
+  gap: 6px;
+}
+
+.ai-tool .inline-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.ai-tool .tool-progress {
+  grid-column: 1 / -1;
+}
+
 .ai-tool .inline-field select {
   min-width: 96px;
 }
 
 .target-tool .actions {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(96px, .55fr) auto;
+  grid-template-columns: minmax(260px, 1fr) minmax(130px, .35fr) auto;
   align-items: end;
+}
+
+.target-tool {
+  grid-column: 1 / -1;
+  grid-template-columns: 132px minmax(0, 1fr);
+  grid-template-rows: auto;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  border-right: 0;
+  padding-block: 9px;
+}
+
+.target-tool > header {
+  margin: 0;
+}
+
+.target-tool .actions {
+  align-self: center;
 }
 
 .target-tool .inline-field {
   min-width: 0;
+  white-space: nowrap;
 }
 
 .target-tool .inline-field.wide {
+  width: 100%;
+}
+
+.target-tool .inline-field input,
+.target-tool .inline-field select {
   width: 100%;
 }
 
@@ -2059,6 +2119,175 @@ button[data-remove-proxy-admin-port]:hover {
   color: var(--muted);
 }
 
+#nodeTable table {
+  min-width: 1080px;
+  table-layout: fixed;
+}
+
+#nodeTable th,
+#nodeTable td {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+#nodeTable th {
+  white-space: nowrap;
+}
+
+#nodeTable th:nth-child(1) { width: 42px; }
+#nodeTable th:nth-child(2) { width: 170px; }
+#nodeTable th:nth-child(3) { width: 68px; }
+#nodeTable th:nth-child(4) { width: 235px; }
+#nodeTable th:nth-child(5) { width: 70px; }
+#nodeTable th:nth-child(6) { width: 92px; }
+#nodeTable th:nth-child(7) { width: 120px; }
+#nodeTable th:nth-child(8) { width: 175px; }
+#nodeTable th:nth-child(9) { width: 173px; }
+
+#nodeTable td:nth-child(1),
+#nodeTable td:nth-child(3),
+#nodeTable td:nth-child(4),
+#nodeTable td:nth-child(5),
+#nodeTable td:nth-child(6),
+#nodeTable td:nth-child(7),
+#nodeTable td:nth-child(8),
+#nodeTable td:nth-child(9) {
+  white-space: nowrap;
+}
+
+#nodeTable .node-identity strong,
+#nodeTable .node-identity small,
+#nodeTable .server-address,
+#nodeTable .node-target-result,
+#nodeTable .geoip-chip {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#nodeTable .node-identity strong {
+  font-size: 12px;
+}
+
+#nodeTable .node-identity small {
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+#nodeTable .server-address {
+  line-height: 1.45;
+}
+
+#nodeTable .node-target-result {
+  max-width: none;
+  color: var(--muted);
+}
+
+#nodeTable .geoip-chip {
+  display: inline-flex;
+}
+
+#portsTable table {
+  min-width: 1100px;
+  table-layout: fixed;
+}
+
+#portsTable th,
+#portsTable td {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+#portsTable th {
+  white-space: nowrap;
+}
+
+#portsTable th:nth-child(1) { width: 54px; }
+#portsTable th:nth-child(2) { width: 120px; }
+#portsTable th:nth-child(3) { width: 68px; }
+#portsTable th:nth-child(4) { width: 68px; }
+#portsTable th:nth-child(5) { width: 92px; }
+#portsTable th:nth-child(6) { width: 68px; }
+#portsTable th:nth-child(7) { width: 146px; }
+#portsTable th:nth-child(8) { width: 124px; }
+#portsTable th:nth-child(9) { width: 158px; }
+#portsTable th:nth-child(10) { width: 92px; }
+#portsTable th:nth-child(11) { width: 120px; }
+
+#portsTable td:nth-child(1),
+#portsTable td:nth-child(3),
+#portsTable td:nth-child(4),
+#portsTable td:nth-child(5),
+#portsTable td:nth-child(6),
+#portsTable td:nth-child(8),
+#portsTable td:nth-child(10) {
+  white-space: nowrap;
+}
+
+#portsTable td:nth-child(2) {
+  overflow-wrap: anywhere;
+}
+
+#portsTable .result-preview {
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+#portsTable .proxy-admin-inline {
+  max-width: 100%;
+}
+
+#portsTable .proxy-admin-inline.local {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  margin: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+
+#portsTable .proxy-admin-mini-targets {
+  flex-wrap: nowrap;
+  gap: 3px;
+}
+
+#portsTable .proxy-admin-mini-targets b {
+  padding: 1px 4px;
+  font-size: 10px;
+}
+
+#portsTable .geoip-chip {
+  display: inline-flex;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-command {
+  min-height: 28px;
+  padding-inline: 8px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+#portsTable .table-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+#portsTable .table-actions button {
+  min-height: 27px;
+  padding-inline: 5px;
+  font-size: 11px;
+}
+
 @media (max-width: 860px) {
   .dashboard-tools {
     overflow: visible;
@@ -2077,6 +2306,14 @@ button[data-remove-proxy-admin-port]:hover {
 
   .target-tool .actions {
     grid-template-columns: 1fr;
+  }
+
+  .target-tool {
+    grid-template-columns: 1fr;
+  }
+
+  .target-tool > header {
+    margin-bottom: 10px;
   }
 
   .app-shell {
@@ -2242,6 +2479,10 @@ button[data-remove-proxy-admin-port]:hover {
     grid-column: auto;
   }
 
+  .dashboard-tools .target-tool {
+    grid-column: 1 / -1;
+  }
+
   .tool-section.wide .actions {
     display: flex;
     flex-wrap: wrap;
@@ -2376,6 +2617,15 @@ button[data-remove-proxy-admin-port]:hover {
   .actions > label {
     min-width: 0;
     width: 100%;
+  }
+
+  .ai-tool .actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ai-tool .inline-field,
+  .ai-tool .tool-progress {
+    grid-column: 1 / -1;
   }
 
   .actions > .inline-field.wide,
