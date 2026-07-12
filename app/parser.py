@@ -13,7 +13,7 @@ import yaml
 from .models import ImportResult, ProxyNode
 
 
-SUPPORTED_LINK_SCHEMES = {"vless", "vmess", "ss", "trojan", "hysteria2", "hy2", "tuic"}
+SUPPORTED_LINK_SCHEMES = {"vless", "vmess", "ss", "trojan", "hysteria2", "hy2", "tuic", "anytls"}
 BASE64_SUBSCRIPTION_RE = re.compile(r"[A-Za-z0-9+/_-]{80,}={0,2}")
 SUBSCRIPTION_INFO_RE = re.compile(
     r"(remaining|expire|reset|traffic|\u5269\u4f59\u6d41\u91cf|\u5230\u671f|\u5957\u9910|\u91cd\u7f6e)",
@@ -65,6 +65,20 @@ def _query_list(parsed) -> dict[str, list[str]]:
 
 def _truthy(value: str | None) -> bool:
     return value in {"1", "true", "True", "yes", "on"}
+
+
+def _duration(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    return f"{text}s" if re.fullmatch(r"\d+(?:\.\d+)?", text) else text
+
+
+def _nonnegative_int(value: object, field: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return number
 
 
 def _tls_from_query(params: dict[str, str]) -> dict[str, Any] | None:
@@ -285,6 +299,55 @@ def parse_tuic(link: str) -> ProxyNode:
     return _build_node(_clean_name(parsed.fragment, parsed.hostname or "tuic"), "tuic", outbound)
 
 
+def parse_anytls(link: str) -> ProxyNode:
+    parsed = urlparse(link)
+    params = _query(parsed)
+    query_values = _query_list(parsed)
+    password = unquote(parsed.username or "")
+    server = parsed.hostname or ""
+    if not server:
+        raise ValueError("AnyTLS server is required")
+    if not password:
+        raise ValueError("AnyTLS password is required")
+    port = int(parsed.port or 443)
+    if not 1 <= port <= 65535:
+        raise ValueError("AnyTLS port must be between 1 and 65535")
+
+    outbound: dict[str, Any] = {
+        "type": "anytls",
+        "server": server,
+        "server_port": port,
+        "password": password,
+        "tls": {
+            "enabled": True,
+            "server_name": params.get("sni") or params.get("peer") or server,
+        },
+    }
+    if _truthy(params.get("insecure") or params.get("allowInsecure") or params.get("skip-cert-verify")):
+        outbound["tls"]["insecure"] = True
+    fingerprint = params.get("fp")
+    if fingerprint:
+        outbound["tls"]["utls"] = {"enabled": True, "fingerprint": fingerprint}
+    alpn_values = query_values.get("alpn") or []
+    if alpn_values:
+        alpn = [item for value in alpn_values for item in value.split(",") if item]
+        if alpn:
+            outbound["tls"]["alpn"] = alpn
+
+    for target, aliases in {
+        "idle_session_check_interval": ("idle_session_check_interval", "idle-session-check-interval"),
+        "idle_session_timeout": ("idle_session_timeout", "idle-session-timeout"),
+    }.items():
+        duration = _duration(next((params[key] for key in aliases if params.get(key)), None))
+        if duration:
+            outbound[target] = duration
+    min_idle = params.get("min_idle_session") or params.get("min-idle-session")
+    if min_idle not in {None, ""}:
+        outbound["min_idle_session"] = _nonnegative_int(min_idle, "min_idle_session")
+
+    return _build_node(_clean_name(parsed.fragment, server), "anytls", outbound)
+
+
 def parse_vmess(link: str) -> ProxyNode:
     payload = link[len("vmess://") :]
     data = json.loads(_decode_base64(payload))
@@ -369,6 +432,8 @@ def parse_link(link: str) -> ProxyNode:
         return parse_hysteria2(link)
     if scheme == "tuic":
         return parse_tuic(link)
+    if scheme == "anytls":
+        return parse_anytls(link)
     raise ValueError(f"Unsupported link scheme: {scheme}")
 
 
@@ -474,6 +539,42 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                     outbound["obfs"] = {"type": str(obfs)}
                     if proxy.get("obfs-password"):
                         outbound["obfs"]["password"] = str(proxy["obfs-password"])
+            elif ptype == "anytls":
+                password = str(proxy.get("password") or "")
+                if not password:
+                    raise ValueError("AnyTLS password is required")
+                tls: dict[str, Any] = {
+                    "enabled": True,
+                    "server_name": proxy.get("sni") or proxy.get("servername") or proxy["server"],
+                }
+                if proxy.get("skip-cert-verify"):
+                    tls["insecure"] = True
+                fingerprint = proxy.get("client-fingerprint")
+                if fingerprint:
+                    tls["utls"] = {"enabled": True, "fingerprint": str(fingerprint)}
+                alpn = proxy.get("alpn")
+                if alpn:
+                    tls["alpn"] = list(alpn) if isinstance(alpn, list) else [item for item in str(alpn).split(",") if item]
+                port = int(proxy["port"])
+                if not 1 <= port <= 65535:
+                    raise ValueError("AnyTLS port must be between 1 and 65535")
+                outbound = {
+                    "type": "anytls",
+                    "server": proxy["server"],
+                    "server_port": port,
+                    "password": password,
+                    "tls": tls,
+                }
+                for target, aliases in {
+                    "idle_session_check_interval": ("idle-session-check-interval", "idle_session_check_interval"),
+                    "idle_session_timeout": ("idle-session-timeout", "idle_session_timeout"),
+                }.items():
+                    duration = _duration(next((proxy[key] for key in aliases if proxy.get(key) is not None), None))
+                    if duration:
+                        outbound[target] = duration
+                min_idle = proxy.get("min-idle-session", proxy.get("min_idle_session"))
+                if min_idle is not None:
+                    outbound["min_idle_session"] = _nonnegative_int(min_idle, "min_idle_session")
             else:
                 warnings.append(f"Skipped unsupported Clash node type at #{index}: {ptype}")
                 continue

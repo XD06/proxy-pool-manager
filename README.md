@@ -18,7 +18,7 @@
 ## 特性
 
 - **3 Tab 控制台**：节点（导入+测速）/ 分配 / 运行，浅色 Toolbench 风格
-- **多协议导入**：vless / vmess / ss / trojan / hysteria2 / Clash YAML / Base64 订阅
+- **多协议导入**：vless / vmess / ss / trojan / hysteria2 / tuic / anytls / Clash YAML / Base64 订阅
 - **测速去重**：临时启动 sing-box 验证延迟和出口 IP，同 IP 自动保留最快节点
 - **端口固定映射**：一端口一节点，sing-box `mixed` inbound 同时支持 HTTP + SOCKS5
 - **GeoIP 多源回退**：geojs → ipwho → freeipapi → ipinfo → ip-api，失败 1h 自动重试
@@ -38,7 +38,7 @@
 |------|------|
 | FastAPI 管理服务 | ✅ |
 | 纯 HTML/CSS/JS Web UI（3 Tab） | ✅ |
-| 节点导入（vless/vmess/ss/trojan/hysteria2/Clash/Base64） | ✅ |
+| 节点导入（vless/vmess/ss/trojan/hysteria2/tuic/anytls/Clash/Base64） | ✅ |
 | 端口映射保存 | ✅ |
 | sing-box 配置生成 + 自动下载 + check 校验 | ✅ |
 | 出口 IP 查询 | ✅ |
@@ -47,8 +47,8 @@
 | 运行后端口验证 | ✅ |
 | AI 连通性检测（GPT/Claude/Gemini） | ✅ |
 | HTTP + SOCKS5 混合代理端口 | ✅ |
-| 单元测试 + API smoke test（116 passed） | ✅ |
-| SSR / TUIC / 多订阅合并 / 流量统计 / TUN 模式 | ❌ |
+| 单元测试 + API smoke test（121 passed） | ✅ |
+| SSR / 多订阅合并 / 流量统计 / TUN 模式 | ❌ |
 
 ## 快速安装
 

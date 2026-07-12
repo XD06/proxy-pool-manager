@@ -943,6 +943,7 @@ button.ghost:hover {
 .proto.hysteria { background: #ffedd5; color: #c2410c; border-color: #fed7aa; }
 .proto.vmess { background: #e0e7ff; color: #4338ca; border-color: #c7d2fe; }
 .proto.tuic { background: #ecfeff; color: #0e7490; border-color: #a5f3fc; }
+.proto.anytls { background: #ecfccb; color: #3f6212; border-color: #bef264; }
 .proto.other { background: var(--soft); color: var(--muted); border-color: var(--line); }
 
 .latency-visual {

@@ -116,6 +116,29 @@ def test_generate_config_adds_tcp_fast_open_but_not_multiplex_by_default():
     assert "multiplex" not in outbound
 
 
+def test_generate_config_does_not_add_unsupported_tcp_fast_open_to_anytls():
+    node = ProxyNode(
+        tag="node-anytls-a",
+        name="AnyTLS",
+        type="anytls",
+        server="node.example.com",
+        server_port=443,
+        outbound={
+            "type": "anytls",
+            "tag": "node-anytls-a",
+            "server": "node.example.com",
+            "server_port": 443,
+            "password": "secret",
+            "tls": {"enabled": True, "server_name": "cdn.example.com"},
+        },
+    )
+
+    config = generate_config([node], {"8001": PortMapping(node_tag=node.tag)})
+
+    outbound = [item for item in config["outbounds"] if item["tag"] == node.tag][0]
+    assert "tcp_fast_open" not in outbound
+
+
 def test_generate_config_preserves_existing_multiplex():
     node = make_node()
     node.outbound["multiplex"] = {

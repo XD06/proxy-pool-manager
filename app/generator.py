@@ -81,7 +81,10 @@ def generate_config(
         if node.tag not in used_tags:
             outbound = dict(node.outbound)
             outbound["tag"] = node.tag
-            outbound["tcp_fast_open"] = True
+            if outbound.get("type") == "anytls":
+                outbound.pop("tcp_fast_open", None)
+            else:
+                outbound["tcp_fast_open"] = True
             outbounds.append(outbound)
             used_tags.add(node.tag)
 

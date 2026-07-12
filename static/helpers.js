@@ -154,7 +154,7 @@ function statusBadge(latency) {
 
 function protocolChip(type) {
   const raw = String(type || "-").toLowerCase();
-  const known = ["vless", "vmess", "ss", "trojan", "hysteria2", "hysteria", "tuic", "wireguard"];
+  const known = ["vless", "vmess", "ss", "trojan", "hysteria2", "hysteria", "tuic", "anytls", "wireguard"];
   const cls = known.includes(raw) ? raw.replace("hysteria2", "hysteria2") : "other";
   return `<span class="proto ${escapeHtml(cls)}">${escapeHtml(type || "-")}</span>`;
 }

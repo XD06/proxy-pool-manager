@@ -200,6 +200,80 @@ def test_parse_tuic_link():
     assert node.outbound["udp_relay_mode"] == "native"
 
 
+def test_parse_anytls_link():
+    link = (
+        "anytls://test-password@node.example.com:13301"
+        "?security=tls&sni=cdn.example.com&insecure=1&type=tcp&headerType=none"
+        "&fp=chrome&alpn=h2,http%2F1.1&idle_session_check_interval=30"
+        "&idle-session-timeout=45s&min_idle_session=2#%F0%9F%87%B8%F0%9F%87%AC%20SG%2001"
+    )
+    result = parse_text(link)
+
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.name == "🇸🇬 SG 01"
+    assert node.type == "anytls"
+    assert node.server == "node.example.com"
+    assert node.server_port == 13301
+    assert node.outbound["password"] == "test-password"
+    assert node.outbound["tls"]["server_name"] == "cdn.example.com"
+    assert node.outbound["tls"]["insecure"] is True
+    assert node.outbound["tls"]["utls"]["fingerprint"] == "chrome"
+    assert node.outbound["tls"]["alpn"] == ["h2", "http/1.1"]
+    assert node.outbound["idle_session_check_interval"] == "30s"
+    assert node.outbound["idle_session_timeout"] == "45s"
+    assert node.outbound["min_idle_session"] == 2
+    assert "transport" not in node.outbound
+
+
+def test_parse_base64_anytls_subscription():
+    link = "anytls://secret@node.example.com:443?sni=cdn.example.com#AnyTLS"
+    encoded = base64.urlsafe_b64encode((link + "\r\n").encode()).decode()
+
+    result = parse_text(encoded)
+
+    assert result.count == 1
+    assert result.nodes[0].type == "anytls"
+    assert result.nodes[0].outbound["password"] == "secret"
+
+
+def test_parse_clash_yaml_anytls():
+    text = """
+proxies:
+  - name: SG AnyTLS
+    type: anytls
+    server: node.example.com
+    port: 443
+    password: secret
+    sni: cdn.example.com
+    client-fingerprint: chrome
+    skip-cert-verify: true
+    alpn: [h2, http/1.1]
+    idle-session-check-interval: 30
+    idle-session-timeout: 45s
+    min-idle-session: 1
+"""
+    result = parse_text(text)
+
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.type == "anytls"
+    assert node.outbound["tls"]["server_name"] == "cdn.example.com"
+    assert node.outbound["tls"]["insecure"] is True
+    assert node.outbound["tls"]["utls"]["fingerprint"] == "chrome"
+    assert node.outbound["tls"]["alpn"] == ["h2", "http/1.1"]
+    assert node.outbound["idle_session_check_interval"] == "30s"
+    assert node.outbound["idle_session_timeout"] == "45s"
+    assert node.outbound["min_idle_session"] == 1
+
+
+def test_invalid_anytls_is_warning():
+    result = parse_text("anytls://@node.example.com:443#Invalid")
+
+    assert result.count == 0
+    assert "AnyTLS password is required" in result.warnings[0]
+
+
 def test_parse_ss_v2ray_plugin_link():
     userinfo = base64.urlsafe_b64encode(b"aes-256-gcm:secret").decode().rstrip("=")
     text = f"ss://{userinfo}@ss.example.com:8388?plugin=v2ray-plugin%3Btls%3Bhost%3Dcdn.example.com%3Bpath%3D%252Fws#SS"
