@@ -282,12 +282,18 @@ def test_node_test_options_stay_inside_panel_body():
     assert "margin: 0 16px 10px;" in css
 
 
-def test_only_compact_tabs_stay_visible_while_scrolling():
+def test_status_header_and_tabs_share_a_transparent_sticky_group():
     html = _read(INDEX)
     css = _read(STYLE_CSS)
 
-    assert 'class="app-sticky-header"' not in html
-    assert ".tabs {" in css
+    assert 'class="app-sticky-header"' in html
+    assert ".app-sticky-header {" in css
+    assert "background: transparent;" in css
+    assert "z-index: 30;" in css
+    assert ".hero {" in css
     assert "position: sticky;" in css
-    assert "top: 8px;" in css
+    assert "top: 0;" in css
+    assert "color-mix(in srgb, var(--panel) 72%, transparent)" in css
+    assert "backdrop-filter: blur(14px)" in css
+    assert "position: relative;" in css
     assert "overflow-x: clip;" in css
