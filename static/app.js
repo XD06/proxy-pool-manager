@@ -19,6 +19,10 @@ let activeNodeTestJobId = null;
 let activePortValidationJobId = null;
 let activeLocalProxyCheckJobId = null;
 let activeProxyAdminJobId = null;
+let pools = [];
+let trafficRange = localStorage.getItem("proxyPoolManager.trafficRange") || "24h";
+let trafficEntityType = "port";
+let trafficSearchQuery = "";
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 let authState = { enabled: false, authenticated: true };
 
@@ -997,24 +1001,162 @@ async function loadSingBoxInfo(checkLatest = false) {
   return info;
 }
 
+function formatTraffic(value) {
+  const amount = Number(value || 0);
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let unit = 0;
+  let display = amount;
+  while (display >= 1024 && unit < units.length - 1) {
+    display /= 1024;
+    unit += 1;
+  }
+  return `${display >= 100 || unit === 0 ? Math.round(display) : display.toFixed(1)} ${units[unit]}`;
+}
+
+function formatTrafficRate(value) {
+  return `${formatTraffic(value)}/s`;
+}
+
+function trafficPath(values, key, maxValue, width = 620, height = 150) {
+  if (!values.length) return "";
+  return values.map((item, index) => {
+    const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
+    const y = height - ((Number(item[key] || 0) / maxValue) * (height - 14)) - 7;
+    return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function renderTrafficChart(series = []) {
+  const chart = $("trafficChart");
+  if (!chart) return;
+  if (!series.length) {
+    chart.innerHTML = `<div class="empty"><strong>暂无流量数据</strong><span>启动引擎后，监控会每 15 秒聚合一次公开端口的流量。</span></div>`;
+    return;
+  }
+  const maxValue = Math.max(1, ...series.flatMap((item) => [Number(item.download || 0), Number(item.upload || 0)]));
+  const download = trafficPath(series, "download", maxValue);
+  const upload = trafficPath(series, "upload", maxValue);
+  const first = new Date(Number(series[0].bucket_start) * 1000).toLocaleString();
+  const last = new Date(Number(series[series.length - 1].bucket_start) * 1000).toLocaleString();
+  chart.innerHTML = `<svg viewBox="0 0 620 150" preserveAspectRatio="none" role="img" aria-labelledby="trafficChartTitle trafficChartDesc"><title id="trafficChartTitle">流量趋势</title><desc id="trafficChartDesc">范围从 ${escapeHtml(first)} 到 ${escapeHtml(last)}。下载总量 ${formatTraffic(series.reduce((sum, item) => sum + Number(item.download || 0), 0))}，上传总量 ${formatTraffic(series.reduce((sum, item) => sum + Number(item.upload || 0), 0))}。</desc><g class="traffic-grid"><path d="M0 30H620M0 75H620M0 120H620"/></g><path class="traffic-line download" d="${download}"/><path class="traffic-line upload" d="${upload}"/></svg>`;
+}
+
+function renderTrafficEvents(items = []) {
+  const target = $("trafficEvents");
+  if (!target) return;
+  target.innerHTML = items.length ? items.slice(0, 5).map((item) => `<article><strong>${escapeHtml(item.event_type || "事件")}</strong><span>${escapeHtml(item.message || "-")}</span><small>${new Date(Number(item.created_at) * 1000).toLocaleString()}</small></article>`).join("") : `<div class="empty"><strong>暂无运行事件</strong><span>节点池操作和运行状态变更将显示在这里。</span></div>`;
+}
+
+function renderTrafficTable(items = []) {
+  const target = $("trafficTable");
+  if (!target) return;
+  const search = trafficSearchQuery.trim().toLowerCase();
+  const filtered = items.filter((item) => `${item.entity_id || ""} ${item.name || ""}`.toLowerCase().includes(search));
+  if (!filtered.length) {
+    target.innerHTML = `<div class="empty"><strong>暂无${trafficEntityType === "port" ? "端口" : trafficEntityType === "pool" ? "节点池" : "节点"}流量</strong><span>等待公开端口产生流量，或调整筛选条件。</span></div>`;
+    return;
+  }
+  const labels = { port: "端口", pool: "节点池", node: "节点" };
+  target.innerHTML = `<table><thead><tr><th>${labels[trafficEntityType]}</th><th>下载</th><th>上传</th><th>活跃连接</th><th>最后活动</th><th>查看</th></tr></thead><tbody>${filtered.map((item) => `<tr><td data-label="${labels[trafficEntityType]}"><strong>${escapeHtml(item.name || item.entity_id)}</strong><small class="mono">${escapeHtml(item.entity_id)}</small></td><td data-label="下载">${formatTraffic(item.download)}</td><td data-label="上传">${formatTraffic(item.upload)}</td><td data-label="活跃连接">${Number(item.active || 0)}</td><td data-label="最后活动">${item.last_activity ? new Date(Number(item.last_activity) * 1000).toLocaleString() : "—"}</td><td data-label="查看"><button data-traffic-detail="${escapeHtml(item.entity_id)}">详情</button></td></tr>`).join("")}</tbody></table>`;
+}
+
+async function openTrafficDetail(entityId) {
+  const target = $("trafficDetail");
+  target.classList.remove("hidden");
+  target.innerHTML = `<div class="traffic-drawer-head"><strong>正在读取详情…</strong><button data-close-traffic-detail>关闭</button></div>`;
+  try {
+    const detail = await request(`/api/traffic/entities/${encodeURIComponent(trafficEntityType)}/${encodeURIComponent(entityId)}?range=${trafficRange}`);
+    target.innerHTML = `<div class="traffic-drawer-head"><div><strong>${escapeHtml(entityId)}</strong><span>${trafficEntityType === "port" ? "端口" : trafficEntityType === "pool" ? "节点池" : "节点"}流量明细</span></div><button data-close-traffic-detail>关闭</button></div><div class="traffic-drawer-kpis"><span>下载 <b>${formatTraffic(detail.download)}</b></span><span>上传 <b>${formatTraffic(detail.upload)}</b></span></div><div class="traffic-drawer-chart">${detail.series.length ? `${detail.series.length} 个时间桶 · 最近 ${trafficRange}` : "暂无历史数据"}</div>`;
+  } catch (error) {
+    target.innerHTML = `<div class="traffic-drawer-head"><strong>详情不可用</strong><button data-close-traffic-detail>关闭</button></div><p>${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderPools() {
+  const list = $("poolList");
+  const routerNotice = $("poolRouterNotice");
+  if (!list || !routerNotice) return;
+  const router = statusSnapshot.pool_router || {};
+  $("createPoolBtn").disabled = !router.available;
+  $("createPoolBtn").title = router.available ? "" : "先运行安装脚本构建 Pool Router";
+  routerNotice.className = `pool-router-notice ${router.available ? (router.running ? "ok" : "warn") : "bad"}`;
+  routerNotice.textContent = router.available ? (router.running ? "Pool Router 正在运行，统计与轮询已启用。" : "Pool Router 已安装；启动引擎后生效。") : "Pool Router 未安装：固定端口仍可使用；节点池和端口流量监控需要安装脚本构建 Go Router。";
+  if (!pools.length) {
+    list.innerHTML = `<div class="empty"><strong>还没有节点池</strong><span>创建后即可用一个代理端口在多个健康节点间轮询。</span></div>`;
+    return;
+  }
+  list.innerHTML = pools.map((pool) => {
+    const active = pool.members.filter((member) => member.enabled && !member.draining).length;
+    return `<article class="pool-card"><header><div><strong>${escapeHtml(pool.name)}</strong><span class="mono">:${pool.listen_port}</span></div><span class="badge ${pool.enabled ? "ok" : "idle"}">${pool.enabled ? "启用" : "停用"}</span></header><p>${pool.policy === "weighted_round_robin" ? "加权轮询" : "普通轮询"} · ${active}/${pool.members.length} 活跃成员</p><div class="pool-member-chips">${pool.members.map((member) => `<span class="${member.draining ? "draining" : member.alive === false ? "unhealthy" : ""}">${escapeHtml(member.node_name || member.node_tag)} ×${member.weight}${member.draining ? " · 排空" : ""}</span>`).join("")}</div><footer><button data-copy="${escapeHtml(pool.http_proxy)}" data-copy-label="节点池 HTTP 地址">复制 HTTP</button><button data-pool-advance="${escapeHtml(pool.id)}">切换下一节点</button><button data-pool-edit="${escapeHtml(pool.id)}">编辑</button><button data-pool-delete="${escapeHtml(pool.id)}">删除</button></footer></article>`;
+  }).join("");
+}
+
+function openPoolEditor(pool = null) {
+  $("poolEditor").classList.remove("hidden");
+  $("poolEditorTitle").textContent = pool ? `编辑节点池 · ${pool.name}` : "新建节点池";
+  $("poolId").value = pool?.id || "";
+  $("poolName").value = pool?.name || "";
+  $("poolPort").value = pool?.listen_port || "8201";
+  $("poolPolicy").value = pool?.policy || "weighted_round_robin";
+  $("poolEnabled").checked = pool?.enabled ?? true;
+  const selected = new Map((pool?.members || []).map((member) => [member.node_tag, member]));
+  $("poolMembers").innerHTML = nodes.length ? `<h3>成员与权重</h3>${nodes.map((node) => {
+    const member = selected.get(node.tag);
+    return `<label class="pool-member-row"><input type="checkbox" data-pool-member="${escapeHtml(node.tag)}" ${member ? "checked" : ""}><span>${escapeHtml(node.name)}</span><small>${escapeHtml(node.type)} · ${node.latency?.alive === false ? "不可用" : node.latency?.delay ? `${node.latency.delay}ms` : "未测速"}</small><input type="number" data-pool-weight="${escapeHtml(node.tag)}" value="${member?.weight || 1}" min="1" max="100" aria-label="${escapeHtml(node.name)} 权重"><label class="pool-drain-toggle"><input type="checkbox" data-pool-draining="${escapeHtml(node.tag)}" ${member?.draining ? "checked" : ""}>排空</label></label>`;
+  }).join("")}` : `<div class="empty"><strong>没有可用节点</strong><span>请先导入节点。</span></div>`;
+}
+
+function hidePoolEditor() {
+  $("poolEditor").classList.add("hidden");
+}
+
+async function refreshTraffic() {
+  try {
+    const [overview, entityData, eventData] = await Promise.all([
+      request(`/api/traffic/overview?range=${trafficRange}`),
+      request(`/api/traffic/entities?type=${trafficEntityType}&range=${trafficRange}`),
+      request("/api/traffic/events?limit=5")
+    ]);
+    $("trafficDownload").textContent = formatTraffic(overview.download);
+    $("trafficUpload").textContent = formatTraffic(overview.upload);
+    $("trafficDownloadRate").textContent = `当前 ${formatTrafficRate(overview.download_rate)}`;
+    $("trafficUploadRate").textContent = `当前 ${formatTrafficRate(overview.upload_rate)}`;
+    $("trafficActive").textContent = Number(overview.active || 0);
+    const router = overview.router || {};
+    $("trafficRouterState").textContent = router.running ? "Router 计量中" : router.available ? "等待引擎启动" : "Router 未安装";
+    const attention = Number(!router.running && statusSnapshot.running) + Number(!router.available);
+    $("trafficAttention").textContent = attention ? `${attention} 项` : "正常";
+    $("trafficChartSummary").textContent = `${overview.series.length} 个时间桶 · ${trafficRange}`;
+    renderTrafficChart(overview.series || []);
+    renderTrafficEvents(eventData.items || []);
+    renderTrafficTable(entityData.items || []);
+  } catch (error) {
+    $("trafficChart").innerHTML = `<div class="empty"><strong>监控暂不可用</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
+}
+
 
 async function refresh() {
   await loadProxyAdminConfig();
-  const [status, nodeData, portData] = await Promise.all([
+  const [status, nodeData, portData, poolData] = await Promise.all([
     request("/api/status"),
     request("/api/nodes"),
-    request("/api/ports")
+    request("/api/ports"),
+    request("/api/pools")
   ]);
   statusSnapshot = status;
   nodes = nodeData.nodes;
   ports = portData.ports;
   localProxyCheckResults = portData.local_proxy_checks || {};
+  pools = poolData.pools || [];
   renderSummary();
   renderSubscription(status.subscription);
   renderNodeTable();
   renderAssignTable();
   renderLocalProxyCheckPorts();
   renderPortsTable();
+  renderPools();
+  await refreshTraffic();
   if (!singBoxInfoLoaded) {
     try {
       await loadSingBoxInfo(false);
@@ -1061,6 +1203,7 @@ async function saveProxyAdminConfig() {
 async function refreshStatusOnly() {
   statusSnapshot = await request("/api/status");
   renderSummary();
+  if ($("monitor")?.classList.contains("active")) await refreshTraffic();
 }
 
 async function runTask(label, task) {
@@ -1391,7 +1534,96 @@ document.querySelectorAll(".tab").forEach((button) => {
   });
 });
 
-activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "test", false);
+activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "monitor", false);
+
+document.querySelectorAll(".traffic-range").forEach((button) => {
+  button.classList.toggle("active", button.dataset.range === trafficRange);
+  button.addEventListener("click", async () => {
+    trafficRange = button.dataset.range;
+    localStorage.setItem("proxyPoolManager.trafficRange", trafficRange);
+    document.querySelectorAll(".traffic-range").forEach((item) => item.classList.toggle("active", item === button));
+    await refreshTraffic();
+  });
+});
+
+document.querySelectorAll(".traffic-entity").forEach((button) => {
+  button.addEventListener("click", async () => {
+    trafficEntityType = button.dataset.entity;
+    document.querySelectorAll(".traffic-entity").forEach((item) => item.classList.toggle("active", item === button));
+    await refreshTraffic();
+  });
+});
+
+$("trafficSearch").addEventListener("input", () => {
+  trafficSearchQuery = $("trafficSearch").value;
+  refreshTraffic();
+});
+
+$("trafficTable").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-traffic-detail]");
+  if (button) openTrafficDetail(button.dataset.trafficDetail);
+});
+
+$("trafficDetail").addEventListener("click", (event) => {
+  if (event.target.closest("[data-close-traffic-detail]")) $("trafficDetail").classList.add("hidden");
+});
+
+document.querySelectorAll(".run-subtab").forEach((button) => {
+  button.addEventListener("click", () => {
+    const poolsView = button.dataset.runView === "pools";
+    document.querySelectorAll(".run-subtab").forEach((item) => {
+      const active = item === button;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-selected", String(active));
+    });
+    $("dashboardRunTools").classList.toggle("hidden", poolsView);
+    $("poolManager").classList.toggle("hidden", !poolsView);
+  });
+});
+
+$("createPoolBtn").addEventListener("click", () => openPoolEditor());
+$("cancelPoolEditBtn").addEventListener("click", hidePoolEditor);
+$("poolEditor").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runTask("保存节点池", async () => {
+    const members = [...document.querySelectorAll("[data-pool-member]:checked")].map((input) => {
+      const tag = input.dataset.poolMember;
+      const weight = Number(document.querySelector(`[data-pool-weight="${CSS.escape(tag)}"]`)?.value || 1);
+      const draining = Boolean(document.querySelector(`[data-pool-draining="${CSS.escape(tag)}"]`)?.checked);
+      return { node_tag: tag, weight, enabled: true, draining };
+    });
+    const payload = { name: $("poolName").value.trim(), listen_port: Number($("poolPort").value), policy: $("poolPolicy").value, enabled: $("poolEnabled").checked, members };
+    const id = $("poolId").value;
+    await request(id ? `/api/pools/${encodeURIComponent(id)}` : "/api/pools", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
+    hidePoolEditor();
+    await refresh();
+    return "节点池已保存";
+  });
+});
+
+$("poolList").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.copy) {
+    copyText(button.dataset.copy, button.dataset.copyLabel || "地址");
+    return;
+  }
+  const id = button.dataset.poolEdit || button.dataset.poolAdvance || button.dataset.poolDelete;
+  if (!id) return;
+  const pool = pools.find((item) => item.id === id);
+  if (button.dataset.poolEdit) openPoolEditor(pool);
+  if (button.dataset.poolAdvance) runTask("切换下一节点", async () => {
+    await request(`/api/pools/${encodeURIComponent(id)}/advance`, { method: "POST", body: "{}" });
+    await refresh();
+    return "下一条新连接将从后续成员开始选择";
+  });
+  if (button.dataset.poolDelete) confirmTask("删除节点池", `将删除节点池「${pool?.name || id}」及其公开端口。`, async () => {
+    await request(`/api/pools/${encodeURIComponent(id)}`, { method: "DELETE", body: "{}" });
+    hidePoolEditor();
+    await refresh();
+    return "节点池已删除";
+  });
+});
 
 document.querySelectorAll(".node-target-check").forEach((item) => {
   item.addEventListener("change", renderNodeTestOverview);

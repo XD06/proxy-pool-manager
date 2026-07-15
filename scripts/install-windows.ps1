@@ -73,6 +73,21 @@ if (-not (Test-Path $appConfigPath)) {
 "@ | Set-Content -Path $appConfigPath -Encoding UTF8
 }
 
+$routerBinary = Join-Path $Root "proxycheck-api\pool-router.exe"
+if (Test-Path $routerBinary) {
+  Write-Output "pool-router binary already exists, skipping build"
+} elseif (Get-Command go -ErrorAction SilentlyContinue) {
+  Write-Output "Building pool-router binary..."
+  Push-Location (Join-Path $Root "proxycheck-api")
+  try {
+    go build -o $routerBinary ./cmd/pool-router
+  } finally {
+    Pop-Location
+  }
+} else {
+  Write-Warning "Go is not installed; node pools and per-port traffic monitoring will be unavailable. Install Go, then run: cd proxycheck-api; go build -o pool-router.exe ./cmd/pool-router"
+}
+
 Write-Output "Installed Proxy Pool Manager dependencies."
 & (Join-Path $Root "bin\sing-box.exe") version
 Write-Output "Start with: .\scripts\start-service.ps1"

@@ -67,7 +67,11 @@
     </header>
 
     <nav class="tabs" aria-label="main sections">
-      <button class="tab active" data-tab="test">
+      <button class="tab active" data-tab="monitor">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 18V9m5 9V5m5 13v-7m5 7V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        监控
+      </button>
+      <button class="tab" data-tab="test">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="6" cy="12" r="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="7" r="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="17" r="2.2" stroke="currentColor" stroke-width="1.8"/><path d="M8 12h6.5M15.5 8.2 8.8 11.2M15.5 15.8 8.8 12.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         节点
       </button>
@@ -84,7 +88,49 @@
 
     <section id="notice" class="notice hidden" role="status" aria-live="polite"></section>
 
-    <section id="test" class="panel active">
+    <section id="monitor" class="panel active">
+      <div class="section-head monitor-head">
+        <div>
+          <h2><span class="ico" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M4 18V9m5 9V5m5 13v-7m5 7V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>监控总览</h2>
+          <p class="panel-copy">总流量 · 端口与节点下钻 · 不记录请求内容</p>
+        </div>
+        <div class="range-switch" role="group" aria-label="流量时间范围">
+          <button class="traffic-range" data-range="1h">1 小时</button>
+          <button class="traffic-range active" data-range="24h">24 小时</button>
+          <button class="traffic-range" data-range="7d">7 天</button>
+          <button class="traffic-range" data-range="30d">30 天</button>
+        </div>
+      </div>
+      <div class="traffic-kpis" aria-live="polite">
+        <article><span>下载（目标 → 客户端）</span><strong id="trafficDownload">—</strong><small id="trafficDownloadRate">—</small></article>
+        <article><span>上传（客户端 → 目标）</span><strong id="trafficUpload">—</strong><small id="trafficUploadRate">—</small></article>
+        <article><span>活跃连接</span><strong id="trafficActive">—</strong><small id="trafficRouterState">读取中</small></article>
+        <article><span>运行异常</span><strong id="trafficAttention">—</strong><small>成员健康与 Router 状态</small></article>
+      </div>
+      <div class="traffic-layout">
+        <section class="traffic-chart-card">
+          <header><strong>流量趋势</strong><span id="trafficChartSummary" class="muted">读取中</span></header>
+          <div id="trafficChart" class="traffic-chart" role="img" aria-label="下载和上传流量趋势图"></div>
+          <div class="traffic-legend"><span><i class="download"></i>下载</span><span><i class="upload"></i>上传</span></div>
+        </section>
+        <section class="traffic-event-card">
+          <header><strong>运行事件</strong><span class="muted">不含请求内容</span></header>
+          <div id="trafficEvents" class="traffic-events"></div>
+        </section>
+      </div>
+      <div class="traffic-detail-head">
+        <div class="entity-switch" role="group" aria-label="明细维度">
+          <button class="traffic-entity active" data-entity="port">端口</button>
+          <button class="traffic-entity" data-entity="pool">节点池</button>
+          <button class="traffic-entity" data-entity="node">节点</button>
+        </div>
+        <label class="inline-field"><span class="sr-only">筛选明细</span><input id="trafficSearch" type="search" placeholder="筛选端口、节点或节点池"></label>
+      </div>
+      <div id="trafficTable" class="table-card traffic-table"></div>
+      <aside id="trafficDetail" class="traffic-drawer hidden" aria-live="polite"></aside>
+    </section>
+
+    <section id="test" class="panel">
       <div class="section-head">
         <div>
           <h2>
@@ -221,6 +267,11 @@
           <button id="exportBtn">生成导出</button>
         </div>
       </div>
+      <div class="run-subtabs" role="tablist" aria-label="运行功能">
+        <button class="run-subtab active" data-run-view="tools" role="tab" aria-selected="true">引擎与诊断</button>
+        <button class="run-subtab" data-run-view="pools" role="tab" aria-selected="false">节点池</button>
+      </div>
+      <div id="dashboardRunTools">
       <div class="dashboard-tools">
         <section class="tool-section engine-tool">
           <header>
@@ -350,6 +401,27 @@
       <div id="portsTable" class="table-card"></div>
       <textarea id="exportOutput" class="export-output hidden" rows="8" readonly></textarea>
       <div id="validationResults" class="validation-results"></div>
+      </div>
+      <section id="poolManager" class="pool-manager hidden">
+        <div class="pool-manager-head">
+          <div><strong>节点池</strong><span class="muted">新连接按策略选择成员，已建立连接不切换</span></div>
+          <button id="createPoolBtn" class="primary">新建节点池</button>
+        </div>
+        <div id="poolRouterNotice" class="pool-router-notice"></div>
+        <div id="poolList" class="pool-list"></div>
+        <form id="poolEditor" class="pool-editor hidden">
+          <header><strong id="poolEditorTitle">新建节点池</strong><button id="cancelPoolEditBtn" type="button">取消</button></header>
+          <input id="poolId" type="hidden">
+          <div class="pool-editor-fields">
+            <label>名称<input id="poolName" required maxlength="80" placeholder="例如：AI 专用池"></label>
+            <label>公开端口<input id="poolPort" required type="number" min="1024" max="65535" placeholder="8201"></label>
+            <label>选择策略<select id="poolPolicy"><option value="weighted_round_robin">加权轮询（推荐）</option><option value="round_robin">普通轮询</option></select></label>
+            <label class="check-field"><input id="poolEnabled" type="checkbox" checked> 启用此池</label>
+          </div>
+          <div id="poolMembers" class="pool-members"></div>
+          <footer><button id="savePoolBtn" class="primary" type="submit">保存节点池</button></footer>
+        </form>
+      </section>
     </section>
   </main>
   <script src="/static/helpers.js?v=__ASSET_VERSION__"></script>

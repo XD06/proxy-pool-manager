@@ -6,6 +6,8 @@ import time
 
 from pydantic import BaseModel, Field
 
+from .models import PoolMember
+
 
 # ── Request models ──────────────────────────────────────────────────────────
 
@@ -26,6 +28,18 @@ class SubscriptionConfigRequest(BaseModel):
 
 class AssignRequest(BaseModel):
     mappings: dict[str, str]
+
+
+class PoolUpsertRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    listen_port: int = Field(ge=1024, le=65535)
+    policy: str = "weighted_round_robin"
+    enabled: bool = True
+    members: list[PoolMember] = Field(default_factory=list)
+
+
+class PoolDrainRequest(BaseModel):
+    draining: bool
 
 
 class DeleteNodesRequest(BaseModel):

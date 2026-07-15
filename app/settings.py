@@ -17,6 +17,8 @@ APP_CONFIG_PATH = CONFIG_DIR / "app.json"
 SING_BOX_CONFIG_PATH = CONFIG_DIR / "sing-box.json"
 SING_BOX_TEST_CONFIG_PATH = CONFIG_DIR / "sing-box-test.json"
 SING_BOX_LOG_PATH = CONFIG_DIR / "sing-box.log"
+POOL_ROUTER_CONFIG_PATH = CONFIG_DIR / "pool-router.json"
+TRAFFIC_DB_PATH = CONFIG_DIR / "traffic.db"
 
 def _load_app_config() -> dict:
     if not APP_CONFIG_PATH.exists():
@@ -68,9 +70,10 @@ DOMAIN_RESOLVE_STRATEGY = _setting(
     "PPM_DOMAIN_RESOLVE_STRATEGY",
     str(_APP_CONFIG.get("outbound_domain_strategy") or ""),
 )
-ASSET_VERSION = _setting(_APP_CONFIG, "asset_version", "PPM_ASSET_VERSION", "20260713-transparent-sticky-group-ui26")
+ASSET_VERSION = _setting(_APP_CONFIG, "asset_version", "PPM_ASSET_VERSION", "20260716-traffic-pools")
 DEFAULT_START_PORT = 8001
 TEST_START_PORT = 19001
+POOL_ROUTER_CONTROL_ADDR = _setting(_APP_CONFIG, "pool_router_control_addr", "PPM_POOL_ROUTER_CONTROL_ADDR", "127.0.0.1:9091")
 
 
 def current_proxy_listen_host() -> str:
@@ -83,6 +86,10 @@ def current_proxy_public_host() -> str:
 
 def current_clash_api_addr() -> str:
     return runtime_setting("clash_api_addr", "PPM_CLASH_API_ADDR", CLASH_API_ADDR)
+
+
+def current_pool_router_control_addr() -> str:
+    return runtime_setting("pool_router_control_addr", "PPM_POOL_ROUTER_CONTROL_ADDR", POOL_ROUTER_CONTROL_ADDR)
 
 
 def current_domain_resolve_strategy() -> str:

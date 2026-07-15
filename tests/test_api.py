@@ -17,6 +17,7 @@ from app.store import StateStore
 def isolate_sing_box_config(monkeypatch, tmp_path):
     monkeypatch.setattr(api_module, "SING_BOX_CONFIG_PATH", tmp_path / "sing-box.json")
     monkeypatch.setattr(api_module, "APP_CONFIG_PATH", tmp_path / "app.json")
+    monkeypatch.setattr(api_module, "TRAFFIC_DB_PATH", tmp_path / "traffic.db")
 
 
 class RunningEngine:
@@ -153,6 +154,38 @@ def test_api_delete_nodes_cleans_mappings(tmp_path):
     assert deleted.json()["removed"] == 1
     assert client.get("/api/nodes").json()["nodes"] == []
     assert client.get("/api/ports").json()["ports"] == {}
+
+
+def test_api_pool_crud_and_node_deletion_disables_empty_pool(tmp_path):
+    # Pool CRUD is available once the installer has built the Go router.
+    original_available = api_module.PoolRouterManager.available
+    api_module.PoolRouterManager.available = lambda self: True
+    store = StateStore(tmp_path / "assignments.json")
+    try:
+        app = create_app(store=store, engine=StoppedEngine())
+        client = TestClient(app)
+        imported = client.post(
+            "/api/import",
+            json={"text": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#HK"},
+        )
+        tag = imported.json()["nodes"][0]["tag"]
+
+        created = client.post(
+            "/api/pools",
+            json={"name": "轮询池", "listen_port": 8201, "policy": "weighted_round_robin", "members": [{"node_tag": tag, "weight": 2}]},
+        )
+
+        assert created.status_code == 200
+        pool_id = created.json()["pool"]["id"]
+        assert client.get("/api/status").json()["pool_count"] == 1
+        assert client.get("/api/pools").json()["pools"][0]["http_proxy"].endswith(":8201")
+        assert client.post(f"/api/pools/{pool_id}/members/{tag}/drain", json={"draining": True}).status_code == 400
+
+        deleted = client.post("/api/nodes/delete", json={"node_tags": [tag]})
+        assert deleted.status_code == 200
+        assert store.load().pools[0].enabled is False
+    finally:
+        api_module.PoolRouterManager.available = original_available
 
 
 def test_api_assign_can_clear_mappings(tmp_path):

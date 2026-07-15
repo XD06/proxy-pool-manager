@@ -26,10 +26,10 @@
 ### 固定端口
 
 ```text
-应用 -> :8001 mixed inbound -> route -> node-A outbound
+应用 -> :8001 pool-router（固定后端） -> 127.0.0.1:18xxx mixed inbound -> node-A outbound
 ```
 
-生成的每个固定 sing-box 入站使用 `port-{port}` 标签。sing-box V2Ray Stats API 按该标签报告上下行累计字节和活跃连接。
+固定端口仍然只关联一个节点；Go edge router 对它做一对一 TCP 桥接并精确统计字节。sing-box 入站只监听 loopback，保持不向管理层暴露代理流量。
 
 ### 节点池
 
@@ -68,9 +68,9 @@
 
 ## 统计采集
 
-1. 生成器启用 sing-box V2Ray Stats API，对固定入站和池成员入站登记统计。
-2. FastAPI 生命周期任务每 15 秒读取累计字节与活跃连接，按入站标签归类并计算正向 delta。
-3. Router 提供只绑定 `127.0.0.1` 的状态端点，汇报池监听端口的上下行、活跃会话、选择次数和拨号失败；FastAPI 同步入库。
+1. 生成器为固定端口和池成员生成 loopback sing-box 入站，并生成对应的 Router 配置。
+2. Router 提供只绑定 `127.0.0.1` 的状态端点，汇报所有公开端口的上下行、活跃会话、选择次数和拨号失败；FastAPI 每 15 秒同步入库。
+3. 固定端口按 Router 的一对一监听计量；池端口按监听器和实际选中的成员分别计量。
 4. 原始计数回退（重启/重载）时不产生负流量，重置 cursor 并记录一次引擎事件。
 5. API 查询按所选时间范围自动选择分钟/小时/日桶；当前速率使用最近 60 秒窗口。
 

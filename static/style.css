@@ -2816,3 +2816,151 @@ button[data-remove-proxy-admin-port]:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* Monitoring and pool management */
+.monitor-head { align-items: center; }
+
+.range-switch,
+.entity-switch,
+.run-subtabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+}
+
+.range-switch button,
+.entity-switch button,
+.run-subtab {
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.range-switch button.active,
+.entity-switch button.active,
+.run-subtab.active {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .10);
+}
+
+.traffic-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+
+.traffic-kpis article,
+.traffic-chart-card,
+.traffic-event-card,
+.pool-manager,
+.traffic-drawer {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: var(--shadow-soft);
+}
+
+.traffic-kpis article { padding: 12px 14px; }
+.traffic-kpis span,
+.traffic-kpis small { display: block; color: var(--muted); font-size: 12px; }
+.traffic-kpis strong { display: block; margin: 4px 0; font-family: var(--mono); font-size: 20px; letter-spacing: -.04em; color: var(--ink); }
+.traffic-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(270px, .8fr); gap: 12px; margin-bottom: 14px; }
+.traffic-chart-card,
+.traffic-event-card { min-height: 245px; padding: 13px; }
+.traffic-chart-card header,
+.traffic-event-card header,
+.pool-manager-head,
+.pool-editor header,
+.traffic-drawer-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.traffic-chart { height: 170px; margin-top: 12px; overflow: hidden; }
+.traffic-chart svg { display: block; width: 100%; height: 100%; }
+.traffic-grid path { stroke: #edf1f5; stroke-width: 1; }
+.traffic-line { fill: none; stroke-width: 3; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.traffic-line.download { stroke: #2563eb; }
+.traffic-line.upload { stroke: #c65a09; }
+.traffic-legend { display: flex; gap: 14px; color: var(--muted); font-size: 12px; }
+.traffic-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.traffic-legend i { width: 13px; height: 3px; border-radius: 2px; }
+.traffic-legend .download { background: #2563eb; }
+.traffic-legend .upload { background: #c65a09; }
+.traffic-events { display: grid; gap: 7px; margin-top: 10px; }
+.traffic-events article { display: grid; gap: 2px; padding: 8px 9px; border-radius: 7px; background: var(--soft); font-size: 12px; }
+.traffic-events strong { color: var(--ink); font-size: 12px; }
+.traffic-events span,
+.traffic-events small { color: var(--muted); }
+.traffic-detail-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 12px 0 8px; }
+.traffic-detail-head .inline-field { min-width: 245px; }
+.traffic-detail-head input { min-height: 32px; }
+.traffic-table td small { display: block; margin-top: 3px; color: var(--muted); }
+.traffic-drawer { margin-top: 12px; padding: 12px 14px; }
+.traffic-drawer-head > div { display: grid; gap: 2px; }
+.traffic-drawer-head span { color: var(--muted); font-size: 12px; }
+.traffic-drawer-kpis { display: flex; gap: 16px; margin: 12px 0; font-size: 13px; color: var(--muted); }
+.traffic-drawer-kpis b { margin-left: 5px; color: var(--ink); font-family: var(--mono); }
+.traffic-drawer-chart { padding: 10px; border-radius: 7px; background: var(--soft); color: var(--muted); font-size: 12px; }
+
+.run-subtabs { margin-bottom: 12px; }
+.pool-manager { padding: 14px; }
+.pool-manager-head { margin-bottom: 12px; }
+.pool-manager-head > div { display: grid; gap: 3px; }
+.pool-manager-head .muted { font-size: 12px; }
+.pool-router-notice { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font-size: 12px; color: var(--muted); background: var(--soft); }
+.pool-router-notice.ok { color: var(--ok); background: var(--pastel-green); border-color: #cfe5d7; }
+.pool-router-notice.warn { color: #8a5a00; background: var(--pastel-yellow); border-color: #edddb7; }
+.pool-router-notice.bad { color: var(--bad); background: var(--pastel-red); border-color: #edd0cb; }
+.pool-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.pool-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.pool-card header,
+.pool-card footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.pool-card header > div { display: flex; align-items: baseline; gap: 8px; }
+.pool-card header span.mono { color: var(--muted); font-size: 12px; }
+.pool-card p { margin: 0; color: var(--muted); font-size: 12px; }
+.pool-card footer { justify-content: flex-start; }
+.pool-card footer button { min-height: 30px; font-size: 12px; }
+.pool-member-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.pool-member-chips span { padding: 3px 6px; border: 1px solid #cfe5d7; border-radius: 6px; color: var(--ok); background: var(--pastel-green); font-size: 11px; }
+.pool-member-chips span.draining { color: #8a5a00; background: var(--pastel-yellow); border-color: #edddb7; }
+.pool-member-chips span.unhealthy { color: var(--bad); background: var(--pastel-red); border-color: #edd0cb; }
+.pool-editor { display: grid; gap: 12px; margin-top: 14px; padding: 14px; border: 1px solid #cfdbea; border-radius: 9px; background: #fbfdff; }
+.pool-manager.hidden,
+.pool-editor.hidden,
+.traffic-drawer.hidden { display: none; }
+.pool-editor-fields { display: grid; grid-template-columns: 1.5fr .7fr 1fr .7fr; gap: 10px; align-items: end; }
+.pool-editor label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.pool-editor input,
+.pool-editor select { min-height: 34px; }
+.pool-editor .check-field { display: flex; min-height: 34px; align-items: center; }
+.pool-members { display: grid; gap: 5px; }
+.pool-members h3 { margin: 0 0 3px; font-size: 13px; }
+.pool-member-row { display: grid !important; grid-template-columns: auto minmax(120px, 1fr) minmax(100px, 1fr) 68px auto; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.pool-member-row small { color: var(--muted); font-weight: 400; }
+.pool-member-row input[type="number"] { min-height: 28px; }
+.pool-member-row .pool-drain-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+
+@media (max-width: 900px) {
+  .traffic-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .traffic-layout { grid-template-columns: 1fr; }
+  .pool-editor-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 620px) {
+  .monitor-head,
+  .traffic-detail-head,
+  .pool-manager-head { align-items: stretch; flex-direction: column; }
+  .range-switch { width: 100%; overflow-x: auto; }
+  .range-switch button { flex: 1 0 auto; }
+  .traffic-kpis { grid-template-columns: 1fr 1fr; gap: 7px; }
+  .traffic-kpis article { padding: 10px; }
+  .traffic-kpis strong { font-size: 17px; }
+  .traffic-detail-head .inline-field { min-width: 0; width: 100%; }
+  .pool-editor-fields { grid-template-columns: 1fr; }
+  .pool-member-row { grid-template-columns: auto 1fr 60px; }
+  .pool-member-row small { grid-column: 2 / -1; }
+  .pool-member-row .pool-drain-toggle { grid-column: 2 / -1; }
+}

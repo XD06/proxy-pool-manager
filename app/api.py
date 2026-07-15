@@ -24,9 +24,11 @@ from .engine import EngineError, EngineManager
 from .jobs import JobManager
 from .routes.auth import AuthContext, create_auth_router
 from .engine import _can_bind_tcp_port
-from .generator import ConfigError, generate_config
+from .generator import ConfigError, generate_config, generate_pool_router_config
 from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
-from .models import AppState, ExitIpCache, LatencyResult, PortMapping, utc_now_iso
+from .models import AppState, ExitIpCache, LatencyResult, PoolMember, PortMapping, ProxyPool, utc_now_iso
+from .pool_router import PoolRouterError, PoolRouterManager
+from .traffic import TrafficStore
 from .parser import import_nodes
 from .schemas import (
     AssignRequest,
@@ -42,6 +44,8 @@ from .schemas import (
     PortAvailabilityRequest,
     PortTestJob,
     PortTestRequest,
+    PoolDrainRequest,
+    PoolUpsertRequest,
     ProxyAdminConfig,
     ProxyAdminJob,
     ProxyAdminRemoveRequest,
@@ -74,8 +78,10 @@ from .settings import (
     ROOT_DIR,
     SING_BOX_CONFIG_PATH,
     SING_BOX_TEST_CONFIG_PATH,
+    POOL_ROUTER_CONFIG_PATH,
     STATIC_DIR,
     TEMPLATES_DIR,
+    TRAFFIC_DB_PATH,
     current_clash_api_addr,
     current_performance_settings,
     current_proxy_listen_host,
@@ -99,6 +105,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     app_state = state_store.load()
     state_loaded_mtime_ns = state_store.path.stat().st_mtime_ns if state_store.path.exists() else None
     engine_manager = engine or EngineManager(SING_BOX_CONFIG_PATH)
+    pool_router = PoolRouterManager(POOL_ROUTER_CONFIG_PATH)
+    traffic_store = TrafficStore(TRAFFIC_DB_PATH)
     performance = current_performance_settings()
     test_mgr = JobManager()
     test_jobs = test_mgr.jobs
@@ -132,10 +140,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     monitor_task: asyncio.Task | None = None
     subscription_task: asyncio.Task | None = None
     job_cleanup_task: asyncio.Task | None = None
+    traffic_task: asyncio.Task | None = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal monitor_task, subscription_task, job_cleanup_task
+        nonlocal monitor_task, subscription_task, job_cleanup_task, traffic_task
         monitor = getattr(engine_manager, "monitor", None)
         if monitor and not monitor_task:
             monitor_task = asyncio.create_task(monitor(SING_BOX_CONFIG_PATH))
@@ -143,6 +152,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             subscription_task = asyncio.create_task(subscription_refresh_loop())
         if not job_cleanup_task:
             job_cleanup_task = asyncio.create_task(job_cleanup_loop())
+        if not traffic_task:
+            traffic_task = asyncio.create_task(traffic_sampling_loop())
         try:
             yield
         finally:
@@ -152,6 +163,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 subscription_task.cancel()
             if job_cleanup_task:
                 job_cleanup_task.cancel()
+            if traffic_task:
+                traffic_task.cancel()
+            await pool_router.stop()
             await flush_save()
 
     app = FastAPI(title="Proxy Pool Manager", lifespan=lifespan)
@@ -458,6 +472,43 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     def mapped_ports() -> list[int]:
         return sorted(int(port) for port in app_state.port_mappings)
 
+    def runtime_ports() -> list[int]:
+        return sorted({*mapped_ports(), *(pool.listen_port for pool in app_state.pools if pool.enabled)})
+
+    def router_mode() -> bool:
+        return pool_router.available()
+
+    def write_runtime_configs() -> tuple[bool, bool]:
+        use_router = router_mode()
+        config = generate_config(
+            app_state.nodes,
+            app_state.port_mappings,
+            pools=app_state.pools,
+            router_mode=use_router,
+            include_clash_api=include_clash_api_for_next_start(),
+        )
+        config_written = _write_json_if_changed(SING_BOX_CONFIG_PATH, config)
+        router_written = False
+        if use_router:
+            router_written = _write_json_if_changed(
+                POOL_ROUTER_CONFIG_PATH,
+                generate_pool_router_config(
+                    app_state.port_mappings,
+                    app_state.pools,
+                    unhealthy_node_tags={tag for tag, result in app_state.latency_cache.items() if not result.alive},
+                ),
+            )
+        return config_written, router_written
+
+    async def restart_runtime() -> tuple[bool, bool]:
+        config_written, router_written = write_runtime_configs()
+        await pool_router.stop()
+        await engine_manager.start(SING_BOX_CONFIG_PATH)
+        if router_mode():
+            await pool_router.start(POOL_ROUTER_CONFIG_PATH)
+        await wait_for_mapped_ports()
+        return config_written, router_written
+
     _configured_ports_cache: dict[str, object] = {"mtime": None, "ports": []}
 
     def configured_ports() -> list[int]:
@@ -502,12 +553,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     def engine_status_payload(request: Request | None = None) -> dict:
         payload = engine_manager.status().model_dump()
-        expected = mapped_ports()
+        expected = runtime_ports()
         config_ports = [] if not expected and not payload["running"] else configured_ports()
         listening = _listening_local_ports(expected) if payload["running"] else []
         payload["expected_ports"] = expected
         payload["config_ports"] = config_ports
-        payload["config_matches_state"] = config_ports == expected
+        payload["config_matches_state"] = bool(router_mode() and pool_router.payload()["running"]) or config_ports == expected
         payload["listening_ports"] = listening
         payload["missing_ports"] = sorted(set(expected) - set(listening))
         payload["expected_count"] = len(expected)
@@ -516,6 +567,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         payload["proxy_listen_host"] = current_proxy_listen_host()
         payload["proxy_public_host"] = current_proxy_public_host()
         payload["proxy_connect_host"] = proxy_connect_host(request)
+        payload["pool_router"] = pool_router.payload()
         return payload
 
     def node_test_running() -> bool:
@@ -700,7 +752,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         return items
 
     async def wait_for_mapped_ports(timeout_seconds: float = 8.0) -> None:
-        expected = mapped_ports()
+        expected = runtime_ports()
         if not expected:
             return
         deadline = asyncio.get_running_loop().time() + timeout_seconds
@@ -709,6 +761,46 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if len(listening) == len(expected):
                 return
             await asyncio.sleep(0.2)
+
+    async def sample_router_traffic() -> None:
+        if not pool_router.payload()["running"]:
+            return
+        status = await pool_router.status()
+        now = int(time.time())
+        for listener in status.get("listeners") or []:
+            listener_id = str(listener.get("id") or "")
+            if listener_id.startswith("port-"):
+                entity_type, entity_id = "port", listener_id.removeprefix("port-")
+            elif listener_id.startswith("pool-"):
+                entity_type, entity_id = "pool", listener_id.removeprefix("pool-")
+            else:
+                continue
+            await asyncio.to_thread(
+                traffic_store.sample,
+                source_key=f"listener:{listener_id}", entity_type=entity_type, entity_id=entity_id,
+                upload=int(listener.get("upload") or 0), download=int(listener.get("download") or 0),
+                active=int(listener.get("active") or 0), selections=int(listener.get("selections") or 0), now=now,
+            )
+            for backend in listener.get("backends") or []:
+                node_tag = str(backend.get("id") or "")
+                if not node_tag:
+                    continue
+                await asyncio.to_thread(
+                    traffic_store.sample,
+                    source_key=f"backend:{listener_id}:{node_tag}", entity_type="node", entity_id=node_tag,
+                    upload=int(backend.get("upload") or 0), download=int(backend.get("download") or 0),
+                    active=int(backend.get("active") or 0), selections=int(backend.get("selections") or 0), now=now,
+                )
+
+    async def traffic_sampling_loop() -> None:
+        while True:
+            try:
+                await sample_router_traffic()
+            except PoolRouterError:
+                pass
+            except Exception:
+                pass
+            await asyncio.sleep(15)
 
     def assigned_tags_for_ports(ports: list[int] | None = None) -> list[tuple[str, int]]:
         port_by_tag = {mapping.node_tag: int(port) for port, mapping in app_state.port_mappings.items()}
@@ -817,6 +909,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "store_warning": state_store.warning,
             "node_count": len(app_state.nodes),
             "mapping_count": len(app_state.port_mappings),
+            "pool_count": len(app_state.pools),
             "subscription": subscription_payload(),
             "web": {
                 "pid": os.getpid(),
@@ -930,6 +1023,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             for port, mapping in app_state.port_mappings.items()
             if mapping.node_tag not in remove_tags
         }
+        for pool in app_state.pools:
+            pool.members = [member for member in pool.members if member.node_tag not in remove_tags]
+            if not any(member.enabled and not member.draining for member in pool.members):
+                pool.enabled = False
+                pool.updated_at = utc_now_iso()
         app_state.latency_cache = {
             tag: result
             for tag, result in app_state.latency_cache.items()
@@ -981,6 +1079,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 for tag, value in app_state.latency_cache.items()
                 if tag in kept_tags
             }
+            for pool in app_state.pools:
+                pool.members = [member for member in pool.members if member.node_tag in kept_tags]
+                if not any(member.enabled and not member.draining for member in pool.members):
+                    pool.enabled = False
+                    pool.updated_at = utc_now_iso()
         app_state.nodes = sort_nodes_by_test_result(app_state.nodes, app_state.latency_cache)
         save()
         return {"results": results, "removed": removed, "node_count": len(app_state.nodes)}
@@ -1133,6 +1236,9 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 job.status = "done"
                 touch_job(job)
                 save()
+                if engine_manager.status().running and app_state.pools:
+                    await restart_runtime()
+                    await asyncio.to_thread(traffic_store.event, "pool_health_refreshed", "Applied latest node health to node pools")
             except EngineError as exc:
                 job.status = "error"
                 job.error = str(exc)
@@ -1283,18 +1389,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     status_code=409,
                     detail="A node test is running. Wait for it to finish before restarting the engine.",
                 )
-            if app_state.port_mappings:
+            if runtime_ports():
                 try:
-                    config = generate_config(
-                        app_state.nodes,
-                        app_state.port_mappings,
-                        include_clash_api=include_clash_api_for_next_start(),
-                    )
-                    _write_json_if_changed(SING_BOX_CONFIG_PATH, config)
-                    await engine_manager.start(SING_BOX_CONFIG_PATH)
-                    await wait_for_mapped_ports()
+                    await restart_runtime()
                     restarted = True
-                except (ConfigError, EngineError) as exc:
+                except (ConfigError, EngineError, PoolRouterError) as exc:
                     raise HTTPException(status_code=400, detail=f"Port mappings saved, but engine restart failed: {exc}") from exc
             else:
                 await engine_manager.stop()
@@ -1306,6 +1405,190 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "engine_stopped": stopped,
             "engine": engine_status_payload(),
         }
+
+    def pool_payload(pool: ProxyPool, request: Request | None = None) -> dict:
+        by_tag = node_by_tag()
+        members = []
+        for member in pool.members:
+            node = by_tag.get(member.node_tag)
+            latency = app_state.latency_cache.get(member.node_tag)
+            members.append(
+                {
+                    **member.model_dump(),
+                    "node_name": node.name if node else None,
+                    "node_type": node.type if node else None,
+                    "alive": latency.alive if latency else None,
+                    "delay": latency.delay if latency else None,
+                }
+            )
+        authority = proxy_authority(pool.listen_port, request)
+        return {
+            **pool.model_dump(exclude={"members"}),
+            "members": members,
+            "http_proxy": f"http://{authority}",
+            "socks5_proxy": f"socks5://{authority}",
+        }
+
+    def validate_pool_request(payload: PoolUpsertRequest, *, pool_id: str | None = None) -> ProxyPool:
+        if payload.policy not in {"round_robin", "weighted_round_robin"}:
+            raise HTTPException(status_code=400, detail="Unsupported pool policy")
+        known = node_by_tag()
+        tags = [member.node_tag for member in payload.members]
+        missing = sorted(set(tags) - set(known))
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Unknown pool node: {', '.join(missing)}")
+        if len(tags) != len(set(tags)):
+            raise HTTPException(status_code=400, detail="A pool cannot include the same node twice")
+        if payload.enabled and not any(member.enabled and not member.draining for member in payload.members):
+            raise HTTPException(status_code=400, detail="An enabled pool requires at least one active member")
+        occupied = {int(port) for port in app_state.port_mappings}
+        occupied.update(pool.listen_port for pool in app_state.pools if pool.id != pool_id)
+        if payload.listen_port in occupied:
+            raise HTTPException(status_code=409, detail=f"Port {payload.listen_port} is already assigned")
+        now = utc_now_iso()
+        old = next((pool for pool in app_state.pools if pool.id == pool_id), None)
+        return ProxyPool(
+            id=pool_id or ProxyPool(name=payload.name, listen_port=payload.listen_port).id,
+            name=payload.name.strip(), listen_port=payload.listen_port, policy=payload.policy,
+            enabled=payload.enabled, members=payload.members,
+            created_at=old.created_at if old else now, updated_at=now,
+        )
+
+    async def restart_for_pool_change() -> None:
+        if not engine_manager.status().running:
+            return
+        if node_test_running():
+            raise HTTPException(status_code=409, detail="A node test is running. Wait for it to finish before restarting the engine.")
+        await restart_runtime()
+
+    def require_pool_router() -> None:
+        if not pool_router.available():
+            raise HTTPException(status_code=409, detail="Pool Router is not installed. Run the install script after installing Go.")
+
+    @app.get("/api/pools")
+    async def pools(request: Request):
+        refresh_state_from_disk()
+        return {"router": pool_router.payload(), "pools": [pool_payload(pool, request) for pool in app_state.pools]}
+
+    @app.post("/api/pools")
+    async def create_pool(payload: PoolUpsertRequest, request: Request):
+        require_pool_router()
+        pool = validate_pool_request(payload)
+        app_state.pools.append(pool)
+        save()
+        try:
+            await restart_for_pool_change()
+        except (ConfigError, EngineError, PoolRouterError) as exc:
+            raise HTTPException(status_code=400, detail=f"Pool saved, but runtime restart failed: {exc}") from exc
+        await asyncio.to_thread(traffic_store.event, "pool_created", f"Created pool {pool.name}", entity_type="pool", entity_id=pool.id)
+        return {"ok": True, "pool": pool_payload(pool, request)}
+
+    @app.put("/api/pools/{pool_id}")
+    async def update_pool(pool_id: str, payload: PoolUpsertRequest, request: Request):
+        require_pool_router()
+        index = next((i for i, pool in enumerate(app_state.pools) if pool.id == pool_id), None)
+        if index is None:
+            raise HTTPException(status_code=404, detail="Pool not found")
+        pool = validate_pool_request(payload, pool_id=pool_id)
+        app_state.pools[index] = pool
+        save()
+        try:
+            await restart_for_pool_change()
+        except (ConfigError, EngineError, PoolRouterError) as exc:
+            raise HTTPException(status_code=400, detail=f"Pool saved, but runtime restart failed: {exc}") from exc
+        await asyncio.to_thread(traffic_store.event, "pool_updated", f"Updated pool {pool.name}", entity_type="pool", entity_id=pool.id)
+        return {"ok": True, "pool": pool_payload(pool, request)}
+
+    @app.post("/api/pools/{pool_id}/advance")
+    async def advance_pool(pool_id: str):
+        pool = next((item for item in app_state.pools if item.id == pool_id), None)
+        if not pool:
+            raise HTTPException(status_code=404, detail="Pool not found")
+        try:
+            result = await pool_router.advance(f"pool-{pool_id}")
+        except PoolRouterError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await asyncio.to_thread(traffic_store.event, "pool_advanced", f"Advanced next selection for {pool.name}", entity_type="pool", entity_id=pool.id)
+        return result
+
+    @app.post("/api/pools/{pool_id}/members/{node_tag}/drain")
+    async def drain_pool_member(pool_id: str, node_tag: str, payload: PoolDrainRequest):
+        require_pool_router()
+        pool = next((item for item in app_state.pools if item.id == pool_id), None)
+        if not pool:
+            raise HTTPException(status_code=404, detail="Pool not found")
+        member = next((item for item in pool.members if item.node_tag == node_tag), None)
+        if not member:
+            raise HTTPException(status_code=404, detail="Pool member not found")
+        member.draining = payload.draining
+        pool.updated_at = utc_now_iso()
+        if pool.enabled and not any(item.enabled and not item.draining for item in pool.members):
+            raise HTTPException(status_code=400, detail="A pool requires at least one active member")
+        save()
+        try:
+            await restart_for_pool_change()
+        except (ConfigError, EngineError, PoolRouterError) as exc:
+            raise HTTPException(status_code=400, detail=f"Member updated, but runtime restart failed: {exc}") from exc
+        action = "drained" if payload.draining else "reactivated"
+        await asyncio.to_thread(traffic_store.event, "pool_member_state", f"{action}: {node_tag}", entity_type="pool", entity_id=pool.id)
+        return {"ok": True, "pool": pool_payload(pool)}
+
+    @app.delete("/api/pools/{pool_id}")
+    async def delete_pool(pool_id: str):
+        pool = next((item for item in app_state.pools if item.id == pool_id), None)
+        if not pool:
+            raise HTTPException(status_code=404, detail="Pool not found")
+        app_state.pools = [item for item in app_state.pools if item.id != pool_id]
+        save()
+        try:
+            await restart_for_pool_change()
+        except (ConfigError, EngineError, PoolRouterError) as exc:
+            raise HTTPException(status_code=400, detail=f"Pool removed, but runtime restart failed: {exc}") from exc
+        await asyncio.to_thread(traffic_store.event, "pool_deleted", f"Deleted pool {pool.name}", entity_type="pool", entity_id=pool.id)
+        return {"ok": True}
+
+    def traffic_seconds(value: str) -> int:
+        ranges = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
+        if value not in ranges:
+            raise HTTPException(status_code=400, detail="Invalid traffic range")
+        return ranges[value]
+
+    @app.get("/api/traffic/overview")
+    async def traffic_overview(range: str = "24h"):
+        await sample_router_traffic()
+        seconds = traffic_seconds(range)
+        overview = await asyncio.to_thread(traffic_store.overview, seconds)
+        recent = await asyncio.to_thread(traffic_store.overview, 120)
+        overview.update({"range": range, "upload_rate": recent["upload"] / 120, "download_rate": recent["download"] / 120, "router": pool_router.payload()})
+        return overview
+
+    @app.get("/api/traffic/entities")
+    async def traffic_entities(type: str = "port", range: str = "24h"):
+        if type not in {"port", "pool", "node"}:
+            raise HTTPException(status_code=400, detail="Invalid traffic entity type")
+        await sample_router_traffic()
+        values = await asyncio.to_thread(traffic_store.entities, type, traffic_seconds(range))
+        names = {node.tag: node.name for node in app_state.nodes}
+        pools_by_id = {pool.id: pool for pool in app_state.pools}
+        for item in values:
+            if type == "port":
+                mapping = app_state.port_mappings.get(item["entity_id"])
+                item["name"] = names.get(mapping.node_tag) if mapping else item["entity_id"]
+            elif type == "pool":
+                item["name"] = pools_by_id.get(item["entity_id"]).name if item["entity_id"] in pools_by_id else item["entity_id"]
+            else:
+                item["name"] = names.get(item["entity_id"], item["entity_id"])
+        return {"type": type, "range": range, "items": values}
+
+    @app.get("/api/traffic/entities/{entity_type}/{entity_id}")
+    async def traffic_entity(entity_type: str, entity_id: str, range: str = "24h"):
+        if entity_type not in {"port", "pool", "node"}:
+            raise HTTPException(status_code=400, detail="Invalid traffic entity type")
+        return await asyncio.to_thread(traffic_store.detail, entity_type, entity_id, traffic_seconds(range))
+
+    @app.get("/api/traffic/events")
+    async def traffic_events(limit: int = 100, entity_type: str | None = None, entity_id: str | None = None):
+        return {"items": await asyncio.to_thread(traffic_store.events, limit, entity_type, entity_id)}
 
     @app.get("/api/ports")
     async def ports():
@@ -1702,28 +1985,22 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     @app.post("/api/start")
     async def start():
-        if not app_state.port_mappings:
-            raise HTTPException(status_code=400, detail="No port mappings configured")
+        if not runtime_ports():
+            raise HTTPException(status_code=400, detail="No port mappings or pools configured")
         if node_test_running():
             raise HTTPException(
                 status_code=409,
                 detail="A node test is running. Wait for it to finish before starting the engine.",
-            )
+        )
         try:
-            config = generate_config(
-                app_state.nodes,
-                app_state.port_mappings,
-                include_clash_api=include_clash_api_for_next_start(),
-            )
-            config_written = _write_json_if_changed(SING_BOX_CONFIG_PATH, config)
-            await engine_manager.start(SING_BOX_CONFIG_PATH)
-            await wait_for_mapped_ports()
-            return {"ok": True, "engine": engine_status_payload(), "config_written": config_written}
-        except (ConfigError, EngineError) as exc:
+            config_written, router_written = await restart_runtime()
+            return {"ok": True, "engine": engine_status_payload(), "config_written": config_written, "router_config_written": router_written}
+        except (ConfigError, EngineError, PoolRouterError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/stop")
     async def stop():
+        await pool_router.stop()
         await engine_manager.stop()
         return {"ok": True, "engine": engine_manager.status().model_dump()}
 

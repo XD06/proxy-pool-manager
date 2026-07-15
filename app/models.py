@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,24 @@ class ProxyNode(BaseModel):
 
 class PortMapping(BaseModel):
     node_tag: str
+
+
+class PoolMember(BaseModel):
+    node_tag: str
+    weight: int = Field(default=1, ge=1, le=100)
+    enabled: bool = True
+    draining: bool = False
+
+
+class ProxyPool(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    name: str
+    listen_port: int = Field(ge=1024, le=65535)
+    policy: Literal["round_robin", "weighted_round_robin"] = "weighted_round_robin"
+    enabled: bool = True
+    members: list[PoolMember] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
 
 
 class LatencyResult(BaseModel):
@@ -69,6 +88,7 @@ class AppState(BaseModel):
     subscription_last_count: int = 0
     nodes: list[ProxyNode] = Field(default_factory=list)
     port_mappings: dict[str, PortMapping] = Field(default_factory=dict)
+    pools: list[ProxyPool] = Field(default_factory=list)
     latency_cache: dict[str, LatencyResult] = Field(default_factory=dict)
     exit_ip_cache: dict[str, ExitIpCache] = Field(default_factory=dict)
     geoip_cache: dict[str, GeoIpResult] = Field(default_factory=dict)

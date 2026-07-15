@@ -14,7 +14,7 @@ services:
       PPM_PROXY_PUBLIC_HOST: "${PPM_PROXY_PUBLIC_HOST:-}"
       PPM_CLASH_API_ADDR: "127.0.0.1:9090"
       PPM_DOMAIN_RESOLVE_STRATEGY: ""
-      PPM_ASSET_VERSION: "20260621-local-check"
+      PPM_ASSET_VERSION: "20260716-traffic-pools"
       # Set this before exposing 9100 publicly.
       PPM_ADMIN_KEY: "${PPM_ADMIN_KEY:-}"
       # Set to 1 if the console is only accessed through HTTPS.
@@ -26,4 +26,4 @@ services:
       # Web console: keep it local and put HTTPS reverse proxy in front.
       - "127.0.0.1:9100:9100"
       # Proxy ports: expose only the range you assign to users.
-      - "8001-8100:8001-8100"
+      - "8001-8300:8001-8300"

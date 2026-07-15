@@ -29,7 +29,7 @@ HELPERS_JS = ROOT / "static" / "helpers.js"
 STYLE_CSS = ROOT / "static" / "style.css"
 
 # Visible tab panel ids. "import" was merged into test; activateTab remaps import→test.
-REQUIRED_TABS = ("test", "assign", "dashboard")
+REQUIRED_TABS = ("monitor", "test", "assign", "dashboard")
 LEGACY_IMPORT_ID = "import"
 
 # Class hooks used by querySelector / event delegation in app.js
@@ -126,7 +126,7 @@ def test_tab_data_tab_matches_panel_ids():
     assert LEGACY_IMPORT_ID in html_ids, "keep #import for DOM id contract / nested import block"
     js = _read(APP_JS)
     assert 'tabId === "import"' in js or "tabId === 'import'" in js
-    assert 'activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "test"' in js
+    assert 'activateTab(localStorage.getItem(ACTIVE_TAB_KEY) || "monitor"' in js
 
 
 def test_required_class_hooks_present_in_html():
@@ -207,6 +207,7 @@ def test_status_payload_has_fields_frontend_reads(client):
         "ready",
         "node_count",
         "mapping_count",
+        "pool_count",
         "expected_ports",
         "listening_ports",
         "missing_ports",

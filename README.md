@@ -27,7 +27,7 @@
 
 ## 特性
 
-- **3 Tab 控制台**：节点（导入+测速）/ 分配 / 运行，浅色 Toolbench 风格
+- **4 Tab 控制台**：监控（流量+事件）/ 节点（导入+测速）/ 分配 / 运行（引擎+节点池），浅色 Toolbench 风格
 - **多协议导入**：VLESS / VMess / Shadowsocks / Trojan / Hysteria2 / TUIC / AnyTLS / Clash YAML / Base64 订阅
 - **测速去重**：临时启动 sing-box 验证延迟和出口 IP，同 IP 自动保留最快节点
 - **端口固定映射**：一端口一节点，sing-box `mixed` inbound 同时支持 HTTP + SOCKS5
@@ -35,12 +35,14 @@
 - **AI 连通性检测**：通过代理端口测试 GPT / Claude / Gemini 可达性
 - **sing-box 更新管理**：自动识别运行平台与 CPU 架构，控制台检测更新、下载替换及一键回退
 - **可视化管理**：可用率圆环、协议分色 chip、延迟进度条、地区 flag chip
+- **流量监控**：按公开端口、节点池、节点统计上下行流量、实时连接、历史趋势和安全运行事件
+- **节点池轮询**：HTTP/SOCKS5 TCP 连接级普通/加权轮询、手动前进、成员排空和拨号失败跳过
 
 ## 核心原则
 
 - 每个本地端口固定对应一个节点。
-- 正式代理流量只经过 sing-box。
-- Python 只负责导入、解析、生成配置、启动进程和 Web 管理。
+- 正式代理流量只经过 Go edge router 和 sing-box。
+- Python 只负责导入、解析、生成配置、启动进程、统计聚合和 Web 管理。
 - 状态和映射持久化到 `config/assignments.json`。
 
 ## 功能清单
@@ -59,7 +61,8 @@
 | AI 连通性检测（GPT/Claude/Gemini） | ✅ |
 | HTTP + SOCKS5 混合代理端口 | ✅ |
 | 单元测试 + API smoke test（134 passed） | ✅ |
-| SSR / 多订阅合并 / 流量统计 / TUN 模式 | ❌ |
+| 流量统计 / 节点池轮询（HTTP + SOCKS5 TCP） | ✅ |
+| SSR / 多订阅合并 / TUN 模式 / 节点池 UDP | ❌ |
 
 ## 快速安装
 
@@ -83,7 +86,7 @@ chmod +x scripts/*.sh
 sudo bash scripts/install-linux.sh --systemd --start
 ```
 
-安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，构建 Linux 版 `proxycheck-api/proxycheck`，生成默认 `config/app.json`，并注册 `proxy-pool-manager` systemd 服务为开机自启。
+安装脚本会创建 `.venv`、安装 Python 依赖、下载对应平台的 sing-box 核心，构建 `proxycheck-api/pool-router`，生成默认 `config/app.json`，并注册 `proxy-pool-manager` systemd 服务为开机自启。节点池与按端口流量统计依赖 Go；Docker 镜像会自动构建该二进制。
 
 后续更新：
 
@@ -106,7 +109,7 @@ sed -i 's/change-this-admin-key/你的强管理密钥/' config/app.json
 docker compose up -d --build
 ```
 
-默认 compose 只把控制台绑定到宿主机 `127.0.0.1:9100`，适合在 VPS 上用 Nginx/Caddy 反代 HTTPS。代理端口需要给外部用户使用时，再在 `docker-compose.yml` 里打开对应端口范围，例如 `8001-8062:8001-8062`。
+默认 compose 只把控制台绑定到宿主机 `127.0.0.1:9100`，适合在 VPS 上用 Nginx/Caddy 反代 HTTPS。代理端口需要给外部用户使用时，再在 `docker-compose.yml` 里打开对应端口范围（默认 `8001-8300`）。
 
 如果你要把 `9100:9100` 直接暴露到公网，必须设置 `admin_key` 或环境变量 `PPM_ADMIN_KEY`，否则控制台没有登录保护。
 前端样式或登录页改动后，记得 `docker compose up -d --build`，并确认页面底部资源版本号已经更新。

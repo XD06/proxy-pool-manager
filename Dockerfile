@@ -6,6 +6,7 @@ COPY proxycheck-api/go.mod ./
 RUN go mod download
 COPY proxycheck-api/ ./
 RUN CGO_ENABLED=0 go build -o /out/proxycheck ./cmd/proxycheck
+RUN CGO_ENABLED=0 go build -o /out/pool-router ./cmd/pool-router
 
 FROM python:3.12-slim AS runtime
 
@@ -32,6 +33,7 @@ COPY static ./static
 COPY templates ./templates
 COPY main.py .
 COPY --from=proxycheck-builder /out/proxycheck /app/proxycheck-api/proxycheck
+COPY --from=proxycheck-builder /out/pool-router /app/proxycheck-api/pool-router
 
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
@@ -43,7 +45,7 @@ RUN set -eux; \
     curl -fL "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${sing_arch}.tar.gz" -o /tmp/sing-box.tar.gz; \
     tar -xzf /tmp/sing-box.tar.gz -C /tmp; \
     find /tmp -type f -name sing-box -exec cp {} /app/bin/sing-box \; -quit; \
-    chmod +x /app/bin/sing-box /app/proxycheck-api/proxycheck; \
+    chmod +x /app/bin/sing-box /app/proxycheck-api/proxycheck /app/proxycheck-api/pool-router; \
     rm -rf /tmp/sing-box*
 
 VOLUME ["/app/config", "/app/tmp"]

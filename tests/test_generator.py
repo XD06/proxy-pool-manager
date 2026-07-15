@@ -1,7 +1,7 @@
 import pytest
 
-from app.generator import ConfigError, generate_config
-from app.models import PortMapping, ProxyNode
+from app.generator import ConfigError, generate_config, generate_pool_router_config
+from app.models import PoolMember, PortMapping, ProxyNode, ProxyPool
 
 
 def make_node(tag="node-vless-a"):
@@ -152,6 +152,52 @@ def test_generate_config_preserves_existing_multiplex():
     assert outbound["multiplex"]["enabled"] is True
     assert outbound["multiplex"]["protocol"] == "h2mux"
     assert outbound["multiplex"]["max_streams"] == 16
+
+
+def test_generate_router_mode_creates_internal_fixed_and_pool_member_inbounds():
+    first = make_node("node-a")
+    second = make_node("node-b")
+    pool = ProxyPool(
+        id="pool-ai",
+        name="AI",
+        listen_port=8201,
+        members=[PoolMember(node_tag=first.tag), PoolMember(node_tag=second.tag, weight=3)],
+    )
+
+    config = generate_config(
+        [first, second], {"8001": PortMapping(node_tag=first.tag)}, pools=[pool], router_mode=True
+    )
+
+    assert {item["listen"] for item in config["inbounds"]} == {"127.0.0.1"}
+    assert {item["tag"] for item in config["inbounds"]} == {
+        "port-8001", "pool-member-pool-ai-node-a", "pool-member-pool-ai-node-b"
+    }
+    assert all(item["listen_port"] >= 18000 for item in config["inbounds"])
+
+
+def test_generate_pool_router_config_keeps_fixed_routes_and_weights(monkeypatch):
+    monkeypatch.setattr("app.generator.current_proxy_listen_host", lambda: "0.0.0.0")
+    first = make_node("node-a")
+    second = make_node("node-b")
+    pool = ProxyPool(
+        id="pool-ai", name="AI", listen_port=8201,
+        members=[PoolMember(node_tag=first.tag), PoolMember(node_tag=second.tag, weight=3)],
+    )
+
+    config = generate_pool_router_config({"8001": PortMapping(node_tag=first.tag)}, [pool])
+
+    listeners = {item["id"]: item for item in config["listeners"]}
+    assert listeners["port-8001"]["listen"] == "0.0.0.0:8001"
+    assert listeners["pool-pool-ai"]["policy"] == "weighted_round_robin"
+    assert [item["weight"] for item in listeners["pool-pool-ai"]["backends"]] == [1, 3]
+
+
+def test_generate_config_rejects_pool_port_collision():
+    node = make_node()
+    pool = ProxyPool(id="pool-a", name="A", listen_port=8001, members=[PoolMember(node_tag=node.tag)])
+
+    with pytest.raises(ConfigError, match="already assigned"):
+        generate_config([node], {"8001": PortMapping(node_tag=node.tag)}, pools=[pool], router_mode=True)
 
 
 

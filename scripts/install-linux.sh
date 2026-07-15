@@ -133,6 +133,17 @@ else
   echo "Install Go and run: cd proxycheck-api && go build -o proxycheck ./cmd/proxycheck" >&2
 fi
 
+if [ -x proxycheck-api/pool-router ]; then
+  echo "pool-router binary already exists, skipping build"
+elif command -v go >/dev/null 2>&1; then
+  echo "Building pool-router binary..."
+  (cd proxycheck-api && go build -o pool-router ./cmd/pool-router)
+  chmod +x proxycheck-api/pool-router
+else
+  echo "Warning: Go is not installed; node pools and per-port traffic monitoring will be unavailable." >&2
+  echo "Install Go and run: cd proxycheck-api && go build -o pool-router ./cmd/pool-router" >&2
+fi
+
 latest_sing_box_version() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
