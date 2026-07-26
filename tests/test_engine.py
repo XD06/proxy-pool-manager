@@ -10,19 +10,30 @@ from app.engine import EngineError, EngineManager, _config_listen_ports
 from app.models import EngineStatus
 
 
-def test_status_detects_managed_sing_box_process(monkeypatch):
+def test_status_uses_cached_managed_sing_box_process(monkeypatch):
     manager = EngineManager()
+    calls = []
+
+    def discover(config_path=None):
+        calls.append(config_path)
+        return [{"ProcessId": 1234, "ExecutablePath": "bin/sing-box.exe"}]
+
     monkeypatch.setattr(
         manager,
         "_managed_processes",
-        lambda config_path=None: [{"ProcessId": 1234, "ExecutablePath": "bin/sing-box.exe"}],
+        discover,
     )
 
+    assert manager.status().running is False
+    assert calls == []
+
+    asyncio.run(manager.refresh_runtime_status())
     status = manager.status()
 
     assert status.running is True
     assert status.pid == 1234
     assert status.last_error is None
+    assert calls == [None]
 
 
 def test_stop_cleans_managed_orphans_when_no_tracked_process(monkeypatch):

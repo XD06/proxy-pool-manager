@@ -1,3 +1,5 @@
+import json
+
 from app.models import LatencyResult, ProxyNode
 import socket
 
@@ -183,8 +185,61 @@ def test_test_nodes_with_temporary_engine_uses_one_batch_by_default(monkeypatch)
     assert batches == [[node.tag for node in nodes]]
 
 
+def test_preflight_nodes_isolates_only_the_invalid_configuration(monkeypatch):
+    class FakeEngine:
+        def __init__(self, config_path):
+            self.config_path = config_path
+
+        async def check_config(self, config_path):
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            if any(item.get("tag") == "node-b" for item in payload["outbounds"]):
+                raise tester_module.EngineError("sing-box check failed: unsupported test field")
+
+    monkeypatch.setattr(tester_module, "EngineManager", FakeEngine)
+    nodes = [_node("node-a", "A"), _node("node-b", "B"), _node("node-c", "C")]
+
+    errors = asyncio.run(tester_module.preflight_nodes(nodes))
+
+    assert errors == {"node-b": "configuration incompatible: sing-box check failed: unsupported test field"}
+
+
+def test_temporary_engine_skips_preflight_incompatible_nodes(tmp_path, monkeypatch):
+    starts = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def start(self, *args, **kwargs):
+            starts.append(kwargs)
+
+        async def stop(self, *args, **kwargs):
+            return None
+
+    async def fake_preflight(nodes):
+        return {"node-a": "configuration incompatible: unsupported transport"}
+
+    async def fake_validate(port, **kwargs):
+        return LatencyResult(alive=True, delay=12, test_port=port)
+
+    monkeypatch.setattr(tester_module, "SING_BOX_TEST_CONFIG_PATH", tmp_path / "sing-box-test.json")
+    monkeypatch.setattr(tester_module, "EngineManager", FakeEngine)
+    monkeypatch.setattr(tester_module, "preflight_nodes", fake_preflight)
+    monkeypatch.setattr(tester_module, "allocate_test_ports", lambda count: [19001 + index for index in range(count)])
+    monkeypatch.setattr(tester_module, "validate_proxy_port", fake_validate)
+    nodes = [_node("node-a", "A"), _node("node-b", "B")]
+
+    results = asyncio.run(tester_module._test_node_batch_with_temporary_engine(nodes))
+
+    assert results["node-a"].alive is False
+    assert results["node-a"].error == "configuration incompatible: unsupported transport"
+    assert results["node-b"].alive is True
+    assert starts == [{"check": False, "settle_seconds": pytest.approx(0.45)}]
+
+
 def test_default_validation_urls_include_exit_ip_and_google_targets():
     assert DEFAULT_VALIDATION_URLS[0] == PRIMARY_TEST_URL
+    assert PRIMARY_TEST_URL == "https://www.google.com/generate_204"
     assert "http://cp.cloudflare.com/generate_204" in DEFAULT_VALIDATION_URLS
     assert "https://ipv4.webshare.io/" in DEFAULT_VALIDATION_URLS
     assert "https://www.google.com/generate_204" in DEFAULT_VALIDATION_URLS
@@ -194,8 +249,8 @@ def test_default_validation_urls_include_exit_ip_and_google_targets():
 def test_default_node_test_urls_match_port_validation_fallbacks():
     assert DEFAULT_NODE_TEST_URLS == [
         PRIMARY_TEST_URL,
+        "http://cp.cloudflare.com/generate_204",
         "https://www.gstatic.com/generate_204",
-        "https://www.google.com/generate_204",
     ]
 
 

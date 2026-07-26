@@ -15,3 +15,6 @@ config/*.tmp
 bin/*
 !bin/.gitkeep
 .playwright-cli/
+
+# Environment
+.env

@@ -36,6 +36,8 @@ class EngineManager:
         self._lock = asyncio.Lock()
         self._update_lock = asyncio.Lock()
         self._monitor_failures = 0
+        self._orphan_processes: list[dict[str, Any]] = []
+        self.runtime_checked_at: float | None = None
 
     def _binary_name(self) -> str:
         return "sing-box.exe" if platform.system().lower() == "windows" else "sing-box"
@@ -301,7 +303,8 @@ class EngineManager:
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             output = (stderr or stdout).decode(errors="replace")[-4000:]
-            raise EngineError(f"sing-box check failed: {output}")
+            hint = _failing_outbound_hint(config_path, output)
+            raise EngineError(f"sing-box check failed{hint}: {output}")
 
     async def binary_info(self, *, check_latest: bool = False) -> dict[str, Any]:
         configured = os.environ.get("SING_BOX_PATH")
@@ -469,20 +472,22 @@ class EngineManager:
             await self._wait_for_config_ports_available(config_path, timeout_seconds=port_wait_timeout)
             self.managed_config_path = config_path
             binary = await self.ensure_binary()
-            proc = subprocess.Popen(
-                [str(binary), "run", "-c", str(config_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(config_path.parent.parent),
-                creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
-            )
+            # Keep the child off pipes: an unread PIPE fills up (~64KB) and
+            # blocks sing-box mid-run. stderr goes to a file for diagnostics.
+            stderr_log = _stderr_log_path(config_path)
+            with open(stderr_log, "wb") as stderr_file:
+                proc = subprocess.Popen(
+                    [str(binary), "run", "-c", str(config_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    cwd=str(config_path.parent.parent),
+                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0,
+                )
             self.process = proc
             self.started_at = time.time()
             await asyncio.sleep(settle_seconds)
             if proc.poll() is not None:
-                err = ""
-                if proc.stderr:
-                    err = proc.stderr.read().decode(errors="replace")[-4000:]
+                err = _tail_text(stderr_log)
                 self.last_error = err or "sing-box exited immediately"
                 if self.process is proc:
                     self.process = None
@@ -532,11 +537,10 @@ class EngineManager:
     def status(self) -> EngineStatus:
         running = self.process is not None and self.process.poll() is None
         if not running:
-            managed = self._managed_processes()
-            if managed:
+            if self._orphan_processes:
                 return EngineStatus(
                     running=True,
-                    pid=managed[0].get("ProcessId"),
+                    pid=self._orphan_processes[0].get("ProcessId"),
                     uptime_seconds=None,
                     fatal=self.fatal,
                     last_error=None,
@@ -548,6 +552,16 @@ class EngineManager:
             fatal=self.fatal,
             last_error=self.last_error,
         )
+
+    async def refresh_runtime_status(self, config_path: Path | None = None) -> EngineStatus:
+        """Refresh orphan-process state away from API request paths."""
+        running = self.process is not None and self.process.poll() is None
+        if running:
+            self._orphan_processes = []
+        else:
+            self._orphan_processes = await asyncio.to_thread(self._managed_processes, config_path)
+        self.runtime_checked_at = time.time()
+        return self.status()
 
     async def monitor(self, config_path: Path) -> None:
         while True:
@@ -597,9 +611,54 @@ def _unavailable_ports(ports: list[int]) -> list[int]:
 
 
 def _can_bind_tcp_port(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try:
-            sock.bind(("0.0.0.0", port))
-        except OSError:
-            return False
-        return True
+    """Return True when the port can be bound for both wildcard and loopback.
+
+    Checking only 0.0.0.0 misses exclusive 127.0.0.1 listeners on some stacks,
+    and checking only loopback misses foreign wildcard binds. Require both.
+
+    Do not enable SO_REUSEADDR here: on Windows it can make an occupied port
+    look free, which defeats allocation skip-busy behaviour.
+    """
+    for host in ("0.0.0.0", "127.0.0.1"):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind((host, port))
+            except OSError:
+                return False
+    return True
+
+
+def _stderr_log_path(config_path: Path) -> Path:
+    return config_path.with_name(f"{config_path.stem}.stderr.log")
+
+
+def _tail_text(path: Path, limit: int = 4000) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if not data:
+        return ""
+    return data[-limit:].decode(errors="replace").strip()
+
+
+def _failing_outbound_hint(config_path: Path, output: str) -> str:
+    """Best-effort hint naming the outbound that made sing-box reject the config."""
+    match = re.search(r"outbounds\[(\d+)\]", output)
+    if not match:
+        return ""
+    index = int(match.group(1))
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        outbound = (config.get("outbounds") or [])[index]
+    except Exception:
+        return f" (outbounds[{index}])"
+    if not isinstance(outbound, dict):
+        return f" (outbounds[{index}])"
+    tag = outbound.get("tag")
+    server = outbound.get("server")
+    if tag and server:
+        return f" (outbound {tag} @ {server})"
+    if tag:
+        return f" (outbound {tag})"
+    return f" (outbounds[{index}])"

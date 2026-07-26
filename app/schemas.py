@@ -26,6 +26,18 @@ class SubscriptionConfigRequest(BaseModel):
     refresh_interval_minutes: int = 0
 
 
+class SubscriptionSourceRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1)
+    refresh_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+
+
+class NodeGroupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    kind: str = "manual"
+    node_tags: list[str] = Field(default_factory=list)
+
+
 class AssignRequest(BaseModel):
     mappings: dict[str, str]
 
@@ -34,6 +46,7 @@ class PoolUpsertRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     listen_port: int = Field(ge=1024, le=65535)
     policy: str = "weighted_round_robin"
+    rotation_interval_seconds: int = Field(default=600, ge=10, le=86_400)
     enabled: bool = True
     members: list[PoolMember] = Field(default_factory=list)
 
@@ -135,6 +148,8 @@ class TestJob(BaseModel):
     details: dict[str, dict] = {}
     removed: list[str] = []
     error: str | None = None
+    revision: int = 0
+    result_revisions: dict[str, int] = Field(default_factory=dict, exclude=True)
     touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 
 

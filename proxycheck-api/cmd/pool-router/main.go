@@ -29,10 +29,11 @@ type config struct {
 }
 
 type listenerConfig struct {
-	ID       string          `json:"id"`
-	Listen   string          `json:"listen"`
-	Policy   string          `json:"policy"`
-	Backends []backendConfig `json:"backends"`
+	ID                      string          `json:"id"`
+	Listen                  string          `json:"listen"`
+	Policy                  string          `json:"policy"`
+	RotationIntervalSeconds int             `json:"rotation_interval_seconds"`
+	Backends                []backendConfig `json:"backends"`
 }
 
 type backendConfig struct {
@@ -53,20 +54,25 @@ type counters struct {
 
 type backend struct {
 	backendConfig
-	counters counters
+	counters      counters
+	lastDialError atomic.Value
 }
 
 type listener struct {
 	listenerConfig
-	backends []*backend
-	ln       net.Listener
-	cursor   atomic.Uint64
-	counters counters
+	backends       []*backend
+	ln             net.Listener
+	cursor         atomic.Uint64
+	counters       counters
+	selectionMu    sync.Mutex
+	windowBackend  *backend
+	windowDeadline time.Time
 }
 
 type runtime struct {
-	mu        sync.RWMutex
-	listeners map[string]*listener
+	mu               sync.RWMutex
+	listeners        map[string]*listener
+	failedListeners []map[string]string
 }
 
 type countWriter struct {
@@ -104,9 +110,18 @@ func main() {
 	rt := &runtime{listeners: make(map[string]*listener)}
 	for _, item := range cfg.Listeners {
 		if err := rt.add(item); err != nil {
-			rt.close()
-			log.Fatal(err)
+			log.Printf("warning: skipping listener: %v", err)
+			rt.failedListeners = append(rt.failedListeners, map[string]string{
+				"id":    item.ID,
+				"listen": item.Listen,
+				"error": err.Error(),
+			})
+			continue
 		}
+	}
+	if len(rt.listeners) == 0 {
+		rt.close()
+		log.Fatal("all listeners failed to start; nothing to serve")
 	}
 	server := &http.Server{Addr: cfg.ControlListen, Handler: rt.handler(), ReadHeaderTimeout: 3 * time.Second}
 	go func() {
@@ -114,7 +129,12 @@ func main() {
 			log.Printf("control server: %v", err)
 		}
 	}()
-	log.Printf("pool-router started: %d proxy listeners, control=%s", len(cfg.Listeners), cfg.ControlListen)
+	if len(rt.failedListeners) > 0 {
+		log.Printf("pool-router started: %d/%d proxy listeners active, %d skipped, control=%s",
+			len(rt.listeners), len(cfg.Listeners), len(rt.failedListeners), cfg.ControlListen)
+	} else {
+		log.Printf("pool-router started: %d proxy listeners, control=%s", len(cfg.Listeners), cfg.ControlListen)
+	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
@@ -131,8 +151,11 @@ func (rt *runtime) add(cfg listenerConfig) error {
 	if len(cfg.Backends) == 0 {
 		return fmt.Errorf("listener %s has no backends", cfg.ID)
 	}
-	if cfg.Policy != "round_robin" && cfg.Policy != "weighted_round_robin" {
+	if cfg.Policy != "round_robin" && cfg.Policy != "weighted_round_robin" && cfg.Policy != "time_window" {
 		return fmt.Errorf("listener %s has unsupported policy %q", cfg.ID, cfg.Policy)
+	}
+	if cfg.RotationIntervalSeconds <= 0 {
+		cfg.RotationIntervalSeconds = 600
 	}
 	l := &listener{listenerConfig: cfg}
 	for _, item := range cfg.Backends {
@@ -194,6 +217,13 @@ func (l *listener) available() []*backend {
 }
 
 func (l *listener) pick(exclude map[*backend]bool) *backend {
+	if l.Policy == "time_window" {
+		return l.pickWindow(exclude)
+	}
+	return l.pickFromSchedule(exclude)
+}
+
+func (l *listener) pickFromSchedule(exclude map[*backend]bool) *backend {
 	items := l.available()
 	schedule := make([]*backend, 0, len(items))
 	for _, item := range items {
@@ -215,6 +245,22 @@ func (l *listener) pick(exclude map[*backend]bool) *backend {
 	return schedule[index%uint64(len(schedule))]
 }
 
+func (l *listener) pickWindow(exclude map[*backend]bool) *backend {
+	l.selectionMu.Lock()
+	defer l.selectionMu.Unlock()
+	now := time.Now()
+	if l.windowBackend != nil && now.Before(l.windowDeadline) && !exclude[l.windowBackend] && l.windowBackend.Enabled && !l.windowBackend.Draining {
+		return l.windowBackend
+	}
+	selected := l.pickFromSchedule(exclude)
+	if selected == nil {
+		return nil
+	}
+	l.windowBackend = selected
+	l.windowDeadline = now.Add(time.Duration(l.RotationIntervalSeconds) * time.Second)
+	return selected
+}
+
 func (l *listener) handle(client net.Conn) {
 	l.counters.Active.Add(1)
 	defer l.counters.Active.Add(-1)
@@ -231,9 +277,11 @@ func (l *listener) handle(client net.Conn) {
 		if err != nil {
 			l.counters.DialFailures.Add(1)
 			selected.counters.DialFailures.Add(1)
+			selected.lastDialError.Store(err.Error())
 			excluded[selected] = true
 			continue
 		}
+		selected.lastDialError.Store("")
 		upstream = candidate
 		break
 	}
@@ -288,7 +336,16 @@ func (rt *runtime) handler() http.Handler {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		l.cursor.Add(1)
+		if l.Policy == "time_window" {
+			l.selectionMu.Lock()
+			l.windowDeadline = time.Time{}
+			l.windowBackend = nil
+			l.selectionMu.Unlock()
+		} else {
+			// Stateless policies have no active connection to evict. Move the
+			// schedule cursor once so the following new connection is advanced.
+			l.cursor.Add(1)
+		}
 		writeJSON(w, map[string]any{"ok": true, "id": l.ID})
 	})
 	return mux
@@ -301,15 +358,24 @@ func (rt *runtime) snapshot() map[string]any {
 	for _, l := range rt.listeners {
 		backends := make([]map[string]any, 0, len(l.backends))
 		for _, b := range l.backends {
-			backends = append(backends, counterPayload(b.ID, b.Enabled, b.Draining, &b.counters))
+			payload := counterPayload(b.ID, b.Enabled, b.Draining, &b.counters)
+			if value := b.lastDialError.Load(); value != nil {
+				payload["last_dial_error"] = value
+			}
+			backends = append(backends, payload)
 		}
 		item := counterPayload(l.ID, true, false, &l.counters)
 		item["listen"] = l.Listen
 		item["policy"] = l.Policy
+		item["rotation_interval_seconds"] = l.RotationIntervalSeconds
 		item["backends"] = backends
 		listeners = append(listeners, item)
 	}
-	return map[string]any{"running": true, "listeners": listeners}
+	result := map[string]any{"running": true, "listeners": listeners}
+	if len(rt.failedListeners) > 0 {
+		result["failed_listeners"] = rt.failedListeners
+	}
+	return result
 }
 
 func counterPayload(id string, enabled, draining bool, c *counters) map[string]any {

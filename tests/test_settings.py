@@ -34,3 +34,14 @@ def test_current_performance_settings_env_overrides_are_clamped(tmp_path, monkey
     assert perf.profile == "low"
     assert perf.max_port_test_concurrency == 128
     assert perf.state_save_debounce_ms == 0
+
+
+def test_current_performance_settings_normal_profile_batches_large_node_sets(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "APP_CONFIG_PATH", tmp_path / "app.json")
+    monkeypatch.delenv("PPM_PERFORMANCE_PROFILE", raising=False)
+    monkeypatch.delenv("PPM_NODE_TEST_BATCH_SIZE", raising=False)
+
+    perf = settings.current_performance_settings()
+
+    assert perf.profile == "normal"
+    assert perf.node_test_batch_size == 100

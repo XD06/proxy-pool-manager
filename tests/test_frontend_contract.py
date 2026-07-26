@@ -44,7 +44,7 @@ REQUIRED_CLASSES = (
 )
 
 # IDs created only inside JS-rendered HTML strings (not static template)
-DYNAMIC_JS_IDS = frozenset({"checkAllNodes"})
+DYNAMIC_JS_IDS = frozenset({"checkAllNodes", "checkAllAssign"})
 
 
 def _read(path: Path) -> str:
@@ -193,7 +193,7 @@ def test_index_serves_required_contract_markers(client):
         assert f'id="{element_id}"' in text
     assert 'data-tab="import"' not in text
     assert 'id="import"' in text
-    assert 'class="import-block"' in text or "import-block" in text
+    assert "node-setup-import" in text
 
 
 def test_status_payload_has_fields_frontend_reads(client):
@@ -240,6 +240,14 @@ def test_shadowsocks_protocol_uses_ss_chip_style():
     assert 'raw === "shadowsocks" ? "ss"' in helpers
 
 
+def test_assignment_table_has_a_current_view_bulk_selection_control():
+    js = _read(APP_JS)
+
+    assert 'id="checkAllAssign"' in js
+    assert "syncAssignSelectionControl" in js
+    assert 'data-assign-select-all-label' in js
+
+
 def test_engine_start_stop_is_one_accessible_switch():
     html = _read(INDEX)
     js = _read(APP_JS)
@@ -281,6 +289,18 @@ def test_node_test_options_stay_inside_panel_body():
     assert "#test > .test-options {" in css
     assert "width: auto;" in css
     assert "margin: 0 16px 10px;" in css
+
+
+def test_notice_is_a_non_layout_toast_and_cleans_its_transient_metadata():
+    html = _read(INDEX)
+    js = _read(APP_JS)
+    css = _read(STYLE_CSS)
+
+    assert 'id="notice" class="notice hidden" role="status" aria-live="polite" aria-atomic="true"' in html
+    assert ".notice {\n  position: fixed;" in css
+    assert ".notice.hidden {\n  display: block;" in css
+    assert 'notice.removeAttribute("title");' in js
+    assert 'notice.removeAttribute("data-tone");' in js
 
 
 def test_status_header_and_tabs_share_a_transparent_sticky_group():

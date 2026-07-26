@@ -1,16 +1,20 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
+import os
 import re
+import socket
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 import yaml
 
-from .models import ImportResult, ProxyNode
+from .models import ImportDiagnostic, ImportResult, ProxyNode
 
 
 SUPPORTED_LINK_SCHEMES = {"vless", "vmess", "ss", "trojan", "hysteria2", "hy2", "tuic", "anytls"}
@@ -86,6 +90,15 @@ def _nonnegative_int(value: object, field: str) -> int:
     return number
 
 
+def _server_port_range(value: object) -> str:
+    # sing-box `server_ports` entries must be START:END; single ports from
+    # `mport=443` style sources are normalized to a one-port range.
+    text = str(value).strip()
+    if "-" in text:
+        return text.replace("-", ":")
+    return f"{text}:{text}"
+
+
 def _tls_from_query(params: dict[str, str]) -> dict[str, Any] | None:
     security = params.get("security") or params.get("tls")
     enabled = security in {"tls", "reality"} or params.get("sni") or params.get("fp")
@@ -112,14 +125,13 @@ def _tls_from_query(params: dict[str, str]) -> dict[str, Any] | None:
         short_id = params.get("sid") or params.get("short-id")
         if short_id:
             tls["reality"]["short_id"] = short_id
-        spider_x = params.get("spx") or params.get("spiderX")
-        if spider_x:
-            tls["reality"]["spider_x"] = unquote(spider_x)
+        # `spx`/`spiderX` is an Xray-only parameter; sing-box rejects unknown
+        # fields, so it must never reach the generated outbound.
     return tls
 
 
 def _transport_from_query(params: dict[str, str]) -> dict[str, Any] | None:
-    transport_type = params.get("type") or params.get("net")
+    transport_type = (params.get("type") or params.get("net") or "").strip().lower()
     if not transport_type or transport_type in {"tcp", "none"}:
         return None
     if transport_type == "ws":
@@ -146,7 +158,16 @@ def _transport_from_query(params: dict[str, str]) -> dict[str, Any] | None:
         if host:
             transport["host"] = [host]
         return transport
-    return {"type": transport_type}
+    if transport_type == "httpupgrade":
+        transport = {"type": "httpupgrade"}
+        host = params.get("host")
+        if host:
+            transport["host"] = host
+        path = params.get("path")
+        if path:
+            transport["path"] = unquote(path)
+        return transport
+    raise ValueError(f"Unsupported V2Ray transport: {transport_type}")
 
 
 def _build_node(name: str, protocol: str, outbound: dict[str, Any]) -> ProxyNode:
@@ -174,6 +195,9 @@ def parse_vless(link: str) -> ProxyNode:
     flow = params.get("flow")
     if flow:
         outbound["flow"] = flow
+    packet_encoding = params.get("packetEncoding") or params.get("packet_encoding")
+    if packet_encoding:
+        outbound["packet_encoding"] = packet_encoding
     tls = _tls_from_query(params)
     if tls:
         outbound["tls"] = tls
@@ -218,7 +242,7 @@ def parse_hysteria2(link: str) -> ProxyNode:
     }
     mport = params.get("mport")
     if mport:
-        outbound["server_ports"] = [mport.replace("-", ":")]
+        outbound["server_ports"] = [_server_port_range(mport)]
     insecure = params.get("insecure") or params.get("allowInsecure")
     if insecure in {"1", "true", "True"}:
         outbound["tls"]["insecure"] = True
@@ -239,29 +263,13 @@ def _split_plugin(value: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
-def _parse_ss_plugin(plugin: str) -> dict[str, Any] | None:
+def _parse_ss_plugin(plugin: str) -> tuple[str, str | None] | None:
     plugin_name, options = _split_plugin(unquote(plugin))
     if not plugin_name:
         return None
-    if plugin_name in {"obfs-local", "simple-obfs"}:
-        outbound: dict[str, Any] = {"type": "obfs-local"}
-        for option in options:
-            if option.startswith("obfs="):
-                outbound["mode"] = option.split("=", 1)[1]
-            elif option.startswith("obfs-host="):
-                outbound["host"] = option.split("=", 1)[1]
-        return outbound
-    if plugin_name == "v2ray-plugin":
-        outbound = {"type": "v2ray-plugin"}
-        for option in options:
-            if option == "tls":
-                outbound["tls"] = True
-            elif option.startswith("host="):
-                outbound["host"] = option.split("=", 1)[1]
-            elif option.startswith("path="):
-                outbound["path"] = unquote(option.split("=", 1)[1])
-        return outbound
-    return {"type": plugin_name, "options": options}
+    # sing-box delegates Shadowsocks plugins to their external binary. Its
+    # schema requires the plugin name and options as separate strings.
+    return plugin_name, ";".join(options) or None
 
 
 def parse_tuic(link: str) -> ProxyNode:
@@ -293,14 +301,18 @@ def parse_tuic(link: str) -> ProxyNode:
     congestion = params.get("congestion_control") or params.get("congestion-control")
     if congestion:
         outbound["congestion_control"] = congestion
-    udp_relay_mode = params.get("udp_relay_mode") or params.get("udp-relay-mode")
-    if udp_relay_mode:
-        outbound["udp_relay_mode"] = udp_relay_mode
+    # sing-box rejects configs that set both fields; udp_over_stream wins.
+    if _truthy(params.get("udp_over_stream") or params.get("udp-over-stream")):
+        outbound["udp_over_stream"] = True
+    else:
+        udp_relay_mode = params.get("udp_relay_mode") or params.get("udp-relay-mode")
+        if udp_relay_mode:
+            outbound["udp_relay_mode"] = udp_relay_mode
     if _truthy(params.get("zero_rtt_handshake") or params.get("zero-rtt-handshake")):
         outbound["zero_rtt_handshake"] = True
     heartbeat = params.get("heartbeat") or params.get("heartbeat_interval") or params.get("heartbeat-interval")
     if heartbeat:
-        outbound["heartbeat"] = heartbeat
+        outbound["heartbeat"] = _duration(heartbeat)
     return _build_node(_clean_name(parsed.fragment, parsed.hostname or "tuic"), "tuic", outbound)
 
 
@@ -364,7 +376,8 @@ def parse_vmess(link: str) -> ProxyNode:
         "security": data.get("scy") or "auto",
         "alter_id": int(data.get("aid") or 0),
     }
-    if data.get("tls") == "tls":
+    tls_value = data.get("tls")
+    if tls_value is True or str(tls_value or "").strip().lower() in {"tls", "1", "true"}:
         tls = {"enabled": True}
         if data.get("sni"):
             tls["server_name"] = data["sni"]
@@ -419,7 +432,10 @@ def parse_ss(link: str) -> ProxyNode:
     if plugin:
         plugin_config = _parse_ss_plugin(plugin)
         if plugin_config:
-            outbound["plugin"] = plugin_config
+            plugin_name, plugin_opts = plugin_config
+            outbound["plugin"] = plugin_name
+            if plugin_opts:
+                outbound["plugin_opts"] = plugin_opts
     return _build_node(_clean_name(fragment, host or "ss"), "ss", outbound)
 
 
@@ -443,7 +459,13 @@ def parse_link(link: str) -> ProxyNode:
 
 
 def _clash_tls(proxy: dict[str, Any]) -> dict[str, Any] | None:
-    if not proxy.get("tls") and not proxy.get("servername") and not proxy.get("sni"):
+    # `reality-opts` implies TLS even when the source omits `tls: true`.
+    if (
+        not proxy.get("tls")
+        and not proxy.get("servername")
+        and not proxy.get("sni")
+        and not proxy.get("reality-opts")
+    ):
         return None
     tls: dict[str, Any] = {"enabled": bool(proxy.get("tls", True))}
     server_name = proxy.get("servername") or proxy.get("sni")
@@ -469,9 +491,7 @@ def _clash_reality(proxy: dict[str, Any]) -> dict[str, Any] | None:
     short_id = reality_opts.get("short-id") or reality_opts.get("short_id")
     if short_id is not None:
         reality["short_id"] = str(short_id)
-    spider_x = reality_opts.get("spider-x") or reality_opts.get("spider_x")
-    if spider_x:
-        reality["spider_x"] = str(spider_x)
+    # `spider-x` is Xray-only; sing-box hard-fails on unknown reality fields.
     return reality
 
 def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
@@ -509,7 +529,8 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                     if reality:
                         tls["reality"] = reality
                     outbound["tls"] = tls
-                if proxy.get("network") == "ws":
+                network = str(proxy.get("network") or "").lower()
+                if network == "ws":
                     ws_opts = proxy.get("ws-opts") or {}
                     transport: dict[str, Any] = {"type": "ws"}
                     if ws_opts.get("path"):
@@ -518,6 +539,24 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                     host = headers.get("Host") or headers.get("host")
                     if host:
                         transport["headers"] = {"Host": host}
+                    outbound["transport"] = transport
+                elif network == "grpc":
+                    grpc_opts = proxy.get("grpc-opts") or {}
+                    transport = {"type": "grpc"}
+                    service_name = grpc_opts.get("grpc-service-name") or grpc_opts.get("service-name") or grpc_opts.get("service_name")
+                    if service_name:
+                        transport["service_name"] = str(service_name)
+                    outbound["transport"] = transport
+                elif network in {"http", "h2"}:
+                    http_opts = proxy.get("http-opts") or {}
+                    transport = {"type": "http"}
+                    path = http_opts.get("path")
+                    if path:
+                        transport["path"] = str(path)
+                    headers = http_opts.get("headers") or {}
+                    hosts = headers.get("Host") or headers.get("host")
+                    if hosts:
+                        transport["host"] = list(hosts) if isinstance(hosts, list) else [str(hosts)]
                     outbound["transport"] = transport
             elif ptype == "trojan":
                 outbound = {
@@ -538,7 +577,7 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                 }
                 ports = proxy.get("ports") or proxy.get("mport")
                 if ports:
-                    outbound["server_ports"] = [str(ports).replace("-", ":")]
+                    outbound["server_ports"] = [_server_port_range(ports)]
                 obfs = proxy.get("obfs")
                 if obfs:
                     outbound["obfs"] = {"type": str(obfs)}
@@ -574,14 +613,18 @@ def parse_clash_yaml(text: str) -> tuple[list[ProxyNode], list[str]]:
                 congestion = proxy.get("congestion-controller") or proxy.get("congestion-control")
                 if congestion:
                     outbound["congestion_control"] = str(congestion)
-                udp_relay_mode = proxy.get("udp-relay-mode")
-                if udp_relay_mode:
-                    outbound["udp_relay_mode"] = str(udp_relay_mode)
+                # sing-box rejects configs that set both fields; udp_over_stream wins.
+                if proxy.get("udp-over-stream"):
+                    outbound["udp_over_stream"] = True
+                else:
+                    udp_relay_mode = proxy.get("udp-relay-mode")
+                    if udp_relay_mode:
+                        outbound["udp_relay_mode"] = str(udp_relay_mode)
                 if proxy.get("reduce-rtt") or proxy.get("zero-rtt-handshake"):
                     outbound["zero_rtt_handshake"] = True
                 heartbeat = proxy.get("heartbeat-interval") or proxy.get("heartbeat")
                 if heartbeat:
-                    outbound["heartbeat"] = str(heartbeat)
+                    outbound["heartbeat"] = _duration(heartbeat)
             elif ptype == "anytls":
                 password = str(proxy.get("password") or "")
                 if not password:
@@ -694,11 +737,13 @@ def _should_skip_subscription_line(line: str) -> bool:
 
 def parse_text(text: str) -> ImportResult:
     warnings: list[str] = []
+    diagnostics: list[ImportDiagnostic] = []
     nodes: list[ProxyNode] = []
     working_text = text.strip()
 
     if "proxies:" in working_text:
         nodes, warnings = parse_clash_yaml(working_text)
+        diagnostics = [ImportDiagnostic(kind="clash_warning", message=warning) for warning in warnings]
     else:
         decoded_subscription = _decode_base64_subscription_text(working_text)
         if decoded_subscription:
@@ -709,15 +754,22 @@ def parse_text(text: str) -> ImportResult:
                 continue
             scheme = line.split("://", 1)[0].lower()
             if scheme not in SUPPORTED_LINK_SCHEMES:
-                warnings.append(f"Skipped unsupported link scheme: {scheme}")
+                message = f"Skipped unsupported link scheme: {scheme}"
+                warnings.append(message)
+                diagnostics.append(ImportDiagnostic(kind="unsupported_scheme", scheme=scheme, message=message))
                 continue
             if _should_skip_subscription_line(line):
-                warnings.append(f"Skipped subscription info line: {unquote(urlparse(line).fragment or line)}")
+                message = f"Skipped subscription info line: {unquote(urlparse(line).fragment or line)}"
+                warnings.append(message)
+                diagnostics.append(ImportDiagnostic(kind="subscription_metadata", scheme=scheme, message=message))
                 continue
             try:
                 nodes.append(parse_link(line))
             except Exception as exc:
-                warnings.append(f"Skipped invalid {scheme} link: {exc}")
+                message = str(exc)
+                warnings.append(f"Skipped invalid {scheme} link: {message}")
+                kind = "unsupported_transport" if message.startswith("Unsupported V2Ray transport:") else "invalid_node"
+                diagnostics.append(ImportDiagnostic(kind=kind, scheme=scheme, message=message))
 
     deduped: dict[str, tuple[str, ProxyNode]] = {}
     for node in nodes:
@@ -732,17 +784,57 @@ def parse_text(text: str) -> ImportResult:
         node.outbound["tag"] = node.tag
         deduped.setdefault(node.tag, (fingerprint, node))
     result_nodes = [node for _, node in deduped.values()]
-    return ImportResult(nodes=result_nodes, count=len(result_nodes), warnings=warnings)
+    return ImportResult(nodes=result_nodes, count=len(result_nodes), warnings=warnings, diagnostics=diagnostics)
+
+
+def _allow_private_subscription() -> bool:
+    return os.environ.get("PPM_ALLOW_PRIVATE_SUBSCRIPTION", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolves_to_private_address(host: str) -> bool:
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        # Let the HTTP client surface DNS failures with its own error.
+        return False
+    for info in infos:
+        try:
+            candidate = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if not candidate.is_global:
+            return True
+    return False
+
+
+async def _guard_subscription_request(request: httpx.Request) -> None:
+    """Block SSRF via subscription URLs, including redirect hops."""
+    if _allow_private_subscription():
+        return
+    host = request.url.host or ""
+    if await asyncio.to_thread(_resolves_to_private_address, host):
+        raise ValueError(
+            f"Subscription URL resolves to a private/internal address and was blocked: {host}. "
+            "Set PPM_ALLOW_PRIVATE_SUBSCRIPTION=1 to allow internal subscription servers."
+        )
 
 
 async def import_nodes(url: str | None = None, text: str | None = None) -> ImportResult:
     if not url and not text:
         raise ValueError("Either url or text is required")
     if url:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(f"Unsupported subscription URL scheme: {parsed.scheme or '(none)'}")
         async with httpx.AsyncClient(
             timeout=30,
             follow_redirects=True,
             headers=SUBSCRIPTION_HEADERS,
+            event_hooks={"request": [_guard_subscription_request]},
         ) as client:
             response = await client.get(url)
             response.raise_for_status()

@@ -221,6 +221,7 @@ def generate_pool_router_config(
                 "id": f"pool-{pool.id}",
                 "listen": f"{listen_host or current_proxy_listen_host()}:{pool.listen_port}",
                 "policy": pool.policy,
+                "rotation_interval_seconds": pool.rotation_interval_seconds,
                 "backends": [
                     {
                         "id": item["node_tag"],

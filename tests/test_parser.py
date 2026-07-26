@@ -21,6 +21,33 @@ def test_parse_vless_link():
     assert node.outbound["tls"]["server_name"] == "edge.example.com"
 
 
+def test_parse_vless_httpupgrade_transport_preserves_host_and_path():
+    result = parse_text(
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+        "?security=tls&type=httpupgrade&host=edge.example.com&path=%2Fupgrade#HTTPUpgrade"
+    )
+
+    assert result.count == 1
+    assert result.nodes[0].outbound["transport"] == {
+        "type": "httpupgrade",
+        "host": "edge.example.com",
+        "path": "/upgrade",
+    }
+
+
+def test_parse_text_reports_unsupported_v2ray_transport_instead_of_creating_a_broken_node():
+    result = parse_text(
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+        "?security=tls&type=xhttp#Unsupported"
+    )
+
+    assert result.count == 0
+    assert result.warnings == ["Skipped invalid vless link: Unsupported V2Ray transport: xhttp"]
+    assert result.diagnostics[0].kind == "unsupported_transport"
+    assert result.diagnostics[0].scheme == "vless"
+    assert result.diagnostics[0].message == "Unsupported V2Ray transport: xhttp"
+
+
 def test_parse_vmess_link():
     payload = {
         "v": "2",
@@ -45,6 +72,25 @@ def test_parse_vmess_link():
     assert node.type == "vmess"
     assert node.outbound["alter_id"] == 0
     assert node.outbound["transport"]["path"] == "/ray"
+    assert node.outbound["tls"]["enabled"] is True
+
+
+def test_parse_vmess_tls_accepts_truthy_variants():
+    for tls_value in ("1", "true", True):
+        payload = {
+            "v": "2",
+            "ps": "TLS",
+            "add": "jp.example.com",
+            "port": "443",
+            "id": "00000000-0000-0000-0000-000000000001",
+            "aid": "0",
+            "tls": tls_value,
+            "sni": "jp.example.com",
+        }
+        encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        result = parse_text(f"vmess://{encoded}")
+        assert result.count == 1
+        assert result.nodes[0].outbound["tls"]["enabled"] is True
 
 
 def test_parse_ss_link():
@@ -163,6 +209,53 @@ proxies:
     assert {node.type for node in result.nodes} == {"shadowsocks", "vless"}
 
 
+def test_parse_clash_vless_grpc_transport():
+    result = parse_text(
+        """
+proxies:
+  - name: VLESS gRPC
+    type: vless
+    server: grpc.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    tls: true
+    servername: grpc.example.com
+    network: grpc
+    grpc-opts:
+      grpc-service-name: edge
+"""
+    )
+
+    assert result.count == 1
+    assert result.nodes[0].outbound["transport"] == {"type": "grpc", "service_name": "edge"}
+
+
+def test_parse_clash_vless_http_transport():
+    result = parse_text(
+        """
+proxies:
+  - name: VLESS HTTP
+    type: vless
+    server: http.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    tls: true
+    network: h2
+    http-opts:
+      path: /edge
+      headers:
+        Host: [cdn.example.com, backup.example.com]
+"""
+    )
+
+    assert result.count == 1
+    assert result.nodes[0].outbound["transport"] == {
+        "type": "http",
+        "path": "/edge",
+        "host": ["cdn.example.com", "backup.example.com"],
+    }
+
+
 def test_unsupported_link_is_warning():
     result = parse_text("ssr://unsupported")
     assert result.count == 0
@@ -181,13 +274,24 @@ def test_parse_vless_reality_link():
     assert node.outbound["tls"]["reality"]["enabled"] is True
     assert node.outbound["tls"]["reality"]["public_key"] == "publicKey123"
     assert node.outbound["tls"]["reality"]["short_id"] == "abcd1234"
-    assert node.outbound["tls"]["reality"]["spider_x"] == "/probe"
+    # Xray-only spiderX must never reach sing-box (unknown field hard-fails check).
+    assert "spider_x" not in node.outbound["tls"]["reality"]
+
+
+def test_parse_vless_preserves_udp_packet_encoding():
+    result = parse_text(
+        "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+        "?security=tls&packetEncoding=packetaddr#PacketAddr"
+    )
+
+    assert result.count == 1
+    assert result.nodes[0].outbound["packet_encoding"] == "packetaddr"
 
 
 def test_parse_tuic_link():
     text = (
         "tuic://00000000-0000-0000-0000-000000000000:secret@example.com:443"
-        "?sni=www.example.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3,hq-29#TUIC"
+        "?sni=www.example.com&congestion_control=bbr&udp_over_stream=1&alpn=h3,hq-29#TUIC"
     )
     result = parse_text(text)
     assert result.count == 1
@@ -197,7 +301,20 @@ def test_parse_tuic_link():
     assert node.outbound["tls"]["server_name"] == "www.example.com"
     assert node.outbound["tls"]["alpn"] == ["h3", "hq-29"]
     assert node.outbound["congestion_control"] == "bbr"
-    assert node.outbound["udp_relay_mode"] == "native"
+    assert node.outbound["udp_over_stream"] is True
+
+
+def test_parse_tuic_normalizes_heartbeat_and_rejects_udp_mode_conflict():
+    text = (
+        "tuic://00000000-0000-0000-0000-000000000000:secret@example.com:443"
+        "?sni=www.example.com&heartbeat=10&udp_over_stream=1&udp_relay_mode=native#TUIC"
+    )
+    result = parse_text(text)
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.outbound["heartbeat"] == "10s"
+    assert node.outbound["udp_over_stream"] is True
+    assert "udp_relay_mode" not in node.outbound
 
 
 def test_parse_anytls_link():
@@ -335,10 +452,8 @@ def test_parse_ss_v2ray_plugin_link():
     result = parse_text(text)
     assert result.count == 1
     node = result.nodes[0]
-    assert node.outbound["plugin"]["type"] == "v2ray-plugin"
-    assert node.outbound["plugin"]["tls"] is True
-    assert node.outbound["plugin"]["host"] == "cdn.example.com"
-    assert node.outbound["plugin"]["path"] == "/ws"
+    assert node.outbound["plugin"] == "v2ray-plugin"
+    assert node.outbound["plugin_opts"] == "tls;host=cdn.example.com;path=/ws"
 
 
 def test_parse_subscription_skips_info_lines():
@@ -395,6 +510,7 @@ proxies:
     reality-opts:
       public-key: pk-real
       short-id: abcd1234
+      spider-x: /probe
 """
     result = parse_text(text)
     assert result.count == 1
@@ -403,4 +519,36 @@ proxies:
     assert node.outbound["flow"] == "xtls-rprx-vision"
     assert node.outbound["tls"]["reality"]["public_key"] == "pk-real"
     assert node.outbound["tls"]["reality"]["short_id"] == "abcd1234"
+    assert "spider_x" not in node.outbound["tls"]["reality"]
     assert result.warnings
+
+
+def test_parse_clash_yaml_reality_without_explicit_tls_flag():
+    text = """
+proxies:
+  - name: ImplicitTLS
+    type: vless
+    server: hk.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000002
+    servername: www.mozilla.org
+    client-fingerprint: chrome
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: pk-implicit
+      short-id: abcd
+"""
+    result = parse_text(text)
+    assert result.count == 1
+    node = result.nodes[0]
+    assert node.outbound["tls"]["enabled"] is True
+    assert node.outbound["tls"]["reality"]["public_key"] == "pk-implicit"
+    assert node.outbound["tls"]["reality"]["short_id"] == "abcd"
+
+
+def test_parse_hysteria2_single_mport_is_normalized():
+    result = parse_text(
+        "hysteria2://secret@hy2.example.com:443?mport=443&sni=cdn.example.com#HY2"
+    )
+    assert result.count == 1
+    assert result.nodes[0].outbound["server_ports"] == ["443:443"]

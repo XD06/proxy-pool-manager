@@ -2,6 +2,24 @@ package main
 
 import "testing"
 
+func TestTimeWindowKeepsBackendUntilWindowExpires(t *testing.T) {
+	a := &backend{backendConfig: backendConfig{ID: "a", Enabled: true, Weight: 1}}
+	b := &backend{backendConfig: backendConfig{ID: "b", Enabled: true, Weight: 1}}
+	l := &listener{listenerConfig: listenerConfig{Policy: "time_window", RotationIntervalSeconds: 60}, backends: []*backend{a, b}}
+	first := l.pick(nil)
+	if first == nil {
+		t.Fatal("expected a backend")
+	}
+	for i := 0; i < 4; i++ {
+		if got := l.pick(nil); got != first {
+			t.Fatalf("window changed from %q to %q", first.ID, got.ID)
+		}
+	}
+	if got := l.pick(map[*backend]bool{first: true}); got == first || got == nil {
+		t.Fatal("expected a healthy replacement after a dial failure")
+	}
+}
+
 func TestWeightedRoundRobinHonorsWeights(t *testing.T) {
 	l := &listener{
 		listenerConfig: listenerConfig{Policy: "weighted_round_robin"},

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import secrets
 import time
@@ -16,24 +15,52 @@ from ..schemas import LoginRequest
 
 AUTH_MAX_FAILURES = 5
 AUTH_LOCK_WINDOW_SECONDS = 60
+AUTH_SESSION_TTL_SECONDS = 8 * 3600
+
+
+def client_ip(request: Request, *, trust_proxy: bool = False) -> str:
+    """Return the best-effort client address for rate limiting."""
+    if trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+        if forwarded:
+            return forwarded.split(",")[0].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
 
 
 @dataclass
 class AuthContext:
     """Holds auth-related mutable state and config accessors."""
 
-    sessions: set[str] = field(default_factory=set)
+    # token -> unix expiry timestamp
+    sessions: dict[str, float] = field(default_factory=dict)
     failures: dict[str, list[float]] = field(default_factory=dict)
     auth_enabled: Callable[[], bool] = lambda: False
     admin_key: Callable[[], str] = lambda: ""
     cookie_name: Callable[[], str] = lambda: "ppm_session"
     cookie_secure: Callable[[], bool] = lambda: False
+    trust_proxy: Callable[[], bool] = lambda: False
+    session_ttl_seconds: int = AUTH_SESSION_TTL_SECONDS
+
+    def purge_expired_sessions(self, now: float | None = None) -> None:
+        current = time.time() if now is None else now
+        expired = [token for token, expires_at in self.sessions.items() if expires_at <= current]
+        for token in expired:
+            self.sessions.pop(token, None)
 
     def is_authenticated(self, request: Request) -> bool:
         if not self.auth_enabled():
             return True
         token = request.cookies.get(self.cookie_name())
-        return bool(token and token in self.sessions)
+        if not token:
+            return False
+        self.purge_expired_sessions()
+        expires_at = self.sessions.get(token)
+        if expires_at is None:
+            return False
+        if expires_at <= time.time():
+            self.sessions.pop(token, None)
+            return False
+        return True
 
     def payload(self, request: Request) -> dict:
         return {
@@ -54,9 +81,9 @@ def create_auth_router(ctx: AuthContext) -> APIRouter:
     async def auth_login(payload: LoginRequest, request: Request):
         if not ctx.auth_enabled():
             return {"enabled": False, "authenticated": True}
-        client_ip = request.client.host if request.client else "unknown"
+        ip = client_ip(request, trust_proxy=ctx.trust_proxy())
         now = time.monotonic()
-        failures = ctx.failures.get(client_ip, [])
+        failures = ctx.failures.get(ip, [])
         failures = [t for t in failures if now - t < AUTH_LOCK_WINDOW_SECONDS]
         if len(failures) >= AUTH_MAX_FAILURES:
             retry_after = int(AUTH_LOCK_WINDOW_SECONDS - (now - failures[0]))
@@ -67,19 +94,22 @@ def create_auth_router(ctx: AuthContext) -> APIRouter:
         expected = ctx.admin_key()
         if not hmac.compare_digest(payload.key or "", expected):
             failures.append(now)
-            ctx.failures[client_ip] = failures
+            ctx.failures[ip] = failures
             remaining = AUTH_MAX_FAILURES - len(failures)
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid admin key. {remaining} attempt(s) remaining.",
             )
-        ctx.failures.pop(client_ip, None)
+        ctx.failures.pop(ip, None)
+        ctx.purge_expired_sessions()
         token = secrets.token_urlsafe(32)
-        ctx.sessions.add(token)
+        ttl = max(60, int(ctx.session_ttl_seconds))
+        ctx.sessions[token] = time.time() + ttl
         response = JSONResponse({"enabled": True, "authenticated": True})
         response.set_cookie(
             ctx.cookie_name(),
             token,
+            max_age=ttl,
             httponly=True,
             samesite="lax",
             secure=ctx.cookie_secure(),
@@ -91,7 +121,7 @@ def create_auth_router(ctx: AuthContext) -> APIRouter:
     async def auth_logout(request: Request):
         token = request.cookies.get(ctx.cookie_name())
         if token:
-            ctx.sessions.discard(token)
+            ctx.sessions.pop(token, None)
         response = JSONResponse({"enabled": ctx.auth_enabled(), "authenticated": False})
         response.delete_cookie(ctx.cookie_name(), path="/")
         return response

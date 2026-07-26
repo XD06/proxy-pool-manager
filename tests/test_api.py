@@ -18,6 +18,9 @@ def isolate_sing_box_config(monkeypatch, tmp_path):
     monkeypatch.setattr(api_module, "SING_BOX_CONFIG_PATH", tmp_path / "sing-box.json")
     monkeypatch.setattr(api_module, "APP_CONFIG_PATH", tmp_path / "app.json")
     monkeypatch.setattr(api_module, "TRAFFIC_DB_PATH", tmp_path / "traffic.db")
+    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: False)
+    monkeypatch.setattr(api_module.PoolRouterManager, "_managed_processes", lambda self: [])
+    monkeypatch.setattr(api_module.PoolRouterManager, "_stop_managed_orphans", lambda self, keep_pid=None: None)
 
 
 class RunningEngine:
@@ -96,6 +99,32 @@ def test_api_import_assign_and_status(tmp_path):
     assert status.json()["performance"]["profile"] in {"normal", "low"}
 
 
+def test_api_keeps_last_known_good_state_when_disk_reload_fails(tmp_path):
+    path = tmp_path / "assignments.json"
+    store = StateStore(path)
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+    imported = client.post(
+        "/api/import",
+        json={"text": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#HK"},
+    )
+    assert imported.status_code == 200
+
+    invalid = "{bad json"
+    path.write_text(invalid, encoding="utf-8")
+
+    first = client.get("/api/status")
+    second = client.get("/api/status")
+
+    assert first.status_code == 200
+    assert first.json()["node_count"] == 1
+    assert first.json()["store_warning"]
+    assert second.status_code == 200
+    assert second.json()["node_count"] == 1
+    assert path.read_text(encoding="utf-8") == invalid
+    assert len(list(tmp_path.glob("assignments.json.bak-*"))) == 1
+
+
 def test_api_admin_auth_gate_and_login(tmp_path, monkeypatch):
     monkeypatch.setenv("PPM_ADMIN_KEY", "secret-key")
     store = StateStore(tmp_path / "assignments.json")
@@ -112,6 +141,8 @@ def test_api_admin_auth_gate_and_login(tmp_path, monkeypatch):
     login = client.post("/api/auth/login", json={"key": "secret-key"})
     assert login.status_code == 200
     assert login.json()["authenticated"] is True
+    set_cookie = login.headers.get("set-cookie", "")
+    assert "Max-Age=" in set_cookie or "max-age=" in set_cookie.lower()
 
     allowed = client.get("/api/status")
     assert allowed.status_code == 200
@@ -122,6 +153,37 @@ def test_api_admin_auth_gate_and_login(tmp_path, monkeypatch):
     assert logout.json()["authenticated"] is False
 
 
+def test_api_auth_rate_limit_uses_forwarded_for_when_trusted(tmp_path, monkeypatch):
+    monkeypatch.setenv("PPM_ADMIN_KEY", "secret-key")
+    monkeypatch.setenv("PPM_TRUST_PROXY", "1")
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    for _ in range(5):
+        response = client.post(
+            "/api/auth/login",
+            json={"key": "wrong"},
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        )
+        assert response.status_code == 401
+
+    locked = client.post(
+        "/api/auth/login",
+        json={"key": "wrong"},
+        headers={"X-Forwarded-For": "203.0.113.9"},
+    )
+    assert locked.status_code == 429
+
+    # A different forwarded client must not share the lock bucket.
+    other = client.post(
+        "/api/auth/login",
+        json={"key": "secret-key"},
+        headers={"X-Forwarded-For": "203.0.113.10"},
+    )
+    assert other.status_code == 200
+
+
 def test_index_injects_asset_version(tmp_path):
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())
@@ -130,8 +192,8 @@ def test_index_injects_asset_version(tmp_path):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert f"style.css?v={ASSET_VERSION}" in response.text
-    assert f"app.js?v={ASSET_VERSION}" in response.text
+    assert f"style.css?v={ASSET_VERSION}-" in response.text
+    assert f"app.js?v={ASSET_VERSION}-" in response.text
     assert "__ASSET_VERSION__" not in response.text
 
 
@@ -184,6 +246,92 @@ def test_api_pool_crud_and_node_deletion_disables_empty_pool(tmp_path):
         deleted = client.post("/api/nodes/delete", json={"node_tags": [tag]})
         assert deleted.status_code == 200
         assert store.load().pools[0].enabled is False
+    finally:
+        api_module.PoolRouterManager.available = original_available
+
+
+def test_api_groups_and_paginated_nodes_keep_nodes_independent(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+    imported = client.post(
+        "/api/import",
+        json={
+            "text": "\n".join(
+                [
+                    "vless://00000000-0000-0000-0000-000000000001@one.example:443?security=tls#One",
+                    "vless://00000000-0000-0000-0000-000000000002@two.example:443?security=tls#Two",
+                ]
+            )
+        },
+    )
+    assert imported.status_code == 200
+    tags = [item["tag"] for item in imported.json()["nodes"]]
+    assert imported.json()["group_id"]
+
+    created = client.post(
+        "/api/groups",
+        json={"name": "优选节点", "kind": "quality_snapshot", "node_tags": [tags[0]]},
+    )
+    assert created.status_code == 200
+    group_id = created.json()["group"]["id"]
+    assert created.json()["group"]["node_count"] == 1
+
+    paged = client.get(f"/api/nodes?page=1&page_size=25&group_id={group_id}")
+    assert paged.status_code == 200
+    assert [item["tag"] for item in paged.json()["nodes"]] == [tags[0]]
+    assert paged.json()["pagination"] == {"page": 1, "page_size": 25, "total": 1, "total_pages": 1}
+
+    assert client.delete(f"/api/groups/{group_id}").status_code == 200
+    assert len(client.get("/api/nodes").json()["nodes"]) == 2
+
+
+def test_api_subscription_source_creates_source_group(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/subscriptions",
+        json={"name": "备用订阅", "url": "https://example.com/sub", "refresh_interval_minutes": 30},
+    )
+
+    assert response.status_code == 200
+    source = response.json()["source"]
+    assert source["group_id"]
+    assert source["next_refresh_in_seconds"] is not None
+    groups = client.get("/api/groups").json()["groups"]
+    assert groups[0]["kind"] == "subscription"
+    assert groups[0]["source_id"] == source["id"]
+
+
+def test_api_time_window_pool_policy_is_preserved(tmp_path):
+    original_available = api_module.PoolRouterManager.available
+    api_module.PoolRouterManager.available = lambda self: True
+    try:
+        store = StateStore(tmp_path / "assignments.json")
+        app = create_app(store=store, engine=StoppedEngine())
+        client = TestClient(app)
+        imported = client.post(
+            "/api/import",
+            json={"text": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#HK"},
+        )
+        tag = imported.json()["nodes"][0]["tag"]
+
+        created = client.post(
+            "/api/pools",
+            json={
+                "name": "固定出口池",
+                "listen_port": 8202,
+                "policy": "time_window",
+                "rotation_interval_seconds": 900,
+                "members": [{"node_tag": tag}],
+            },
+        )
+
+        assert created.status_code == 200
+        assert created.json()["pool"]["policy"] == "time_window"
+        assert created.json()["pool"]["rotation_interval_seconds"] == 900
     finally:
         api_module.PoolRouterManager.available = original_available
 
@@ -293,6 +441,32 @@ def test_api_import_zero_nodes_returns_error(tmp_path):
     assert "No supported nodes" in response.json()["detail"]
 
 
+def test_api_import_returns_structured_parser_diagnostics(tmp_path):
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/import",
+        json={
+            "text": "\n".join([
+                "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=xhttp#Unsupported",
+                "vless://00000000-0000-0000-0000-000000000001@example.com:443?security=tls#Supported",
+            ])
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert response.json()["diagnostics"] == [
+        {
+            "kind": "unsupported_transport",
+            "scheme": "vless",
+            "message": "Unsupported V2Ray transport: xhttp",
+        }
+    ]
+
+
 def test_api_progressive_test_job(tmp_path, monkeypatch):
     seen = []
 
@@ -340,6 +514,37 @@ def test_api_progressive_test_job(tmp_path, monkeypatch):
     assert job.json()["details"][tag]["node_tag"] == tag
     assert "result" in job.json()["details"][tag]
     assert seen == [False]
+
+    revision = job.json()["revision"]
+    delta = client.get(f"/api/test/jobs/{job_id}?since={revision}")
+    assert delta.status_code == 200
+    assert delta.json()["revision"] == revision
+    assert delta.json()["results"] == {}
+
+def test_api_node_test_uses_regular_defaults(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_test_nodes(nodes, **kwargs):
+        seen.update(kwargs)
+        return {node.tag: LatencyResult(alive=True, delay=123) for node in nodes}
+
+    monkeypatch.setattr(api_module, "test_nodes_with_temporary_engine", fake_test_nodes)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store)
+    client = TestClient(app)
+    imported = client.post(
+        "/api/import",
+        json={"text": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#HK"},
+    )
+
+    response = client.post("/api/test", json={"node_tags": [imported.json()["nodes"][0]["tag"]]})
+
+    assert response.status_code == 200
+    assert seen["target_url"] is None
+    assert seen["target_urls"] is None
+    assert seen["include_exit_ip"] is False
+    assert "fast_transport_preflight" not in seen
+    assert "fallback_on_failure" not in seen
 
 
 def test_api_prune_node_test_includes_exit_ip(tmp_path, monkeypatch):
@@ -730,6 +935,7 @@ def test_api_port_check_reports_availability(tmp_path, monkeypatch):
 
 def test_api_port_allocate_skips_busy_and_clash_ports(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module, "current_clash_api_addr", lambda: "127.0.0.1:10000")
+    monkeypatch.setattr(api_module, "current_pool_router_control_addr", lambda: "127.0.0.1:9091")
     monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: port in {10002, 10003})
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())
@@ -744,6 +950,108 @@ def test_api_port_allocate_skips_busy_and_clash_ports(tmp_path, monkeypatch):
     payload = response.json()
     assert payload["ports"] == [10002, 10003]
     assert payload["skipped"]["10000"]["reason"] == "reserved-clash-api"
+
+
+def test_api_port_allocate_skips_already_mapped_ports_when_engine_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "current_clash_api_addr", lambda: "127.0.0.1:10000")
+    monkeypatch.setattr(api_module, "current_pool_router_control_addr", lambda: "127.0.0.1:9091")
+    monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: True)
+    store = StateStore(tmp_path / "assignments.json")
+    store.save(
+        AppState(
+            nodes=[
+                ProxyNode(
+                    tag="node-a",
+                    name="A",
+                    type="vless",
+                    server="a.example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "a.example.com", "server_port": 443, "uuid": "u", "tag": "node-a"},
+                ),
+                ProxyNode(
+                    tag="node-b",
+                    name="B",
+                    type="vless",
+                    server="b.example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "b.example.com", "server_port": 443, "uuid": "u", "tag": "node-b"},
+                ),
+            ],
+            port_mappings={"8001": PortMapping(node_tag="node-a")},
+        )
+    )
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/ports/allocate",
+        json={"start_port": 8001, "count": 1, "exclude": []},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ports"] == [8002]
+    assert payload["skipped"]["8001"]["reason"] == "project-mapped"
+
+
+def test_api_status_does_not_block_on_port_scan(tmp_path, monkeypatch):
+    """/api/status must stay fast even with many mapped ports (uses cache)."""
+    calls = {"n": 0}
+
+    def counting_listen(ports):
+        calls["n"] += 1
+        return list(ports)
+
+    monkeypatch.setattr(api_module, "_listening_local_ports", counting_listen)
+    store = StateStore(tmp_path / "assignments.json")
+    mappings = {
+        str(8000 + i): PortMapping(node_tag="node-a")
+        for i in range(40)
+    }
+    store.save(
+        AppState(
+            nodes=[
+                ProxyNode(
+                    tag="node-a",
+                    name="A",
+                    type="vless",
+                    server="a.example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "a.example.com", "server_port": 443, "uuid": "u", "tag": "node-a"},
+                )
+            ],
+            port_mappings=mappings,
+        )
+    )
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    first = client.get("/api/status")
+    assert first.status_code == 200
+    # Request path must not call the socket scanner; cache starts empty until
+    # the runtime loop / explicit refresh populates it.
+    assert calls["n"] == 0
+    assert first.json()["listening_ports"] == []
+
+
+def test_api_assign_rejects_reserved_web_and_router_ports(tmp_path, monkeypatch):
+    monkeypatch.setenv("PPM_PORT", "9000")
+    monkeypatch.setattr(api_module, "current_clash_api_addr", lambda: "127.0.0.1:10000")
+    monkeypatch.setattr(api_module, "current_pool_router_control_addr", lambda: "127.0.0.1:9091")
+    monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: True)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    link = "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#HK"
+    imported = client.post("/api/import", json={"text": link})
+    tag = imported.json()["nodes"][0]["tag"]
+
+    for port in (9000, 10000, 9091):
+        response = client.put("/api/assign", json={"mappings": {str(port): tag}})
+        assert response.status_code == 409, port
+        detail = response.json()["detail"]
+        assert "不可用" in detail or "reserved" in detail.lower() or "端口" in detail
 
 
 def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
@@ -818,6 +1126,7 @@ def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
             raise AssertionError(url)
 
     monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: True)
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())
 
@@ -1633,7 +1942,29 @@ def test_api_start_omits_clash_api_when_controller_port_is_busy(tmp_path, monkey
     assert "experimental" not in config
 
 
+def _listening_ports_cache_from_app(app):
+    """Extract the create_app listening cache via engine_status_payload's closure."""
+    status_route = next(route for route in app.routes if getattr(route, "path", None) == "/api/status")
+    endpoint = status_route.endpoint
+    while hasattr(endpoint, "__wrapped__"):
+        endpoint = endpoint.__wrapped__
+    engine_status_payload = None
+    for cell in endpoint.__closure__ or ():
+        value = cell.cell_contents
+        if callable(value) and getattr(value, "__name__", "") == "engine_status_payload":
+            engine_status_payload = value
+            break
+    if engine_status_payload is None:
+        raise AssertionError("engine_status_payload not found on /api/status closure")
+    for cell in engine_status_payload.__closure__ or ():
+        value = cell.cell_contents
+        if isinstance(value, dict) and "ports" in value and "expected" in value and "checked_at" in value:
+            return value
+    raise AssertionError("listening_ports_cache not found on engine_status_payload closure")
+
+
 def test_api_status_reports_engine_port_readiness(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: True)
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=RunningEngine())
     client = TestClient(app)
@@ -1644,9 +1975,16 @@ def test_api_status_reports_engine_port_readiness(tmp_path, monkeypatch):
     )
     imported = client.post("/api/import", json={"text": link})
     tag = imported.json()["nodes"][0]["tag"]
-    client.put("/api/assign", json={"mappings": {"8001": tag}})
+    assigned = client.put("/api/assign", json={"mappings": {"8001": tag}})
+    assert assigned.status_code == 200
 
-    monkeypatch.setattr(api_module, "_listening_local_ports", lambda ports: [])
+    # Status no longer probes sockets inline; drive readiness via the cache the
+    # background runtime loop would publish.
+    listening_ports_cache = _listening_ports_cache_from_app(app)
+
+    listening_ports_cache["ports"] = set()
+    listening_ports_cache["expected"] = [8001]
+    listening_ports_cache["checked_at"] = time.time()
     not_ready = client.get("/api/status").json()
     assert not_ready["engine"]["running"] is True
     assert not_ready["engine"]["ready"] is False
@@ -1656,11 +1994,70 @@ def test_api_status_reports_engine_port_readiness(tmp_path, monkeypatch):
     assert not_ready["engine"]["expected_count"] == 1
     assert not_ready["engine"]["listening_count"] == 0
 
-    monkeypatch.setattr(api_module, "_listening_local_ports", lambda ports: [8001])
+    listening_ports_cache["ports"] = {8001}
     ready = client.get("/api/status").json()
     assert ready["engine"]["ready"] is True
     assert ready["engine"]["listening_ports"] == [8001]
     assert ready["engine"]["missing_ports"] == []
+
+
+def test_api_router_status_uses_control_plane_without_proxy_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: True)
+    monkeypatch.setattr(api_module.PoolRouterManager, "payload", lambda self: {"available": True, "running": True, "pid": 123, "last_error": None})
+
+    async def refresh_runtime_payload(self):
+        return self.payload()
+
+    async def fake_router_status(self):
+        return {
+            "listeners": [
+                {"id": "port-8001", "listen": "0.0.0.0:8001", "upload": 0, "download": 0, "active": 0, "selections": 0, "backends": []}
+            ]
+        }
+
+    monkeypatch.setattr(api_module.PoolRouterManager, "status", fake_router_status)
+    monkeypatch.setattr(api_module.PoolRouterManager, "refresh_runtime_payload", refresh_runtime_payload)
+    monkeypatch.setattr(api_module, "_listening_local_ports", lambda ports: (_ for _ in ()).throw(AssertionError("router ports must not be socket-probed")))
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+    with TestClient(app) as client:
+        imported = client.post(
+            "/api/import",
+            json={"text": "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#HK"},
+        )
+        client.put("/api/assign", json={"mappings": {"8001": imported.json()["nodes"][0]["tag"]}})
+
+        assert client.get("/api/traffic/overview").status_code == 200
+        status = client.get("/api/status").json()["engine"]
+
+    assert status["ready"] is True
+    assert status["listening_ports"] == [8001]
+
+
+def test_api_traffic_returns_stale_snapshot_when_router_control_times_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: True)
+    monkeypatch.setattr(
+        api_module.PoolRouterManager,
+        "payload",
+        lambda self: {"available": True, "running": True, "pid": 123, "last_error": None},
+    )
+
+    async def unavailable_router_status(self):
+        raise api_module.PoolRouterError("control endpoint timed out")
+
+    async def refresh_runtime_payload(self):
+        return self.payload()
+
+    monkeypatch.setattr(api_module.PoolRouterManager, "status", unavailable_router_status)
+    monkeypatch.setattr(api_module.PoolRouterManager, "refresh_runtime_payload", refresh_runtime_payload)
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=RunningEngine())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/traffic/overview")
+
+    assert response.status_code == 200
+    assert response.json()["router"]["telemetry_stale"] is True
+    assert "timed out" in response.json()["router"]["telemetry_error"]
 
 
 def test_api_status_reports_proxy_connect_host(tmp_path, monkeypatch):

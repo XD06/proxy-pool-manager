@@ -86,13 +86,13 @@
     </nav>
     </div>
 
-    <section id="notice" class="notice hidden" role="status" aria-live="polite"></section>
+    <div id="notice" class="notice hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <section id="monitor" class="panel active">
       <div class="section-head monitor-head">
         <div>
           <h2><span class="ico" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M4 18V9m5 9V5m5 13v-7m5 7V3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>监控总览</h2>
-          <p class="panel-copy">总流量 · 端口与节点下钻 · 不记录请求内容</p>
+          <p class="panel-copy">总流量、活动端口与节点池状态 · 不记录请求内容</p>
         </div>
         <div class="range-switch" role="group" aria-label="流量时间范围">
           <button class="traffic-range" data-range="1h">1 小时</button>
@@ -109,12 +109,12 @@
       </div>
       <div class="traffic-layout">
         <section class="traffic-chart-card">
-          <header><strong>流量趋势</strong><span id="trafficChartSummary" class="muted">读取中</span></header>
+          <header><div><strong>流量节奏</strong><span id="trafficChartSummary" class="muted">读取中</span></div><span class="traffic-live"><i></i>实时聚合</span></header>
           <div id="trafficChart" class="traffic-chart" role="img" aria-label="下载和上传流量趋势图"></div>
           <div class="traffic-legend"><span><i class="download"></i>下载</span><span><i class="upload"></i>上传</span></div>
         </section>
         <section class="traffic-event-card">
-          <header><strong>运行事件</strong><span class="muted">不含请求内容</span></header>
+          <header><strong>运行动态</strong><span class="muted">不含请求内容</span></header>
           <div id="trafficEvents" class="traffic-events"></div>
         </section>
       </div>
@@ -139,91 +139,118 @@
             </span>
             节点
           </h2>
-          <p class="panel-copy">导入 · 测速 · 去重 · 清理</p>
+          <p class="panel-copy">分组、筛选、测速与批量处置</p>
         </div>
         <div class="test-control-panel">
           <div class="test-actions">
             <button id="testSelectedBtn" class="primary">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13 3 4 14h7l-1 7 10-12h-7l0-6z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-              测速选中
+              测速本页选择
             </button>
-            <button id="testUntestedBtn">测未测</button>
-            <button id="testFailedOnlyBtn">测失败</button>
-            <button id="testPruneBtn">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              去重
-            </button>
-            <button id="cancelNodeTestBtn" class="hidden">取消测速</button>
-            <span class="toolbar-sep"></span>
-            <button id="selectAliveBtn" class="ghost">只选可用</button>
-            <button id="deleteSelectedBtn">删除</button>
-            <button id="deleteFailedBtn" class="ghost">删失败</button>
-            <button id="clearNodesBtn" class="ghost">清空</button>
+            <details class="node-action-menu">
+              <summary>批量操作</summary>
+              <div>
+                <button id="testWorkspaceBtn">测速当前分组</button>
+                <button id="testUntestedBtn">测未测</button>
+                <button id="testFailedOnlyBtn">测失败</button>
+                <button id="testPruneBtn">去重</button>
+                <button id="cancelNodeTestBtn" class="hidden">取消测速</button>
+                <button id="selectAliveBtn">只选可用</button>
+                <button id="deleteSelectedBtn">删除当前选择</button>
+                <button id="deleteFailedBtn">删除失败</button>
+                <button id="clearNodesBtn">清空全部节点</button>
+              </div>
+            </details>
+            <details id="import" class="node-setup node-setup-import">
+              <summary>导入</summary>
+              <div class="node-setup-popover">
+                <div class="import-strip">
+                  <label>
+                    <span>导入订阅源</span>
+                    <div class="input-row">
+                      <input id="urlInput" type="url" placeholder="https://example.com/sub">
+                      <button id="importUrlBtn" class="primary">导入</button>
+                    </div>
+                  </label>
+                  <label>
+                    <span>默认订阅刷新（分钟）</span>
+                    <div class="input-row">
+                      <input id="subscriptionInterval" type="number" min="0" max="10080" value="0" style="max-width:100px">
+                      <button id="saveSubscriptionBtn">保存</button>
+                      <button id="refreshSubscriptionBtn">刷新</button>
+                    </div>
+                  </label>
+                  <span id="subscriptionSummary" class="local-check-result muted">未配置</span>
+                </div>
+                <details class="import-more">
+                  <summary>粘贴配置文本 / 单节点链接</summary>
+                  <div class="import-more-body">
+                    <textarea id="textInput" rows="4" placeholder="vless://..."></textarea>
+                    <button id="importTextBtn" class="primary">解析文本</button>
+                  </div>
+                </details>
+              </div>
+            </details>
+            <details class="test-options node-setup node-setup-test-options">
+              <summary>测速设置</summary>
+              <div class="node-setup-popover">
+                <div class="test-options-body">
+                  <div class="test-targets" id="nodeTestTargets" aria-label="测速链接">
+                    <span>测速链接</span>
+                    <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.google.com/generate_204">Google <small>默认</small></label>
+                    <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.gstatic.com/generate_204">gstatic</label>
+                    <label class="target-option"><input class="node-target-check" type="checkbox" value="http://cp.cloudflare.com/generate_204">Cloudflare</label>
+                  </div>
+                  <label class="inline-field wide">
+                    自定义测速 URL
+                    <input id="nodeTestUrl" type="url" placeholder="可选；不选则默认 Google 204">
+                  </label>
+                  <label class="target-option test-geo-toggle">
+                    <input id="nodeTestGeo" type="checkbox">
+                    出口/地区
+                    <small>可关掉提速</small>
+                  </label>
+                </div>
+              </div>
+            </details>
           </div>
         </div>
       </div>
 
-      <div id="import" class="import-block">
-        <div class="import-strip">
-          <label>
-            <span>订阅 URL</span>
-            <div class="input-row">
-              <input id="urlInput" type="url" placeholder="https://example.com/sub">
-              <button id="importUrlBtn" class="primary">导入</button>
+      <div class="node-view-tabs" role="tablist" aria-label="节点视角">
+        <button class="node-view-tab active" data-node-view="nodes" role="tab" aria-selected="true">全部节点</button>
+        <button class="node-view-tab" data-node-view="groups" role="tab" aria-selected="false">分组管理</button>
+        <button class="node-view-tab" data-node-view="sources" role="tab" aria-selected="false">订阅来源</button>
+      </div>
+      <div class="node-workspace">
+        <aside id="nodeCollections" class="node-collections" aria-label="节点分组">
+          <header><strong>工作集</strong><span id="nodeGroupTotal" class="mono">0</span></header>
+          <button class="node-collection-item active" data-node-group="">全部节点</button>
+          <div id="nodeGroupList" class="node-group-list"></div>
+          <form id="nodeGroupForm" class="node-group-form hidden">
+            <label><span>分组名称</span><input id="nodeGroupName" required maxlength="80" placeholder="例如：低延迟 API 节点"></label>
+            <label><span>类型</span><select id="nodeGroupKind"><option value="manual">手动分组</option><option value="quality_snapshot">质量快照</option></select></label>
+            <div><button type="submit" class="primary">保存</button><button id="cancelNodeGroupBtn" type="button">取消</button></div>
+          </form>
+          <button id="createNodeGroupBtn" class="node-create-group">新建分组</button>
+        </aside>
+        <div class="node-workspace-main">
+          <div id="nodeTestOverview" class="node-test-overview"></div>
+          <div class="node-filter-bar">
+            <input id="nodeSearchInput" type="search" placeholder="搜索节点名称 / 标签 / 服务器 / 协议…" autocomplete="off">
+            <div class="node-filter-tabs">
+              <button class="node-filter-tab active" data-filter="all">全部</button>
+              <button class="node-filter-tab" data-filter="alive">可用</button>
+              <button class="node-filter-tab" data-filter="failed">失败</button>
+              <button class="node-filter-tab" data-filter="untested">未测</button>
             </div>
-          </label>
-          <label>
-            <span>自动刷新（分钟）</span>
-            <div class="input-row">
-              <input id="subscriptionInterval" type="number" min="0" max="10080" value="0" style="max-width:100px">
-              <button id="saveSubscriptionBtn">保存</button>
-              <button id="refreshSubscriptionBtn">刷新</button>
-            </div>
-          </label>
-          <span id="subscriptionSummary" class="local-check-result muted">未配置</span>
-        </div>
-        <details class="import-more">
-          <summary>粘贴配置文本 / 单节点链接</summary>
-          <div class="import-more-body">
-            <textarea id="textInput" rows="4" placeholder="vless://..."></textarea>
-            <button id="importTextBtn" class="primary">解析文本</button>
+            <label class="node-page-size"><span class="sr-only">每页数量</span><select id="nodePageSize"><option value="25">25 / 页</option><option value="50" selected>50 / 页</option><option value="100">100 / 页</option></select></label>
+            <span id="nodeFilterCount" class="node-filter-count"></span>
           </div>
-        </details>
-      </div>
-
-      <details class="test-options">
-        <summary>测速选项 · 目标 / 出口</summary>
-        <div class="test-options-body">
-          <div class="test-targets" id="nodeTestTargets" aria-label="测速链接">
-            <span>测速链接</span>
-            <label class="target-option"><input class="node-target-check" type="checkbox" value="http://cp.cloudflare.com/generate_204">Cloudflare <small>默认</small></label>
-            <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.gstatic.com/generate_204">gstatic</label>
-            <label class="target-option"><input class="node-target-check" type="checkbox" value="https://www.google.com/generate_204">Google</label>
-          </div>
-          <label class="inline-field wide">
-            自定义测速 URL
-            <input id="nodeTestUrl" type="url" placeholder="可选；不选则默认 Cloudflare 204">
-          </label>
-          <label class="target-option test-geo-toggle">
-            <input id="nodeTestGeo" type="checkbox" checked>
-            出口/地区
-            <small>可关掉提速</small>
-          </label>
+          <div id="nodeTable" class="table-card"></div>
+          <div id="nodePagination" class="node-pagination" aria-label="节点分页"></div>
         </div>
-      </details>
-
-      <div id="nodeTestOverview" class="node-test-overview"></div>
-      <div class="node-filter-bar">
-        <input id="nodeSearchInput" type="search" placeholder="搜索节点名称 / 标签 / 服务器 / 协议…" autocomplete="off">
-        <div class="node-filter-tabs">
-          <button class="node-filter-tab active" data-filter="all">全部</button>
-          <button class="node-filter-tab" data-filter="alive">可用</button>
-          <button class="node-filter-tab" data-filter="failed">失败</button>
-          <button class="node-filter-tab" data-filter="untested">未测</button>
-        </div>
-        <span id="nodeFilterCount" class="node-filter-count"></span>
       </div>
-      <div id="nodeTable" class="table-card"></div>
     </section>
 
     <section id="assign" class="panel">
@@ -235,7 +262,7 @@
             </span>
             端口分配
           </h2>
-          <p class="panel-copy">一端口一节点 · 建议只分配可用节点</p>
+          <p class="panel-copy">一端口一节点 · 失败节点仍可手动映射，但建议运行前验证目标站</p>
         </div>
         <div class="actions">
           <label class="inline-field">
@@ -415,9 +442,11 @@
           <div class="pool-editor-fields">
             <label>名称<input id="poolName" required maxlength="80" placeholder="例如：AI 专用池"></label>
             <label>公开端口<input id="poolPort" required type="number" min="1024" max="65535" placeholder="8201"></label>
-            <label>选择策略<select id="poolPolicy"><option value="weighted_round_robin">加权轮询（推荐）</option><option value="round_robin">普通轮询</option></select></label>
+            <label>选择策略<select id="poolPolicy"><option value="weighted_round_robin">加权轮询（推荐）</option><option value="round_robin">每条新连接轮询</option><option value="time_window">固定窗口出口</option></select></label>
+            <label id="poolRotationIntervalField">固定窗口（秒）<input id="poolRotationInterval" type="number" min="10" max="86400" value="600"></label>
             <label class="check-field"><input id="poolEnabled" type="checkbox" checked> 启用此池</label>
           </div>
+          <p id="poolPolicyHint" class="pool-policy-hint">新 TCP 连接按权重选择成员；已经建立的连接保持原出口。</p>
           <div id="poolMembers" class="pool-members"></div>
           <footer><button id="savePoolBtn" class="primary" type="submit">保存节点池</button></footer>
         </form>

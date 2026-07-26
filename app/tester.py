@@ -6,28 +6,30 @@ import json
 import os
 import re
 import socket
+import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
-from .engine import EngineManager, _can_bind_tcp_port
+from .engine import EngineError, EngineManager, _can_bind_tcp_port
 from .generator import generate_config
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping, ProxyNode
 from .settings import SING_BOX_TEST_CONFIG_PATH, TEST_START_PORT
 
 
-PRIMARY_TEST_URL = "http://cp.cloudflare.com/generate_204"
+PRIMARY_TEST_URL = "https://www.google.com/generate_204"
 FALLBACK_TEST_URLS = [
     PRIMARY_TEST_URL,
+    "http://cp.cloudflare.com/generate_204",
     "https://www.gstatic.com/generate_204",
-    "https://www.google.com/generate_204",
 ]
 
 DEFAULT_NODE_TEST_URLS = [
     PRIMARY_TEST_URL,
+    "http://cp.cloudflare.com/generate_204",
     "https://www.gstatic.com/generate_204",
-    "https://www.google.com/generate_204",
 ]
 
 EXIT_IP_URLS = [
@@ -45,7 +47,7 @@ IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 DEFAULT_VALIDATION_URLS = [
     PRIMARY_TEST_URL,
     "https://ipv4.webshare.io/",
-    "https://www.google.com/generate_204",
+    "http://cp.cloudflare.com/generate_204",
     "https://www.gstatic.com/generate_204",
     "https://www.cloudflare.com/cdn-cgi/trace",
 ]
@@ -314,6 +316,46 @@ def allocate_test_ports(count: int, start_port: int = TEST_START_PORT) -> list[i
     return ports
 
 
+async def preflight_nodes(nodes: list[ProxyNode]) -> dict[str, str]:
+    """Identify sing-box-incompatible nodes before opening test listeners.
+
+    A failed batch is bisected so a single unsupported outbound does not mark
+    every neighbouring node as unusable.
+    """
+    if not nodes:
+        return {}
+
+    async def check_subset(subset: list[ProxyNode]) -> dict[str, str]:
+        with tempfile.TemporaryDirectory(prefix="ppm-preflight-", dir=SING_BOX_TEST_CONFIG_PATH.parent) as directory:
+            config_path = Path(directory) / "sing-box-preflight.json"
+            mappings = {
+                str(30_000 + index): PortMapping(node_tag=node.tag)
+                for index, node in enumerate(subset)
+            }
+            config = generate_config(
+                subset,
+                mappings,
+                include_clash_api=False,
+                log_path=config_path.with_suffix(".log"),
+                listen_host="127.0.0.1",
+            )
+            config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+            engine = EngineManager(config_path)
+            try:
+                await engine.check_config(config_path)
+                return {}
+            except EngineError as exc:
+                message = f"configuration incompatible: {str(exc).strip()}"
+                if len(subset) == 1:
+                    return {subset[0].tag: message}
+
+        middle = len(subset) // 2
+        left, right = await asyncio.gather(check_subset(subset[:middle]), check_subset(subset[middle:]))
+        return {**left, **right}
+
+    return await check_subset(nodes)
+
+
 async def test_nodes_with_temporary_engine(
     nodes: list[ProxyNode],
     on_result=None,
@@ -364,13 +406,27 @@ async def _test_node_batch_with_temporary_engine(
     should_cancel=None,
     concurrency: int = 12,
 ) -> dict[str, LatencyResult]:
-    ports = allocate_test_ports(len(nodes))
+    preflight_errors = await preflight_nodes(nodes)
+    results: dict[str, LatencyResult] = {
+        node.tag: LatencyResult(alive=False, delay=None, error=preflight_errors[node.tag])
+        for node in nodes
+        if node.tag in preflight_errors
+    }
+    for tag, result in results.items():
+        if on_result:
+            on_result(tag, result)
+
+    valid_nodes = [node for node in nodes if node.tag not in preflight_errors]
+    if not valid_nodes:
+        return results
+
+    ports = allocate_test_ports(len(valid_nodes))
     mappings = {
         str(ports[index]): PortMapping(node_tag=node.tag)
-        for index, node in enumerate(nodes)
+        for index, node in enumerate(valid_nodes)
     }
     config = generate_config(
-        nodes,
+        valid_nodes,
         mappings,
         include_clash_api=False,
         log_path=SING_BOX_TEST_CONFIG_PATH.with_suffix(".log"),
@@ -407,8 +463,7 @@ async def _test_node_batch_with_temporary_engine(
             async with semaphore:
                 return await run_one(tag, port)
 
-        tasks = [asyncio.create_task(limited_run_one(node.tag, ports[index])) for index, node in enumerate(nodes)]
-        results: dict[str, LatencyResult] = {}
+        tasks = [asyncio.create_task(limited_run_one(node.tag, ports[index])) for index, node in enumerate(valid_nodes)]
         try:
             for completed in asyncio.as_completed(tasks):
                 if should_cancel and should_cancel():

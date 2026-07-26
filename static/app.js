@@ -16,6 +16,8 @@ let singBoxInfoLoaded = false;
 let localProxyCheckResults = {};
 let localProxyCheckingPorts = new Set();
 let activeNodeTestJobId = null;
+let nodeTestProgress = null;
+let nodeTestRevision = 0;
 let activePortValidationJobId = null;
 let activeLocalProxyCheckJobId = null;
 let activeProxyAdminJobId = null;
@@ -23,13 +25,25 @@ let pools = [];
 let trafficRange = localStorage.getItem("proxyPoolManager.trafficRange") || "24h";
 let trafficEntityType = "port";
 let trafficSearchQuery = "";
+let poolEditorMembers = new Map();
+let poolMemberSearchQuery = "";
+let nodeGroups = [];
+let subscriptionSources = [];
+let nodePageItems = [];
+let nodePagination = { page: 1, page_size: 50, total: 0, total_pages: 1 };
+let activeNodeGroupId = "";
+let nodeWorkspaceView = "nodes";
+let selectedNodePageTags = new Set();
+let trafficDisplayLimit = 10;
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 let authState = { enabled: false, authenticated: true };
+let portAvailabilityCache = {};
+let _portCheckTimer = null;
 
 const DEFAULT_VALIDATION_URLS = [
-  "http://cp.cloudflare.com/generate_204",
   "https://www.google.com/generate_204",
   "https://www.gstatic.com/generate_204",
+  "http://cp.cloudflare.com/generate_204",
   "https://www.cloudflare.com/cdn-cgi/trace"
 ];
 const EXIT_IP_CHECK_URL = "https://ipv4.webshare.io/";
@@ -60,17 +74,21 @@ function showNotice(message, tone = "info") {
   if (!message) {
     notice.className = "notice hidden";
     notice.textContent = "";
+    notice.removeAttribute("title");
+    notice.removeAttribute("data-tone");
     return;
   }
-  notice.className = `notice ${tone}`;
+  const visible = !notice.classList.contains("hidden");
+  notice.className = `notice ${tone}${visible ? "" : " hidden"}`;
   notice.textContent = tone === "bad" ? compactCheckMessage(message) : message;
   notice.title = String(message || "");
+  notice.dataset.tone = tone;
+  if (!visible) requestAnimationFrame(() => notice.classList.remove("hidden"));
   // ponytail: auto-dismiss; errors get more time to read
   const ms = tone === "bad" ? 6000 : 3500;
   _noticeTimer = setTimeout(() => {
     if (notice.textContent) {
-      notice.className = "notice hidden";
-      notice.textContent = "";
+      showNotice("");
     }
     _noticeTimer = null;
   }, ms);
@@ -118,6 +136,25 @@ function nodeStatusBadge(node) {
   return statusBadge(node.latency);
 }
 
+function nodeHealthCellHtml(node) {
+  return `<div>${nodeStatusBadge(node)}</div>${latencyBarHtml(node.latency)}`;
+}
+
+function nodeEgressCellHtml(node) {
+  return `<span class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</span>${geoChipHtml(geoContextForNode(node))}`;
+}
+
+function nodeTargetResultCellHtml(node) {
+  return escapeHtml(targetResponsePreview(node.latency));
+}
+
+function updateNodeLatency(tag, result) {
+  const node = nodes.find((item) => item.tag === tag);
+  if (node) node.latency = result;
+  const visibleNode = nodePageItems.find((item) => item.tag === tag);
+  if (visibleNode) visibleNode.latency = result;
+}
+
 function localProxyCheckForNodeTag(tag) {
   if (!tag) return null;
   for (const [port, item] of Object.entries(ports || {})) {
@@ -161,43 +198,21 @@ function renderNodeTestOverview() {
   if (!box) return;
   const stats = nodeTestStats();
   const targetUrls = selectedNodeTestUrls();
-  const targetText = targetUrls?.length ? targetUrls.map(compactUrl).join(" / ") : "Cloudflare 204";
+  const targetText = targetUrls?.length
+    ? targetUrls.map(compactUrl).join(" / ")
+    : "Google 204";
   const geoText = $("nodeTestGeo")?.checked ? "查出口/地区" : "只测速";
   const alivePct = stats.total ? Math.round((stats.alive / stats.total) * 100) : 0;
-  const pct = (n) => (stats.total ? Math.round((n / stats.total) * 100) : 0);
   box.innerHTML = `
-    <div class="health" title="可用率">
-      <div class="ring" style="--p:${alivePct}">
-        <div>
-          <strong>${alivePct}%</strong>
-          <small>可用率</small>
-        </div>
-      </div>
-    </div>
-    <div class="overview-metric">
-      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M7 12h10M9 17h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>总节点</span>
-      <strong>${stats.total}</strong>
-      <span class="spark"><i style="width:100%"></i></span>
-    </div>
-    <div class="overview-metric ok">
-      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>可用</span>
-      <strong>${stats.alive}</strong>
-      <span class="spark"><i style="width:${pct(stats.alive)}%"></i></span>
-    </div>
-    <div class="overview-metric bad">
-      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>失败</span>
-      <strong>${stats.failed}</strong>
-      <span class="spark"><i style="width:${pct(stats.failed)}%"></i></span>
-    </div>
-    <div class="overview-metric idle">
-      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><path d="M12 8v4l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>未测</span>
-      <strong>${stats.untested}</strong>
-      <span class="spark"><i style="width:${pct(stats.untested)}%;background:var(--faint,#94a3b8)"></i></span>
-    </div>
-    <div class="overview-metric testing">
-      <span><svg class="mi" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13 3 4 14h7l-1 7 10-12h-7l0-6z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>测速中</span>
-      <strong>${stats.testing}</strong>
-      <span class="spark"><i style="width:${stats.testing ? 40 : 0}%"></i></span>
+    <div class="node-health-line">
+      <div class="node-health-primary"><strong>${stats.total}</strong><span>节点</span></div>
+      <div><b class="ok">${stats.alive}</b><span>可用</span></div>
+      <div><b class="bad">${stats.failed}</b><span>失败</span></div>
+      <div><b>${stats.untested}</b><span>未测</span></div>
+      ${stats.testing ? `<div><b class="warn">${stats.testing}</b><span>测速中</span></div>` : ""}
+      ${nodeTestProgress ? `<div><b>${nodeTestProgress.completed}/${nodeTestProgress.total}</b><span>进度</span></div>` : ""}
+      <div class="node-health-quality"><b>${alivePct}%</b><span>可用率</span>${stats.avgDelay === null ? "" : `<i>平均 ${stats.avgDelay}ms</i>`}</div>
+      <small>${escapeHtml(targetText)} · ${geoText}</small>
     </div>
   `;
   // target line stays compact under filter via title on overview container
@@ -264,9 +279,20 @@ function renderSummary() {
   setTone("nodeCount", tone);
   setTone("mappingCount", tone);
   setTone("listeningCount", missingPorts.length ? "bad" : tone);
-  $("listeningCount").title = missingPorts.length
-    ? `异常端口：${missingPorts.join(", ")}`
-    : "所有映射端口均在监听";
+  const failedListeners = statusSnapshot.failed_listeners || [];
+  if (failedListeners.length) {
+    const detail = failedListeners
+      .map((item) => {
+        const port = String(item.listen || "").split(":").pop();
+        return `${port}（${item.error || "不可用"}）`;
+      })
+      .join("，");
+    $("listeningCount").title = `端口监听 ${listeningPorts.length}/${expectedPorts.length}，被跳过：${detail}`;
+  } else if (missingPorts.length) {
+    $("listeningCount").title = `异常端口：${missingPorts.join(", ")}`;
+  } else {
+    $("listeningCount").title = "所有映射端口均在监听";
+  }
   renderEngineHealth(expectedPorts, listeningPorts, missingPorts);
 }
 
@@ -337,6 +363,18 @@ function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
   } else if (configMismatch) {
     bits.push(`<span class="eh-issue">配置不一致</span>`);
   }
+  const failedListeners = statusSnapshot.failed_listeners || [];
+  if (failedListeners.length) {
+    const skippedText = failedListeners.map((item) => {
+      const port = String(item.listen || "").split(":").pop();
+      return `${port}`;
+    }).join(", ");
+    bits.push(`<span class="eh-issue" title="${escapeHtml(skippedText)}">跳过 ${failedListeners.length}</span>`);
+  }
+  const lastError = statusSnapshot.last_error || (statusSnapshot.pool_router || {}).last_error;
+  if (lastError) {
+    bits.push(`<span class="eh-issue" title="${escapeHtml(lastError)}">错误</span>`);
+  }
   box.className = `engine-health ${tone}`;
   box.innerHTML = bits.join("");
   box.title = missingPorts.length
@@ -385,72 +423,107 @@ function proxyAuthority(port) {
   return `${formattedHost}:${port}`;
 }
 
+function groupKindLabel(kind) {
+  return ({ subscription: "订阅", import_batch: "导入批次", manual: "手动", quality_snapshot: "质量快照" })[kind] || "分组";
+}
+
+function groupHealthText(group) {
+  const tested = Number(group.healthy_count || 0) + Number(group.failed_count || 0);
+  const availability = tested ? `${Math.round((Number(group.healthy_count || 0) / tested) * 100)}% 可用` : "未测速";
+  const delay = group.average_delay === null || group.average_delay === undefined ? "—" : `${group.average_delay}ms`;
+  return `${availability} · ${delay}`;
+}
+
+function renderNodeGroups() {
+  const target = $("nodeGroupList");
+  if (!target) return;
+  $("nodeGroupTotal").textContent = String(nodes.length);
+  target.innerHTML = nodeGroups.length ? nodeGroups.map((group) => `
+    <details class="node-group-item" ${group.id === activeNodeGroupId ? "open" : ""}>
+      <summary><span><b>${escapeHtml(group.name)}</b><small>${groupKindLabel(group.kind)} · ${group.node_count}</small></span><i>${escapeHtml(groupHealthText(group))}</i></summary>
+      <div class="node-group-item-body"><span>${group.failed_count ? `${group.failed_count} 失败` : "无失败记录"}${group.pool_count ? ` · ${group.pool_count} 个节点池` : ""}</span><div><button data-node-group-open="${escapeHtml(group.id)}">查看</button>${group.kind !== "subscription" ? `<button data-node-group-delete="${escapeHtml(group.id)}">删除</button>` : ""}</div></div>
+    </details>`).join("") : `<div class="node-group-empty">导入或选择节点后可建立工作集。</div>`;
+}
+
+function renderNodePagination() {
+  const target = $("nodePagination");
+  if (!target) return;
+  if (nodeWorkspaceView !== "nodes" || nodePagination.total <= nodePagination.page_size) {
+    target.innerHTML = "";
+    return;
+  }
+  const start = (nodePagination.page - 1) * nodePagination.page_size + 1;
+  const end = Math.min(nodePagination.total, nodePagination.page * nodePagination.page_size);
+  target.innerHTML = `<span>${start}–${end} / ${nodePagination.total}</span><div><button data-node-page="${nodePagination.page - 1}" ${nodePagination.page <= 1 ? "disabled" : ""} aria-label="上一页">上一页</button><strong>${nodePagination.page} / ${nodePagination.total_pages}</strong><button data-node-page="${nodePagination.page + 1}" ${nodePagination.page >= nodePagination.total_pages ? "disabled" : ""} aria-label="下一页">下一页</button></div>`;
+}
+
+function renderGroupManager() {
+  const target = $("nodeTable");
+  target.innerHTML = nodeGroups.length ? `<div class="group-manager-list">${nodeGroups.map((group) => `
+    <details class="group-manager-row" open>
+      <summary><div><strong>${escapeHtml(group.name)}</strong><span>${groupKindLabel(group.kind)} · ${group.node_count} 个节点</span></div><div><b>${group.healthy_count}</b><span>可用</span></div><div><b>${group.failed_count}</b><span>失败</span></div><div><b>${group.average_delay === null ? "—" : `${group.average_delay}ms`}</b><span>平均延迟</span></div></summary>
+      <div class="group-manager-detail"><span>创建于 ${group.created_at ? new Date(group.created_at).toLocaleDateString() : "—"}</span><span>${group.pool_count ? `已被 ${group.pool_count} 个节点池引用` : "尚未加入节点池"}</span><div><button data-node-group-open="${escapeHtml(group.id)}">打开节点</button><button data-node-group-assign="${escapeHtml(group.id)}">分配端口</button>${group.kind !== "subscription" ? `<button data-node-group-delete="${escapeHtml(group.id)}">删除分组</button>` : ""}</div></div>
+    </details>`).join("")}</div>` : `<div class="empty"><strong>还没有分组</strong><span>订阅和每次粘贴导入会自动形成分组；也可以从当前选择建立手动分组。</span></div>`;
+}
+
+function renderSubscriptionSources() {
+  const target = $("nodeTable");
+  target.innerHTML = subscriptionSources.length ? `<div class="source-list">${subscriptionSources.map((source) => {
+    const next = source.next_refresh_in_seconds === null || source.next_refresh_in_seconds === undefined ? "手动刷新" : `${Math.ceil(source.next_refresh_in_seconds / 60)} 分钟后`;
+    const status = source.last_error ? "失败" : source.last_refresh_at ? "正常" : "未刷新";
+    return `<article class="source-row"><div><strong>${escapeHtml(source.name)}</strong><span class="mono" title="${escapeHtml(source.url)}">${escapeHtml(source.url)}</span></div><div><b>${source.last_count || 0}</b><span>最近节点</span></div><div><b>${source.refresh_interval_minutes ? `${source.refresh_interval_minutes}m` : "—"}</b><span>${escapeHtml(next)}</span></div><div><span class="badge ${source.last_error ? "bad" : source.last_refresh_at ? "ok" : "idle"}">${status}</span><button data-source-refresh="${escapeHtml(source.id)}">刷新</button><button data-source-open="${escapeHtml(source.group_id || "")}">查看节点</button><button data-source-delete="${escapeHtml(source.id)}">移除</button></div></article>`;
+  }).join("")}</div>` : `<div class="empty"><strong>还没有订阅来源</strong><span>通过上方导入订阅 URL 后，它会单独保存、刷新并形成一个分组。</span></div>`;
+}
+
 function renderNodeTable() {
+  const table = $("nodeTable");
+  const filters = document.querySelector(".node-filter-bar");
+  const overview = $("nodeTestOverview");
+  if (nodeWorkspaceView === "groups") {
+    filters?.classList.add("hidden");
+    overview?.classList.add("hidden");
+    renderGroupManager();
+    renderNodePagination();
+    return;
+  }
+  if (nodeWorkspaceView === "sources") {
+    filters?.classList.add("hidden");
+    overview?.classList.add("hidden");
+    renderSubscriptionSources();
+    renderNodePagination();
+    return;
+  }
+  filters?.classList.remove("hidden");
+  overview?.classList.remove("hidden");
   renderNodeTestOverview();
-  if (!nodes.length) {
+  const visible = nodePageItems;
+  $("nodeFilterCount").textContent = nodePagination.total ? `${nodePagination.total} 个结果` : "";
+  if (!visible.length) {
     _nodeTableFingerprint = "";
-    $("nodeTable").innerHTML = `<div class="empty"><strong>还没有节点</strong><span>在上方导入订阅 URL，或展开粘贴单节点链接。</span></div>`;
-    $("nodeFilterCount").textContent = "";
+    table.innerHTML = `<div class="empty"><strong>${nodes.length ? "没有匹配节点" : "还没有节点"}</strong><span>${nodes.length ? "调整分组、状态或关键词后再试。" : "导入订阅 URL 或粘贴节点链接后，节点会显示在这里。"}</span></div>`;
+    renderNodePagination();
     return;
   }
-  const query = nodeSearchQuery.trim().toLowerCase();
-  const filtered = nodes.filter((node) => {
-    if (query) {
-      const haystack = [node.name, node.tag, node.type, node.server, String(node.server_port || "")].join(" ").toLowerCase();
-      if (!haystack.includes(query)) return false;
-    }
-    if (nodeStatusFilter === "alive") {
-      return node.latency && node.latency.alive;
-    } else if (nodeStatusFilter === "failed") {
-      return node.latency && !node.latency.alive;
-    } else if (nodeStatusFilter === "untested") {
-      return !node.latency;
-    }
-    return true;
-  });
-  $("nodeFilterCount").textContent = filtered.length !== nodes.length ? `${filtered.length} / ${nodes.length}` : `${nodes.length}`;
-  if (!filtered.length) {
-    _nodeTableFingerprint = "";
-    $("nodeTable").innerHTML = `<div class="empty"><strong>没有匹配节点</strong><span>${query ? `搜索「${escapeHtml(nodeSearchQuery)}」` : "当前过滤条件"}无结果，试试切换筛选。</span></div>`;
-    return;
-  }
-  // Skip expensive DOM rebuild if data hasn't changed
-  const fingerprint = `${nodeStatusFilter}|${nodeSearchQuery}|${filtered.map((n) => `${n.tag}:${n.latency?.alive ?? ""}:${n.latency?.delay ?? ""}:${n.latency?.exit_ip ?? ""}`).join(",")}`;
+  const fingerprint = `${nodeWorkspaceView}|${activeNodeGroupId}|${nodePagination.page}|${visible.map((n) => `${n.tag}:${n.latency?.alive ?? ""}:${n.latency?.delay ?? ""}:${n.latency?.exit_ip ?? ""}`).join(",")}`;
   if (fingerprint === _nodeTableFingerprint) return;
   _nodeTableFingerprint = fingerprint;
-
-  $("nodeTable").innerHTML = `
-    <table>
-      <thead>
-        <tr>
-          <th><input id="checkAllNodes" type="checkbox" aria-label="选择全部节点" checked></th>
-          <th>节点</th>
-          <th>协议</th>
-          <th>服务器</th>
-          <th>状态</th>
-          <th>延迟</th>
-          <th>出口 IP</th>
-          <th>地区</th>
-          <th>目标结果</th>
-        </tr>
-      </thead>
-      <tbody>${filtered.map((node) => `
-        <tr>
-          <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" aria-label="选择节点 ${escapeHtml(node.name)}" checked></td>
-          <td data-label="节点" class="node-identity">
-            <strong title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</strong>
-            <small class="mono" title="${escapeHtml(node.tag)}">${escapeHtml(node.tag)}</small>
-          </td>
+  visible.forEach((node) => selectedNodePageTags.add(node.tag));
+  const allChecked = visible.every((node) => selectedNodePageTags.has(node.tag));
+  table.innerHTML = `
+    <table class="node-data-table">
+      <thead><tr><th><input id="checkAllNodes" type="checkbox" aria-label="选择本页全部节点" ${allChecked ? "checked" : ""}></th><th>节点</th><th>协议</th><th>服务器</th><th>健康</th><th>出口与地区</th><th>测试结果</th></tr></thead>
+      <tbody>${visible.map((node) => `
+        <tr data-node-tag="${escapeHtml(node.tag)}">
+          <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" aria-label="选择节点 ${escapeHtml(node.name)}" ${selectedNodePageTags.has(node.tag) ? "checked" : ""}></td>
+          <td data-label="节点" class="node-identity"><strong title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</strong><small class="mono" title="${escapeHtml(node.tag)}">${escapeHtml(node.tag)}</small></td>
           <td data-label="协议">${protocolChip(node.type)}</td>
           <td data-label="服务器"><span class="mono server-address" title="${escapeHtml(node.server)}:${node.server_port}">${escapeHtml(node.server)}:${node.server_port}</span></td>
-          <td data-label="状态">${nodeStatusBadge(node)}</td>
-          <td data-label="延迟">${latencyBarHtml(node.latency)}</td>
-          <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
-          <td data-label="地区">${geoChipHtml(geoContextForNode(node))}</td>
-          <td data-label="目标结果" class="result-preview node-target-result" title="${escapeHtml(targetResponseText(node.latency))}">${escapeHtml(targetResponsePreview(node.latency))}</td>
-        </tr>`).join("")}
-      </tbody>
+          <td data-label="健康" class="node-health-cell" data-node-cell="health">${nodeHealthCellHtml(node)}</td>
+          <td data-label="出口与地区" class="node-egress-cell" data-node-cell="egress">${nodeEgressCellHtml(node)}</td>
+          <td data-label="目标结果" class="result-preview node-target-result" data-node-cell="target" title="${escapeHtml(targetResponseText(node.latency))}">${nodeTargetResultCellHtml(node)}</td>
+        </tr>`).join("")}</tbody>
     </table>`;
+  renderNodePagination();
 }
 
 function renderAssignTable() {
@@ -466,6 +539,10 @@ function renderAssignTable() {
       if (leftPort !== rightPort) return leftPort - rightPort;
       return left.index - right.index;
     });
+  const isSelected = ({ node, assignedPort }) => Boolean(
+    assignedPort || (autoSelectAliveForAssign && node.latency?.alive)
+  );
+  const allSelected = assignNodes.length > 0 && assignNodes.every(isSelected);
   if (!assignNodes.length) {
     $("assignTable").innerHTML = `<div class="empty"><strong>没有可分配节点</strong><span>先到节点页导入并测速，再回来分配端口。</span></div>`;
     return;
@@ -474,7 +551,7 @@ function renderAssignTable() {
     <table>
       <thead>
         <tr>
-          <th>使用</th>
+          <th><label class="assign-select-all" title="选择当前分配视图中的全部节点"><input id="checkAllAssign" type="checkbox" aria-label="全选当前分配视图" ${allSelected ? "checked" : ""}><span data-assign-select-all-label>${allSelected ? "全不选" : "全选"}</span></label></th>
           <th>端口</th>
           <th>节点</th>
           <th>出口 IP</th>
@@ -483,7 +560,7 @@ function renderAssignTable() {
         </tr>
       </thead>
       <tbody>${assignNodes.map(({ node, assignedPort }) => {
-        const checked = assignedPort || (autoSelectAliveForAssign && node.latency?.alive) ? "checked" : "";
+        const checked = isSelected({ node, assignedPort }) ? "checked" : "";
         return `<tr>
           <td data-label="使用"><input type="checkbox" class="assign-check" data-tag="${escapeHtml(node.tag)}" aria-label="分配节点 ${escapeHtml(node.name)}" ${checked}></td>
           <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
@@ -494,6 +571,21 @@ function renderAssignTable() {
         </tr>`;
       }).join("")}</tbody>
     </table>`;
+  syncAssignSelectionControl();
+  attachPortInputListeners();
+}
+
+function syncAssignSelectionControl() {
+  const control = $("checkAllAssign");
+  if (!control) return;
+  const boxes = [...document.querySelectorAll(".assign-check")];
+  const selected = boxes.filter((box) => box.checked).length;
+  const allSelected = boxes.length > 0 && selected === boxes.length;
+  control.checked = allSelected;
+  control.indeterminate = selected > 0 && !allSelected;
+  control.title = allSelected ? "取消选择当前分配视图中的全部节点" : "选择当前分配视图中的全部节点";
+  const label = control.closest(".assign-select-all")?.querySelector("[data-assign-select-all-label]");
+  if (label) label.textContent = allSelected ? "全不选" : "全选";
 }
 
 function renderPortsTable() {
@@ -1017,13 +1109,42 @@ function formatTrafficRate(value) {
   return `${formatTraffic(value)}/s`;
 }
 
-function trafficPath(values, key, maxValue, width = 620, height = 150) {
-  if (!values.length) return "";
-  return values.map((item, index) => {
-    const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
-    const y = height - ((Number(item[key] || 0) / maxValue) * (height - 14)) - 7;
-    return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+function trafficPoints(values, key, maxValue, width = 620, height = 150) {
+  return values.map((item, index) => ({
+    x: values.length === 1 ? width / 2 : (index / (values.length - 1)) * width,
+    y: height - ((Number(item[key] || 0) / maxValue) * (height - 22)) - 11
+  }));
+}
+
+function smoothTrafficSeries(series, key) {
+  return series.map((item, index) => {
+    let total = 0;
+    let weight = 0;
+    for (let offset = -2; offset <= 2; offset += 1) {
+      const neighbor = series[index + offset];
+      if (!neighbor) continue;
+      const currentWeight = 3 - Math.abs(offset);
+      total += Number(neighbor[key] || 0) * currentWeight;
+      weight += currentWeight;
+    }
+    return { ...item, [key]: weight ? total / weight : Number(item[key] || 0) };
+  });
+}
+
+function smoothTrafficPath(points) {
+  if (!points.length) return "";
+  if (points.length === 1) return `M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
+  let path = `M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[index - 1] || points[index];
+    const current = points[index];
+    const next = points[index + 1];
+    const following = points[index + 2] || next;
+    const firstControl = { x: current.x + (next.x - previous.x) / 6, y: current.y + (next.y - previous.y) / 6 };
+    const secondControl = { x: next.x - (following.x - current.x) / 6, y: next.y - (following.y - current.y) / 6 };
+    path += ` C${firstControl.x.toFixed(1)},${firstControl.y.toFixed(1)} ${secondControl.x.toFixed(1)},${secondControl.y.toFixed(1)} ${next.x.toFixed(1)},${next.y.toFixed(1)}`;
+  }
+  return path;
 }
 
 function renderTrafficChart(series = []) {
@@ -1034,11 +1155,16 @@ function renderTrafficChart(series = []) {
     return;
   }
   const maxValue = Math.max(1, ...series.flatMap((item) => [Number(item.download || 0), Number(item.upload || 0)]));
-  const download = trafficPath(series, "download", maxValue);
-  const upload = trafficPath(series, "upload", maxValue);
+  const downloadPoints = trafficPoints(smoothTrafficSeries(series, "download"), "download", maxValue);
+  const uploadPoints = trafficPoints(smoothTrafficSeries(series, "upload"), "upload", maxValue);
+  const download = smoothTrafficPath(downloadPoints);
+  const upload = smoothTrafficPath(uploadPoints);
+  const downloadArea = `${download} L${downloadPoints.at(-1).x.toFixed(1)},150 L${downloadPoints[0].x.toFixed(1)},150 Z`;
+  const uploadArea = `${upload} L${uploadPoints.at(-1).x.toFixed(1)},150 L${uploadPoints[0].x.toFixed(1)},150 Z`;
   const first = new Date(Number(series[0].bucket_start) * 1000).toLocaleString();
   const last = new Date(Number(series[series.length - 1].bucket_start) * 1000).toLocaleString();
-  chart.innerHTML = `<svg viewBox="0 0 620 150" preserveAspectRatio="none" role="img" aria-labelledby="trafficChartTitle trafficChartDesc"><title id="trafficChartTitle">流量趋势</title><desc id="trafficChartDesc">范围从 ${escapeHtml(first)} 到 ${escapeHtml(last)}。下载总量 ${formatTraffic(series.reduce((sum, item) => sum + Number(item.download || 0), 0))}，上传总量 ${formatTraffic(series.reduce((sum, item) => sum + Number(item.upload || 0), 0))}。</desc><g class="traffic-grid"><path d="M0 30H620M0 75H620M0 120H620"/></g><path class="traffic-line download" d="${download}"/><path class="traffic-line upload" d="${upload}"/></svg>`;
+  const labels = [series[0], series[Math.floor(series.length / 2)], series.at(-1)].map((item) => new Date(Number(item.bucket_start) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  chart.innerHTML = `<svg viewBox="0 0 620 150" preserveAspectRatio="none" role="img" aria-labelledby="trafficChartTitle trafficChartDesc"><title id="trafficChartTitle">流量趋势</title><desc id="trafficChartDesc">范围从 ${escapeHtml(first)} 到 ${escapeHtml(last)}。下载总量 ${formatTraffic(series.reduce((sum, item) => sum + Number(item.download || 0), 0))}，上传总量 ${formatTraffic(series.reduce((sum, item) => sum + Number(item.upload || 0), 0))}。</desc><g class="traffic-grid"><path d="M0 26H620M0 72H620M0 118H620"/></g><path class="traffic-area download" d="${downloadArea}"/><path class="traffic-area upload" d="${uploadArea}"/><path class="traffic-line download" d="${download}"/><path class="traffic-line upload" d="${upload}"/><g class="traffic-axis"><text x="0" y="147">${escapeHtml(labels[0])}</text><text x="310" y="147" text-anchor="middle">${escapeHtml(labels[1])}</text><text x="620" y="147" text-anchor="end">${escapeHtml(labels[2])}</text></g></svg>`;
 }
 
 function renderTrafficEvents(items = []) {
@@ -1057,7 +1183,8 @@ function renderTrafficTable(items = []) {
     return;
   }
   const labels = { port: "端口", pool: "节点池", node: "节点" };
-  target.innerHTML = `<table><thead><tr><th>${labels[trafficEntityType]}</th><th>下载</th><th>上传</th><th>活跃连接</th><th>最后活动</th><th>查看</th></tr></thead><tbody>${filtered.map((item) => `<tr><td data-label="${labels[trafficEntityType]}"><strong>${escapeHtml(item.name || item.entity_id)}</strong><small class="mono">${escapeHtml(item.entity_id)}</small></td><td data-label="下载">${formatTraffic(item.download)}</td><td data-label="上传">${formatTraffic(item.upload)}</td><td data-label="活跃连接">${Number(item.active || 0)}</td><td data-label="最后活动">${item.last_activity ? new Date(Number(item.last_activity) * 1000).toLocaleString() : "—"}</td><td data-label="查看"><button data-traffic-detail="${escapeHtml(item.entity_id)}">详情</button></td></tr>`).join("")}</tbody></table>`;
+  const visible = filtered.slice(0, trafficDisplayLimit);
+  target.innerHTML = `<table><thead><tr><th>${labels[trafficEntityType]}</th><th>下载</th><th>上传</th><th>活跃连接</th><th>最后活动</th><th>查看</th></tr></thead><tbody>${visible.map((item) => `<tr><td data-label="${labels[trafficEntityType]}"><strong>${escapeHtml(item.name || item.entity_id)}</strong><small class="mono">${escapeHtml(item.entity_id)}</small></td><td data-label="下载">${formatTraffic(item.download)}</td><td data-label="上传">${formatTraffic(item.upload)}</td><td data-label="活跃连接">${Number(item.active || 0)}</td><td data-label="最后活动">${item.last_activity ? new Date(Number(item.last_activity) * 1000).toLocaleString() : "—"}</td><td data-label="查看"><button data-traffic-detail="${escapeHtml(item.entity_id)}">详情</button></td></tr>`).join("")}</tbody></table>${filtered.length > trafficDisplayLimit ? `<div class="traffic-table-more"><span>显示前 ${trafficDisplayLimit} 条活跃记录</span><button data-traffic-show-more>展开全部 ${filtered.length} 条</button></div>` : ""}`;
 }
 
 async function openTrafficDetail(entityId) {
@@ -1087,8 +1214,23 @@ function renderPools() {
   }
   list.innerHTML = pools.map((pool) => {
     const active = pool.members.filter((member) => member.enabled && !member.draining).length;
-    return `<article class="pool-card"><header><div><strong>${escapeHtml(pool.name)}</strong><span class="mono">:${pool.listen_port}</span></div><span class="badge ${pool.enabled ? "ok" : "idle"}">${pool.enabled ? "启用" : "停用"}</span></header><p>${pool.policy === "weighted_round_robin" ? "加权轮询" : "普通轮询"} · ${active}/${pool.members.length} 活跃成员</p><div class="pool-member-chips">${pool.members.map((member) => `<span class="${member.draining ? "draining" : member.alive === false ? "unhealthy" : ""}">${escapeHtml(member.node_name || member.node_tag)} ×${member.weight}${member.draining ? " · 排空" : ""}</span>`).join("")}</div><footer><button data-copy="${escapeHtml(pool.http_proxy)}" data-copy-label="节点池 HTTP 地址">复制 HTTP</button><button data-pool-advance="${escapeHtml(pool.id)}">切换下一节点</button><button data-pool-edit="${escapeHtml(pool.id)}">编辑</button><button data-pool-delete="${escapeHtml(pool.id)}">删除</button></footer></article>`;
+    const preview = pool.members.slice(0, 12);
+    const remaining = pool.members.length - preview.length;
+    const policy = pool.policy === "time_window" ? `固定 ${pool.rotation_interval_seconds || 600} 秒` : pool.policy === "weighted_round_robin" ? "加权新连接" : "每条新连接";
+    return `<article class="pool-card"><header><div><strong>${escapeHtml(pool.name)}</strong><span class="mono">:${pool.listen_port}</span></div><span class="badge ${pool.enabled ? "ok" : "idle"}">${pool.enabled ? "启用" : "停用"}</span></header><p>${policy} · ${active}/${pool.members.length} 活跃成员</p><div class="pool-member-chips">${preview.map((member) => `<span class="${member.draining ? "draining" : member.alive === false ? "unhealthy" : ""}">${escapeHtml(member.node_name || member.node_tag)} ×${member.weight}${member.draining ? " · 排空" : ""}</span>`).join("")}${remaining ? `<span class="member-overflow">+ ${remaining} 个成员</span>` : ""}</div><footer><button data-copy="${escapeHtml(pool.http_proxy)}" data-copy-label="节点池 HTTP 地址">复制 HTTP</button><button data-pool-advance="${escapeHtml(pool.id)}">切换下一节点</button><button data-pool-edit="${escapeHtml(pool.id)}">编辑</button><button data-pool-delete="${escapeHtml(pool.id)}">删除</button></footer></article>`;
   }).join("");
+}
+
+function renderPoolPolicyHint() {
+  const policy = $("poolPolicy")?.value || "weighted_round_robin";
+  const isWindow = policy === "time_window";
+  $("poolRotationIntervalField")?.classList.toggle("hidden", !isWindow);
+  const hint = isWindow
+    ? "窗口内的所有新连接复用同一出口；窗口结束或成员拨号失败后才切换。已建立连接始终保持原出口。"
+    : policy === "round_robin"
+      ? "每条新的 TCP 代理连接按成员顺序切换；连接建立后不会中途换 IP。"
+      : "每条新的 TCP 代理连接按权重选择成员；连接建立后不会中途换 IP。";
+  $("poolPolicyHint").textContent = hint;
 }
 
 function openPoolEditor(pool = null) {
@@ -1098,16 +1240,84 @@ function openPoolEditor(pool = null) {
   $("poolName").value = pool?.name || "";
   $("poolPort").value = pool?.listen_port || "8201";
   $("poolPolicy").value = pool?.policy || "weighted_round_robin";
+  $("poolRotationInterval").value = pool?.rotation_interval_seconds || 600;
   $("poolEnabled").checked = pool?.enabled ?? true;
   const selected = new Map((pool?.members || []).map((member) => [member.node_tag, member]));
-  $("poolMembers").innerHTML = nodes.length ? `<h3>成员与权重</h3>${nodes.map((node) => {
+  poolEditorMembers = new Map(nodes.map((node) => {
     const member = selected.get(node.tag);
-    return `<label class="pool-member-row"><input type="checkbox" data-pool-member="${escapeHtml(node.tag)}" ${member ? "checked" : ""}><span>${escapeHtml(node.name)}</span><small>${escapeHtml(node.type)} · ${node.latency?.alive === false ? "不可用" : node.latency?.delay ? `${node.latency.delay}ms` : "未测速"}</small><input type="number" data-pool-weight="${escapeHtml(node.tag)}" value="${member?.weight || 1}" min="1" max="100" aria-label="${escapeHtml(node.name)} 权重"><label class="pool-drain-toggle"><input type="checkbox" data-pool-draining="${escapeHtml(node.tag)}" ${member?.draining ? "checked" : ""}>排空</label></label>`;
-  }).join("")}` : `<div class="empty"><strong>没有可用节点</strong><span>请先导入节点。</span></div>`;
+    return [node.tag, {
+      enabled: Boolean(member) || (!pool && Boolean(node.latency?.alive)),
+      weight: member?.weight || 1,
+      draining: Boolean(member?.draining)
+    }];
+  }));
+  poolMemberSearchQuery = "";
+  renderPoolPolicyHint();
+  renderPoolMembers();
 }
 
 function hidePoolEditor() {
   $("poolEditor").classList.add("hidden");
+  poolEditorMembers = new Map();
+  poolMemberSearchQuery = "";
+}
+
+function poolEditorVisibleNodes() {
+  const query = poolMemberSearchQuery.trim().toLowerCase();
+  if (!query) return nodes;
+  return nodes.filter((node) => {
+    const status = node.latency?.alive ? "可用" : node.latency?.alive === false ? "不可用" : "未测速";
+    return `${node.name} ${node.type} ${node.tag} ${status}`.toLowerCase().includes(query);
+  });
+}
+
+function syncPoolEditorMembers() {
+  document.querySelectorAll("[data-pool-member]").forEach((input) => {
+    const member = poolEditorMembers.get(input.dataset.poolMember);
+    if (member) member.enabled = input.checked;
+  });
+  document.querySelectorAll("[data-pool-weight]").forEach((input) => {
+    const member = poolEditorMembers.get(input.dataset.poolWeight);
+    if (member) member.weight = Math.max(1, Math.min(100, Number(input.value) || 1));
+  });
+  document.querySelectorAll("[data-pool-draining]").forEach((input) => {
+    const member = poolEditorMembers.get(input.dataset.poolDraining);
+    if (member) member.draining = input.checked;
+  });
+}
+
+function renderPoolMembers() {
+  const target = $("poolMembers");
+  if (!target) return;
+  if (!nodes.length) {
+    target.innerHTML = `<div class="empty"><strong>没有可用节点</strong><span>请先导入节点。</span></div>`;
+    return;
+  }
+  const visible = poolEditorVisibleNodes();
+  const selectedCount = [...poolEditorMembers.values()].filter((member) => member.enabled).length;
+  target.innerHTML = `
+    <div class="pool-members-head">
+      <h3>成员与权重</h3>
+      <span aria-live="polite">已选 ${selectedCount} / ${nodes.length}</span>
+      <label class="pool-member-search"><span class="sr-only">筛选节点池成员</span><input data-pool-member-search type="search" value="${escapeHtml(poolMemberSearchQuery)}" placeholder="筛选成员"></label>
+      <div class="pool-member-actions">
+        <button type="button" data-pool-members-action="add-healthy">添加可用</button>
+        <button type="button" data-pool-members-action="select-visible">全选当前</button>
+        <button type="button" data-pool-members-action="clear">清空</button>
+      </div>
+    </div>
+    <div class="pool-member-list">
+      ${visible.map((node) => {
+        const member = poolEditorMembers.get(node.tag);
+        const state = node.latency?.alive
+          ? (node.latency.delay ? `可用 · ${node.latency.delay}ms` : "可用")
+          : node.latency?.alive === false
+            ? "不可用"
+            : "未测速";
+        const disabled = member.enabled ? "" : "disabled";
+        return `<div class="pool-member-row"><label class="pool-member-check"><input type="checkbox" data-pool-member="${escapeHtml(node.tag)}" ${member.enabled ? "checked" : ""}><span>${escapeHtml(node.name)}</span></label><small>${escapeHtml(node.type)} · ${state}</small><input type="number" data-pool-weight="${escapeHtml(node.tag)}" value="${member.weight}" min="1" max="100" aria-label="${escapeHtml(node.name)} 权重" ${disabled}><label class="pool-drain-toggle"><input type="checkbox" data-pool-draining="${escapeHtml(node.tag)}" ${member.draining ? "checked" : ""} ${disabled}>排空</label></div>`;
+      }).join("") || `<div class="empty"><strong>没有匹配的节点</strong><span>更换筛选条件后再试。</span></div>`}
+    </div>`;
 }
 
 async function refreshTraffic() {
@@ -1135,22 +1345,49 @@ async function refreshTraffic() {
   }
 }
 
+function nodeWorkspaceQuery() {
+  const params = new URLSearchParams({
+    page: String(nodePagination.page || 1),
+    page_size: String(nodePagination.page_size || 50),
+    sort: "quality"
+  });
+  if (activeNodeGroupId) params.set("group_id", activeNodeGroupId);
+  if (nodeStatusFilter !== "all") params.set("status", nodeStatusFilter);
+  if (nodeSearchQuery.trim()) params.set("query", nodeSearchQuery.trim());
+  return params.toString();
+}
+
+async function refreshNodeWorkspace() {
+  const data = await request(`/api/nodes?${nodeWorkspaceQuery()}`);
+  nodePageItems = data.nodes || [];
+  nodePagination = { ...nodePagination, ...(data.pagination || {}) };
+  renderNodeGroups();
+  renderNodeTable();
+}
 
 async function refresh() {
   await loadProxyAdminConfig();
-  const [status, nodeData, portData, poolData] = await Promise.all([
+  const [status, nodeData, portData, poolData, groupData, sourceData, nodePageData] = await Promise.all([
     request("/api/status"),
     request("/api/nodes"),
     request("/api/ports"),
-    request("/api/pools")
+    request("/api/pools"),
+    request("/api/groups"),
+    request("/api/subscriptions"),
+    request(`/api/nodes?${nodeWorkspaceQuery()}`)
   ]);
   statusSnapshot = status;
   nodes = nodeData.nodes;
   ports = portData.ports;
   localProxyCheckResults = portData.local_proxy_checks || {};
   pools = poolData.pools || [];
+  nodeGroups = groupData.groups || [];
+  subscriptionSources = sourceData.sources || [];
+  nodePageItems = nodePageData.nodes || [];
+  nodePagination = { ...nodePagination, ...(nodePageData.pagination || {}) };
   renderSummary();
   renderSubscription(status.subscription);
+  renderNodeGroups();
   renderNodeTable();
   renderAssignTable();
   renderLocalProxyCheckPorts();
@@ -1229,6 +1466,7 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
   }
   const targetUrls = selectedNodeTestUrls();
   testingTags = new Set(tags);
+  nodeTestProgress = { completed: 0, total: tags.length };
   renderNodeTable();
   showNotice(targetUrls?.length ? `已开始测速目标：${targetUrls.join("，")}` : `已开始测速默认目标：${DEFAULT_VALIDATION_URLS[0]}`);
   try {
@@ -1237,12 +1475,14 @@ async function runNodeTest(pruneSameIp, overrideTags = null) {
       body: JSON.stringify({ node_tags: tags, prune_same_ip: pruneSameIp, include_geoip: Boolean($("nodeTestGeo")?.checked), target_urls: targetUrls })
     });
     activeNodeTestJobId = started.id;
+    nodeTestRevision = Number(started.revision || 0);
     setCancelButton("cancelNodeTestBtn", true);
     await pollTestJob(started.id);
   } catch (error) {
     activeNodeTestJobId = null;
     setCancelButton("cancelNodeTestBtn", false);
     testingTags.clear();
+    nodeTestProgress = null;
     renderNodeTable();
     showNotice(error.message, "bad");
   }
@@ -1259,18 +1499,21 @@ function selectedNodeTestUrls() {
 
 async function pollTestJob(jobId) {
   while (true) {
-    const job = await request(`/api/test/jobs/${jobId}`);
+    const job = await request(`/api/test/jobs/${jobId}?since=${nodeTestRevision}`);
     Object.entries(job.results || {}).forEach(([tag, result]) => {
-      const node = nodes.find((item) => item.tag === tag);
-      if (node) node.latency = result;
+      updateNodeLatency(tag, result);
       testingTags.delete(tag);
     });
+    nodeTestRevision = Number(job.revision || nodeTestRevision);
+    nodeTestProgress = { completed: job.completed, total: job.total };
     renderNodeTable();
-    renderAssignTable();
-    showNotice(`测速进度：${job.completed}/${job.total}`);
+    if ($("assign")?.classList.contains("active")) renderAssignTable();
+    renderNodeTestOverview();
     if (job.status === "done") {
       testingTags.clear();
+      nodeTestProgress = null;
       activeNodeTestJobId = null;
+      nodeTestRevision = 0;
       setCancelButton("cancelNodeTestBtn", false);
       await refresh();
       const removed = job.removed?.length ? `；已去重：${job.removed.join("；")}` : "";
@@ -1279,7 +1522,9 @@ async function pollTestJob(jobId) {
     }
     if (job.status === "canceled") {
       testingTags.clear();
+      nodeTestProgress = null;
       activeNodeTestJobId = null;
+      nodeTestRevision = 0;
       setCancelButton("cancelNodeTestBtn", false);
       renderNodeTable();
       showNotice(`测速已取消：${job.completed}/${job.total}`, "bad");
@@ -1287,7 +1532,9 @@ async function pollTestJob(jobId) {
     }
     if (job.status === "error") {
       testingTags.clear();
+      nodeTestProgress = null;
       activeNodeTestJobId = null;
+      nodeTestRevision = 0;
       setCancelButton("cancelNodeTestBtn", false);
       renderNodeTable();
       showNotice(job.error || "测速失败", "bad");
@@ -1296,11 +1543,25 @@ async function pollTestJob(jobId) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
-
 function selectedNodeTags() {
-  return Array.from(document.querySelectorAll(".node-check"))
-    .filter((box) => box.checked)
-    .map((box) => box.dataset.tag);
+  return nodePageItems.filter((node) => selectedNodePageTags.has(node.tag)).map((node) => node.tag);
+}
+
+function workspaceNodeTags() {
+  const group = activeNodeGroupId ? nodeGroups.find((item) => item.id === activeNodeGroupId) : null;
+  const candidates = group ? nodes.filter((node) => group.node_tags.includes(node.tag)) : nodes;
+  return candidates
+    .filter((node) => {
+      if (nodeStatusFilter === "alive") return Boolean(node.latency?.alive);
+      if (nodeStatusFilter === "failed") return Boolean(node.latency && !node.latency.alive);
+      if (nodeStatusFilter === "untested") return !node.latency;
+      return true;
+    })
+    .filter((node) => {
+      const query = nodeSearchQuery.trim().toLowerCase();
+      return !query || `${node.name} ${node.tag} ${node.type} ${node.server}`.toLowerCase().includes(query);
+    })
+    .map((node) => node.tag);
 }
 
 function collectMappings() {
@@ -1348,7 +1609,12 @@ async function assertCompactPortsAvailable(mappings) {
   const blocked = checkedPorts.filter((item) => {
     const port = String(item.port);
     if (item.available) return false;
-    return !(currentPorts.has(port) && item.reason === "project-listening");
+    // Keeping an already-owned mapping (or reshuffling onto a port this
+    // project already listens on) is fine; only foreign occupations block.
+    if (currentPorts.has(port) && (item.reason === "project-listening" || item.reason === "project-mapped")) {
+      return false;
+    }
+    return true;
   });
   if (blocked.length) {
     const detail = blocked
@@ -1524,6 +1790,7 @@ function activateTab(tabId, persist = true) {
   document.querySelectorAll(".panel").forEach((item) => item.classList.remove("active"));
   button.classList.add("active");
   panel.classList.add("active");
+  if (tabId === "assign" && activeNodeTestJobId) renderAssignTable();
   if (persist) localStorage.setItem(ACTIVE_TAB_KEY, tabId);
   return true;
 }
@@ -1562,6 +1829,10 @@ $("trafficSearch").addEventListener("input", () => {
 $("trafficTable").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-traffic-detail]");
   if (button) openTrafficDetail(button.dataset.trafficDetail);
+  if (event.target.closest("[data-traffic-show-more]")) {
+    trafficDisplayLimit = 500;
+    refreshTraffic();
+  }
 });
 
 $("trafficDetail").addEventListener("click", (event) => {
@@ -1586,19 +1857,56 @@ $("cancelPoolEditBtn").addEventListener("click", hidePoolEditor);
 $("poolEditor").addEventListener("submit", (event) => {
   event.preventDefault();
   runTask("保存节点池", async () => {
-    const members = [...document.querySelectorAll("[data-pool-member]:checked")].map((input) => {
-      const tag = input.dataset.poolMember;
-      const weight = Number(document.querySelector(`[data-pool-weight="${CSS.escape(tag)}"]`)?.value || 1);
-      const draining = Boolean(document.querySelector(`[data-pool-draining="${CSS.escape(tag)}"]`)?.checked);
-      return { node_tag: tag, weight, enabled: true, draining };
-    });
-    const payload = { name: $("poolName").value.trim(), listen_port: Number($("poolPort").value), policy: $("poolPolicy").value, enabled: $("poolEnabled").checked, members };
+    syncPoolEditorMembers();
+    const members = nodes
+      .filter((node) => poolEditorMembers.get(node.tag)?.enabled)
+      .map((node) => {
+        const member = poolEditorMembers.get(node.tag);
+        return { node_tag: node.tag, weight: member.weight, enabled: true, draining: member.draining };
+      });
+    const payload = { name: $("poolName").value.trim(), listen_port: Number($("poolPort").value), policy: $("poolPolicy").value, rotation_interval_seconds: Number($("poolRotationInterval").value || 600), enabled: $("poolEnabled").checked, members };
     const id = $("poolId").value;
     await request(id ? `/api/pools/${encodeURIComponent(id)}` : "/api/pools", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
     hidePoolEditor();
     await refresh();
     return "节点池已保存";
   });
+});
+
+$("poolPolicy").addEventListener("change", renderPoolPolicyHint);
+
+$("poolMembers").addEventListener("click", (event) => {
+  const action = event.target.closest("button[data-pool-members-action]")?.dataset.poolMembersAction;
+  if (!action) return;
+  syncPoolEditorMembers();
+  if (action === "add-healthy") {
+    nodes.filter((node) => node.latency?.alive).forEach((node) => {
+      poolEditorMembers.get(node.tag).enabled = true;
+    });
+  } else if (action === "select-visible") {
+    poolEditorVisibleNodes().forEach((node) => {
+      poolEditorMembers.get(node.tag).enabled = true;
+    });
+  } else if (action === "clear") {
+    poolEditorMembers.forEach((member) => { member.enabled = false; });
+  }
+  renderPoolMembers();
+});
+
+$("poolMembers").addEventListener("input", (event) => {
+  const target = event.target;
+  if (target.matches("[data-pool-member-search]")) {
+    poolMemberSearchQuery = target.value;
+    renderPoolMembers();
+    return;
+  }
+  const tag = target.dataset.poolMember || target.dataset.poolWeight || target.dataset.poolDraining;
+  if (!tag || !poolEditorMembers.has(tag)) return;
+  const member = poolEditorMembers.get(tag);
+  if (target.dataset.poolMember) member.enabled = target.checked;
+  if (target.dataset.poolWeight) member.weight = Math.max(1, Math.min(100, Number(target.value) || 1));
+  if (target.dataset.poolDraining) member.draining = target.checked;
+  renderPoolMembers();
 });
 
 $("poolList").addEventListener("click", (event) => {
@@ -1667,6 +1975,15 @@ $("importTextBtn").addEventListener("click", () => runTask("解析文本", async
 
 $("testSelectedBtn").addEventListener("click", () => runNodeTest(false));
 
+$("testWorkspaceBtn").addEventListener("click", () => {
+  const tags = workspaceNodeTags();
+  if (!tags.length) {
+    showNotice("当前分组没有可测速节点", "ok");
+    return;
+  }
+  runNodeTest(false, tags);
+});
+
 $("testUntestedBtn").addEventListener("click", () => {
   const tags = nodes.filter((node) => !node.latency).map((node) => node.tag);
   if (!tags.length) {
@@ -1705,7 +2022,8 @@ $("nodeSearchInput").addEventListener("input", (event) => {
   clearTimeout(_nodeSearchTimer);
   _nodeSearchTimer = setTimeout(() => {
     nodeSearchQuery = event.target.value;
-    renderNodeTable();
+    nodePagination.page = 1;
+    refreshNodeWorkspace().catch((error) => showNotice(error.message, "bad"));
   }, 200);
 });
 
@@ -1714,8 +2032,132 @@ document.querySelectorAll(".node-filter-tab").forEach((tab) => {
     document.querySelectorAll(".node-filter-tab").forEach((t) => t.classList.remove("active"));
     tab.classList.add("active");
     nodeStatusFilter = tab.dataset.filter;
+    nodePagination.page = 1;
+    refreshNodeWorkspace().catch((error) => showNotice(error.message, "bad"));
+  });
+});
+
+$("nodePageSize").addEventListener("change", () => {
+  nodePagination.page_size = Number($("nodePageSize").value || 50);
+  nodePagination.page = 1;
+  refreshNodeWorkspace().catch((error) => showNotice(error.message, "bad"));
+});
+
+document.querySelectorAll(".node-view-tab").forEach((button) => {
+  button.addEventListener("click", () => {
+    nodeWorkspaceView = button.dataset.nodeView;
+    document.querySelectorAll(".node-view-tab").forEach((item) => {
+      const active = item === button;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-selected", String(active));
+    });
     renderNodeTable();
   });
+});
+
+$("nodeCollections").addEventListener("click", (event) => {
+  const groupButton = event.target.closest("[data-node-group]");
+  if (groupButton) {
+    activeNodeGroupId = groupButton.dataset.nodeGroup || "";
+    nodePagination.page = 1;
+    document.querySelectorAll(".node-collection-item").forEach((item) => item.classList.toggle("active", item === groupButton));
+    nodeWorkspaceView = "nodes";
+    document.querySelector('[data-node-view="nodes"]')?.click();
+    refreshNodeWorkspace().catch((error) => showNotice(error.message, "bad"));
+  }
+});
+
+function openNodeGroup(groupId) {
+  if (!groupId) return;
+  activeNodeGroupId = groupId;
+  nodePagination.page = 1;
+  nodeWorkspaceView = "nodes";
+  document.querySelectorAll(".node-view-tab").forEach((item) => {
+    const active = item.dataset.nodeView === "nodes";
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".node-collection-item").forEach((item) => item.classList.toggle("active", item.dataset.nodeGroup === groupId));
+  refreshNodeWorkspace().catch((error) => showNotice(error.message, "bad"));
+}
+
+function assignNodeGroup(groupId) {
+  const group = nodeGroups.find((item) => item.id === groupId);
+  if (!group) return;
+  assignFilterTags = new Set(group.node_tags || []);
+  autoSelectAliveForAssign = true;
+  renderAssignTable();
+  activateTab("assign");
+  showNotice(`已载入分组「${group.name}」的 ${group.node_count} 个节点`, "ok");
+}
+
+function showNodeGroupForm() {
+  $("nodeGroupForm").classList.remove("hidden");
+  $("nodeGroupName").focus();
+}
+
+$("createNodeGroupBtn").addEventListener("click", showNodeGroupForm);
+$("cancelNodeGroupBtn").addEventListener("click", () => $("nodeGroupForm").classList.add("hidden"));
+$("nodeGroupForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runTask("保存分组", async () => {
+    const tags = selectedNodeTags();
+    if (!tags.length) throw new Error("请先在当前页选择要加入分组的节点");
+    await request("/api/groups", {
+      method: "POST",
+      body: JSON.stringify({ name: $("nodeGroupName").value.trim(), kind: $("nodeGroupKind").value, node_tags: tags })
+    });
+    $("nodeGroupForm").reset();
+    $("nodeGroupForm").classList.add("hidden");
+    await refresh();
+    return `已创建分组，包含 ${tags.length} 个节点`;
+  });
+});
+
+async function refreshSource(sourceId) {
+  await request(`/api/subscriptions/${encodeURIComponent(sourceId)}/refresh`, { method: "POST", body: "{}" });
+  await refresh();
+}
+
+$("nodeGroupList").addEventListener("click", (event) => {
+  const open = event.target.closest("[data-node-group-open]");
+  if (open) return openNodeGroup(open.dataset.nodeGroupOpen);
+  const remove = event.target.closest("[data-node-group-delete]");
+  if (remove) confirmTask("删除分组", "删除分组不会删除其中的节点。", async () => {
+    await request(`/api/groups/${encodeURIComponent(remove.dataset.nodeGroupDelete)}`, { method: "DELETE", body: "{}" });
+    if (activeNodeGroupId === remove.dataset.nodeGroupDelete) activeNodeGroupId = "";
+    await refresh();
+  });
+});
+
+$("nodeTable").addEventListener("click", (event) => {
+  const open = event.target.closest("[data-node-group-open]");
+  if (open) return openNodeGroup(open.dataset.nodeGroupOpen);
+  const assignGroup = event.target.closest("[data-node-group-assign]");
+  if (assignGroup) return assignNodeGroup(assignGroup.dataset.nodeGroupAssign);
+  const removeGroup = event.target.closest("[data-node-group-delete]");
+  if (removeGroup) return confirmTask("删除分组", "删除分组不会删除其中的节点。", async () => {
+    await request(`/api/groups/${encodeURIComponent(removeGroup.dataset.nodeGroupDelete)}`, { method: "DELETE", body: "{}" });
+    await refresh();
+  });
+  const refreshButton = event.target.closest("[data-source-refresh]");
+  if (refreshButton) return runTask("刷新订阅", async () => {
+    await refreshSource(refreshButton.dataset.sourceRefresh);
+    return "订阅已刷新";
+  });
+  const openSource = event.target.closest("[data-source-open]");
+  if (openSource) return openNodeGroup(openSource.dataset.sourceOpen);
+  const deleteSource = event.target.closest("[data-source-delete]");
+  if (deleteSource) return confirmTask("移除订阅来源", "移除来源不会删除已经导入的节点。", async () => {
+    await request(`/api/subscriptions/${encodeURIComponent(deleteSource.dataset.sourceDelete)}`, { method: "DELETE", body: "{}" });
+    await refresh();
+  });
+  const pageButton = event.target.closest("[data-node-page]");
+  if (pageButton && !pageButton.disabled) {
+    nodePagination.page = Number(pageButton.dataset.nodePage);
+    selectedNodePageTags.clear();
+    return refreshNodeWorkspace().catch((error) => showNotice(error.message, "bad"));
+  }
 });
 
 // Event delegation for node table — avoids re-attaching listeners on every render
@@ -1724,7 +2166,25 @@ $("nodeTable").addEventListener("change", (event) => {
   if (target.id === "checkAllNodes") {
     document.querySelectorAll(".node-check").forEach((box) => {
       box.checked = target.checked;
+      if (target.checked) selectedNodePageTags.add(box.dataset.tag);
+      else selectedNodePageTags.delete(box.dataset.tag);
     });
+  }
+  if (target.classList.contains("node-check")) {
+    if (target.checked) selectedNodePageTags.add(target.dataset.tag);
+    else selectedNodePageTags.delete(target.dataset.tag);
+  }
+});
+
+$("assignTable").addEventListener("change", (event) => {
+  const target = event.target;
+  if (target.id === "checkAllAssign") {
+    document.querySelectorAll(".assign-check").forEach((box) => {
+      box.checked = target.checked;
+    });
+  }
+  if (target.id === "checkAllAssign" || target.classList.contains("assign-check")) {
+    syncAssignSelectionControl();
   }
 });
 
@@ -1757,8 +2217,14 @@ $("clearNodesBtn").addEventListener("click", () => confirmTask("清空节点", `
 }));
 
 $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用端口", async () => {
-  let nextPort = Number($("startPort").value || 9001);
+  let nextPort = Number($("startPort").value || 8001);
   const usedPorts = new Set();
+  // Exclude every already-owned public port, not just values visible in the
+  // current DOM page (pagination / unsaved drafts otherwise collide).
+  Object.keys(ports).forEach((port) => usedPorts.add(Number(port)));
+  pools.forEach((pool) => {
+    if (pool?.listen_port) usedPorts.add(Number(pool.listen_port));
+  });
   document.querySelectorAll(".port-input").forEach((input) => {
     if (input.value) usedPorts.add(Number(input.value));
   });
@@ -1797,8 +2263,17 @@ $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用�
     input.value = allocation.ports[index];
     usedPorts.add(allocation.ports[index]);
   });
-  const skippedCount = Object.keys(allocation.skipped || {}).length;
-  return `已分配 ${targets.length} 个可用端口${skippedCount ? `，已避让 ${skippedCount} 个不可用端口` : ""}`;
+  const skipped = allocation.skipped || {};
+  const skippedEntries = Object.entries(skipped);
+  if (skippedEntries.length) {
+    const detail = skippedEntries
+      .slice(0, 5)
+      .map(([port, info]) => `${port}（${info.label || info.reason || "不可用"}）`)
+      .join("、");
+    const more = skippedEntries.length > 5 ? `等 ${skippedEntries.length} 个` : "";
+    return `已分配 ${targets.length} 个可用端口，已跳过 ${detail}${more}`;
+  }
+  return `已分配 ${targets.length} 个可用端口`;
 }));
 
 $("compactPortsBtn").addEventListener("click", () => runTask("重排端口", async () => {
@@ -1845,8 +2320,124 @@ $("clearAssignBtn").addEventListener("click", () => confirmTask("清空端口分
   return "端口分配已清空";
 }));
 
+function attachPortInputListeners() {
+  document.querySelectorAll(".port-input").forEach((input) => {
+    input.addEventListener("blur", () => checkPortInputAvailability(input));
+    input.addEventListener("input", () => {
+      input.classList.remove("port-busy");
+      const hint = input.parentElement.querySelector(".port-hint");
+      if (hint) hint.remove();
+    });
+  });
+}
+
+async function checkPortInputAvailability(input) {
+  const port = parseInt(input.value, 10);
+  if (!port || port < 1024 || port > 65535) {
+    input.classList.remove("port-busy");
+    const hint = input.parentElement.querySelector(".port-hint");
+    if (hint) hint.remove();
+    return;
+  }
+  if (portAvailabilityCache[port] !== undefined) {
+    applyPortAvailability(input, port, portAvailabilityCache[port]);
+    return;
+  }
+  input.classList.remove("port-busy");
+  const hint = input.parentElement.querySelector(".port-hint");
+  if (hint) hint.remove();
+  if (_portCheckTimer) clearTimeout(_portCheckTimer);
+  _portCheckTimer = setTimeout(async () => {
+    try {
+      const result = await request("/api/ports/check", {
+        method: "POST",
+        body: JSON.stringify({ ports: [port] }),
+      });
+      const info = result.ports?.[String(port)];
+      if (info) {
+        portAvailabilityCache[port] = info;
+        applyPortAvailability(input, port, info);
+      }
+    } catch (e) { /* ignore */ }
+  }, 200);
+}
+
+function applyPortAvailability(input, port, info) {
+  const hint = input.parentElement.querySelector(".port-hint");
+  if (info.available) {
+    input.classList.remove("port-busy");
+    if (hint) hint.remove();
+    return;
+  }
+  input.classList.add("port-busy");
+  const label = info.label || info.reason || "不可用";
+  if (hint) {
+    hint.textContent = label;
+  } else {
+    const el = document.createElement("span");
+    el.className = "port-hint";
+    el.textContent = label;
+    input.parentElement.appendChild(el);
+  }
+}
+
+async function preCheckAllPorts() {
+  const mappings = collectMappings();
+  const portList = Object.keys(mappings).map(Number);
+  if (!portList.length) return { ok: true, mappings };
+  const currentPorts = new Set(Object.keys(ports).map(String));
+  try {
+    const result = await request("/api/ports/check", {
+      method: "POST",
+      body: JSON.stringify({ ports: portList }),
+    });
+    const busyPorts = [];
+    for (const [portText, info] of Object.entries(result.ports || {})) {
+      if (info.available) continue;
+      // Re-saving an existing mapping must not be treated as a conflict.
+      if (
+        currentPorts.has(String(portText))
+        && (info.reason === "project-listening" || info.reason === "project-mapped")
+      ) {
+        continue;
+      }
+      busyPorts.push({ port: Number(portText), ...info });
+      portAvailabilityCache[Number(portText)] = info;
+    }
+    if (busyPorts.length) {
+      const detail = busyPorts
+        .slice(0, 10)
+        .map((item) => `${item.port}（${item.label || item.reason}）`)
+        .join("，");
+      return { ok: false, error: `以下端口不可用：${detail}。请更换后再保存。`, busyPorts };
+    }
+  } catch (e) {
+    /* 如果检查失败，继续保存 */
+  }
+  return { ok: true, mappings };
+}
+
 $("saveAssignBtn").addEventListener("click", () => runTask("保存端口映射", async () => {
-  const result = await saveMappings(collectMappings());
+  const check = await preCheckAllPorts();
+  if (!check.ok) {
+    document.querySelectorAll(".port-input").forEach((input) => {
+      const port = parseInt(input.value, 10);
+      if (port && check.busyPorts.some((item) => item.port === port)) {
+        input.classList.add("port-busy");
+        const info = check.busyPorts.find((item) => item.port === port);
+        const label = info?.label || info?.reason || "不可用";
+        let hint = input.parentElement.querySelector(".port-hint");
+        if (!hint) {
+          hint = document.createElement("span");
+          hint.className = "port-hint";
+          input.parentElement.appendChild(hint);
+        }
+        hint.textContent = label;
+      }
+    });
+    throw new Error(check.error);
+  }
+  const result = await saveMappings(check.mappings);
   await refresh();
   if (result.engine_restarted) return "保存端口映射完成，已自动重启引擎";
   if (result.engine_stopped) return "保存端口映射完成，已停止引擎";
@@ -1866,6 +2457,11 @@ $("repairEngineBtn").addEventListener("click", () => runTask("重启修复引擎
   await request("/api/start", { method: "POST", body: "{}" });
   await refresh();
   const missingPorts = statusSnapshot.missing_ports || [];
+  const failedListeners = statusSnapshot.failed_listeners || [];
+  if (failedListeners.length) {
+    const skipped = failedListeners.map((item) => String(item.listen || "").split(":").pop()).join(", ");
+    return `引擎已重启，端口被跳过：${skipped}（已被其他程序占用）`;
+  }
   if (missingPorts.length) return `引擎已重启，仍缺失端口：${missingPorts.join(", ")}`;
   return "引擎已重启，端口监听正常";
 }));

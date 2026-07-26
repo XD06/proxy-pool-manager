@@ -130,7 +130,7 @@ def current_performance_settings() -> PerformanceSettings:
             config,
             "node_test_batch_size",
             "PPM_NODE_TEST_BATCH_SIZE",
-            50 if low else 1000,
+            50 if low else 100,
             minimum=1,
             maximum=1000,
         ),
