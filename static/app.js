@@ -35,6 +35,8 @@ let activeNodeGroupId = "";
 let nodeWorkspaceView = "nodes";
 let selectedNodePageTags = new Set();
 let trafficDisplayLimit = 10;
+let trafficEntities = [];
+let _trafficReqSeq = 0;
 const ACTIVE_TAB_KEY = "proxyPoolManager.activeTab";
 let authState = { enabled: false, authenticated: true };
 let portAvailabilityCache = {};
@@ -507,7 +509,10 @@ function renderNodeTable() {
   const fingerprint = `${nodeWorkspaceView}|${activeNodeGroupId}|${nodePagination.page}|${visible.map((n) => `${n.tag}:${n.latency?.alive ?? ""}:${n.latency?.delay ?? ""}:${n.latency?.exit_ip ?? ""}`).join(",")}`;
   if (fingerprint === _nodeTableFingerprint) return;
   _nodeTableFingerprint = fingerprint;
-  visible.forEach((node) => selectedNodePageTags.add(node.tag));
+  // Do not auto-select visible nodes on render: live speed-test polling re-renders
+  // this table ~1x/sec, and re-adding every tag would revive rows the user just
+  // unchecked — then "delete selected" would remove them. Selection is owned by
+  // the checkbox change handlers and cleared on page change.
   const allChecked = visible.every((node) => selectedNodePageTags.has(node.tag));
   table.innerHTML = `
     <table class="node-data-table">
@@ -517,7 +522,7 @@ function renderNodeTable() {
           <td data-label="选择"><input type="checkbox" class="node-check" data-tag="${escapeHtml(node.tag)}" aria-label="选择节点 ${escapeHtml(node.name)}" ${selectedNodePageTags.has(node.tag) ? "checked" : ""}></td>
           <td data-label="节点" class="node-identity"><strong title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</strong><small class="mono" title="${escapeHtml(node.tag)}">${escapeHtml(node.tag)}</small></td>
           <td data-label="协议">${protocolChip(node.type)}</td>
-          <td data-label="服务器"><span class="mono server-address" title="${escapeHtml(node.server)}:${node.server_port}">${escapeHtml(node.server)}:${node.server_port}</span></td>
+          <td data-label="服务器"><span class="mono server-address" title="${escapeHtml(node.server)}:${Number(node.server_port)}">${escapeHtml(node.server)}:${Number(node.server_port)}</span></td>
           <td data-label="健康" class="node-health-cell" data-node-cell="health">${nodeHealthCellHtml(node)}</td>
           <td data-label="出口与地区" class="node-egress-cell" data-node-cell="egress">${nodeEgressCellHtml(node)}</td>
           <td data-label="目标结果" class="result-preview node-target-result" data-node-cell="target" title="${escapeHtml(targetResponseText(node.latency))}">${nodeTargetResultCellHtml(node)}</td>
@@ -1321,12 +1326,14 @@ function renderPoolMembers() {
 }
 
 async function refreshTraffic() {
+  const seq = ++_trafficReqSeq;
   try {
     const [overview, entityData, eventData] = await Promise.all([
       request(`/api/traffic/overview?range=${trafficRange}`),
       request(`/api/traffic/entities?type=${trafficEntityType}&range=${trafficRange}`),
       request("/api/traffic/events?limit=5")
     ]);
+    if (seq !== _trafficReqSeq) return;
     $("trafficDownload").textContent = formatTraffic(overview.download);
     $("trafficUpload").textContent = formatTraffic(overview.upload);
     $("trafficDownloadRate").textContent = `当前 ${formatTrafficRate(overview.download_rate)}`;
@@ -1338,9 +1345,11 @@ async function refreshTraffic() {
     $("trafficAttention").textContent = attention ? `${attention} 项` : "正常";
     $("trafficChartSummary").textContent = `${overview.series.length} 个时间桶 · ${trafficRange}`;
     renderTrafficChart(overview.series || []);
+    trafficEntities = entityData.items || [];
     renderTrafficEvents(eventData.items || []);
-    renderTrafficTable(entityData.items || []);
+    renderTrafficTable(trafficEntities);
   } catch (error) {
+    if (seq !== _trafficReqSeq) return;
     $("trafficChart").innerHTML = `<div class="empty"><strong>监控暂不可用</strong><span>${escapeHtml(error.message)}</span></div>`;
   }
 }
@@ -1762,6 +1771,15 @@ function exportRows() {
   }));
 }
 
+function csvCell(value) {
+  let text = String(value ?? "");
+  // Prevent CSV formula injection: a leading = + - @ (or tab/CR) makes Excel
+  // and other spreadsheets evaluate the cell as a formula. Prefix a single
+  // quote to neutralise it, then escape embedded double quotes.
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return text.replace(/"/g, '""');
+}
+
 function generateExport() {
   const rows = exportRows();
   const format = $("exportFormat").value;
@@ -1774,7 +1792,7 @@ function generateExport() {
   }
   if (format === "csv") {
     const header = ["host", "port", "node", "type", "exit_ip", "geoip", "http_proxy", "socks5_proxy", "socks5h_proxy"];
-    const lines = rows.map((row) => header.map((key) => `"${String(row[key]).replace(/"/g, '""')}"`).join(","));
+    const lines = rows.map((row) => header.map((key) => `"${csvCell(row[key])}"`).join(","));
     return [header.join(","), ...lines].join("\n");
   }
   return rows.map((row) => row.http_proxy).join("\n");
@@ -1823,7 +1841,10 @@ document.querySelectorAll(".traffic-entity").forEach((button) => {
 
 $("trafficSearch").addEventListener("input", () => {
   trafficSearchQuery = $("trafficSearch").value;
-  refreshTraffic();
+  // Filtering happens client-side in renderTrafficTable, so re-render the
+  // cached rows instead of firing a request on every keystroke (that also
+  // let slow, out-of-order responses overwrite freshly typed results).
+  renderTrafficTable(trafficEntities);
 });
 
 $("trafficTable").addEventListener("click", (event) => {
@@ -1831,7 +1852,7 @@ $("trafficTable").addEventListener("click", (event) => {
   if (button) openTrafficDetail(button.dataset.trafficDetail);
   if (event.target.closest("[data-traffic-show-more]")) {
     trafficDisplayLimit = 500;
-    refreshTraffic();
+    renderTrafficTable(trafficEntities);
   }
 });
 

@@ -281,15 +281,28 @@ class EngineManager:
         extract_dir.mkdir(parents=True, exist_ok=True)
         if archive_path.name.endswith(".zip"):
             with zipfile.ZipFile(archive_path) as archive:
-                archive.extractall(extract_dir)
+                self._safe_extract(extract_dir, archive.namelist(), archive.extractall)
         elif archive_path.name.endswith(".tar.gz"):
             with tarfile.open(archive_path) as archive:
-                archive.extractall(extract_dir)
+                self._safe_extract(extract_dir, archive.getnames(), archive.extractall)
         else:
             raise EngineError(f"Unsupported archive: {archive_path.name}")
         for path in extract_dir.rglob(expected):
             return path
         raise EngineError("Downloaded archive did not contain sing-box binary")
+
+    @staticmethod
+    def _safe_extract(extract_dir: Path, names: list[str], extractall) -> None:
+        # Guard against path traversal ("zip slip"): a malicious/compromised
+        # archive could carry members like ../../evil that extractall would
+        # happily write outside extract_dir. Verify every member resolves inside
+        # the destination before extracting anything.
+        base = extract_dir.resolve()
+        for name in names:
+            target = (extract_dir / name).resolve()
+            if target != base and base not in target.parents:
+                raise EngineError(f"Unsafe path in archive: {name}")
+        extractall(extract_dir)
 
     async def _check_config_with_binary(self, binary: Path, config_path: Path) -> None:
         proc = await asyncio.create_subprocess_exec(
@@ -503,12 +516,12 @@ class EngineManager:
 
     async def _stop_unlocked(self, config_path: Path | None = None) -> None:
         if not self.process:
-            self._kill_managed_orphans(config_path=config_path)
+            await asyncio.to_thread(self._kill_managed_orphans, config_path=config_path)
             return
         proc = self.process
         self.process = None
         if proc.poll() is not None:
-            self._kill_managed_orphans(config_path=config_path)
+            await asyncio.to_thread(self._kill_managed_orphans, config_path=config_path)
             return
         proc.terminate()
         try:
@@ -516,7 +529,7 @@ class EngineManager:
         except subprocess.TimeoutExpired:
             proc.kill()
             await asyncio.to_thread(proc.wait, 1)
-        self._kill_managed_orphans(config_path=config_path)
+        await asyncio.to_thread(self._kill_managed_orphans, config_path=config_path)
 
     async def _wait_for_config_ports_available(self, config_path: Path, timeout_seconds: float = 6.0) -> None:
         ports = _config_listen_ports(config_path)

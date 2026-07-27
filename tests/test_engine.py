@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import platform
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -226,3 +227,28 @@ def test_update_and_rollback_managed_binary(monkeypatch, tmp_path):
     assert rolled_back["current_version"] == "1.13.13"
     assert target.read_text(encoding="utf-8") == "old"
     assert manager.backup_path().read_text(encoding="utf-8") == "new"
+
+
+def test_extract_binary_rejects_path_traversal(tmp_path):
+    archive_path = tmp_path / "sing-box.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("../escape.exe", "payload")
+    manager = EngineManager()
+
+    with pytest.raises(EngineError, match="Unsafe path"):
+        manager._extract_binary(archive_path, "windows")
+
+    # Nothing must be written outside the extraction directory.
+    assert not (tmp_path / "escape.exe").exists()
+
+
+def test_extract_binary_returns_expected_member(tmp_path):
+    archive_path = tmp_path / "sing-box.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("sing-box-1.13/sing-box.exe", "binary")
+    manager = EngineManager()
+
+    result = manager._extract_binary(archive_path, "windows")
+
+    assert result.name == "sing-box.exe"
+    assert result.read_text(encoding="utf-8") == "binary"

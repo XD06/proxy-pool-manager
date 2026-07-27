@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel
@@ -45,7 +46,10 @@ class JobManager(Generic[T]):
 
     def cleanup(self, active_id: str | None, retention_seconds: float, max_jobs: int) -> None:
         """Remove old inactive jobs beyond retention time and cap total job count."""
-        now = asyncio.get_event_loop().time()
+        # touched_at is stamped with time.monotonic() (see schemas.py and the
+        # job runners in api.py); compare against the same clock, not the event
+        # loop clock, so the retention delta is meaningful.
+        now = time.monotonic()
         removable = [
             (job_id, job)
             for job_id, job in self.jobs.items()

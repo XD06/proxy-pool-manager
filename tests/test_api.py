@@ -763,7 +763,12 @@ def test_api_port_ip_returns_geoip(tmp_path, monkeypatch):
     assert "AS15169" in payload["geoip_summary"]
 
 
-def test_api_fastest_proxy_returns_best_alive_mapping(tmp_path):
+def test_api_fastest_proxy_returns_best_alive_mapping(tmp_path, monkeypatch):
+    # proxy_authority falls back to the request host only when the proxy binds a
+    # wildcard address; pin that intent here so the assertion does not depend on
+    # whatever proxy_listen_host the repo's config/app.json happens to hold.
+    monkeypatch.setattr(api_module, "current_proxy_listen_host", lambda: "0.0.0.0")
+    monkeypatch.setattr(api_module, "current_proxy_public_host", lambda: "")
     store = StateStore(tmp_path / "assignments.json")
     app = create_app(store=store, engine=StoppedEngine())
     client = TestClient(app, base_url="http://proxy.example.com:9000")

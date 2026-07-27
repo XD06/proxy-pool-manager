@@ -219,7 +219,7 @@ class PoolRouterManager:
         self.process = None
         self.started_at = None
         if not process or process.poll() is not None:
-            self._stop_managed_orphans()
+            await asyncio.to_thread(self._stop_managed_orphans)
             return
         process.terminate()
         try:
@@ -227,7 +227,7 @@ class PoolRouterManager:
         except subprocess.TimeoutExpired:
             process.kill()
             await asyncio.to_thread(process.wait, 3)
-        self._stop_managed_orphans(keep_pid=process.pid)
+        await asyncio.to_thread(self._stop_managed_orphans, keep_pid=process.pid)
 
     async def status(self) -> dict[str, Any]:
         try:

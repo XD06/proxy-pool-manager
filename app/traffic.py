@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,22 @@ class TrafficStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # One SQLite connection per thread. The API calls these methods through
+        # asyncio.to_thread, which reuses a small pool of worker threads, so
+        # thread-local storage lets us keep a connection alive per worker
+        # instead of opening a new one on every sample/query. sqlite3 forbids
+        # sharing a single connection across threads, so a shared singleton is
+        # not an option here.
+        self._local = threading.local()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5)
-        connection.row_factory = sqlite3.Row
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self.path, timeout=5)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            self._local.connection = connection
         return connection
 
     def _initialize(self) -> None:

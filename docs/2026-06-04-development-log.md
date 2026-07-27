@@ -2795,3 +2795,39 @@ node --check static/app.js -> passed
 python -m pytest tests/test_api.py -q -> 29 passed
 python -m compileall -q main.py app tests -> passed
 ```
+
+## 2026-07-27 安全与稳定性加固
+
+本轮基于对实际代码的复审（不依赖既有文档），逐项修复代码缺陷，未改动任何业务行为。分两批。
+
+### 第一批：数据安全 + 事件循环
+
+- **前端误删修复**（`static/app.js`）：`renderNodeTable` 原在每次渲染时无条件把当前页所有可见节点加入选择集。测速轮询每秒重绘、fingerprint 含延迟/出口 IP 会持续变化，导致用户已取消勾选的节点被反复“复活”，再点“删除选中”会误删。删除该行；选择集由 checkbox change 事件维护、翻页时清空，行为不变。
+- **事件循环阻塞修复**（`app/engine.py`、`app/pool_router.py`）：`_kill_managed_orphans`（3 处）与 `_stop_managed_orphans`（2 处）内含 `subprocess.run`/`time.sleep` 同步阻塞，却在 async 停止流程里直接调用，会冻结整个事件循环。全部包进 `asyncio.to_thread`。
+- **监听地址收敛**（`config/app.json`、`config/pool-router.json`）：`host`、`proxy_listen_host` 由 `0.0.0.0` 改回 `127.0.0.1`，已生成产物 `pool-router.json` 的 `listen` 同步改为 `127.0.0.1:8001`。需重启服务生效。
+
+### 第二批：连接复用 + 前端轮询 + 纵深防御
+
+- **TrafficStore 连接复用**（`app/traffic.py`）：原每次操作新建并丢弃 SQLite 连接。改为线程本地连接（`threading.local`）——这些方法经 `asyncio.to_thread` 跑在线程池，sqlite3 禁止跨线程共享连接，故不能用共享单例。每个工作线程复用自身连接。
+- **前端流量搜索改客户端过滤**（`static/app.js`）：`trafficSearch` 过滤本就在 `renderTrafficTable` 客户端完成，改为直接重渲染缓存数据，消除每次击键发三个请求；`refreshTraffic` 增加请求序号，丢弃 range/type 切换与轮询的乱序慢响应，避免旧数据覆盖新 UI。
+- **`document.hidden` 复核**：唯一常驻轮询（15s）已有守卫，其余 `for(;;)` 均为用户触发、完成即停的任务轮询，切后台不应暂停；无需改动。
+- **jobs.py 时钟统一**（`app/jobs.py`）：`cleanup` 用 `asyncio.get_event_loop().time()` 与用 `time.monotonic()` 标记的 `touched_at` 做差，基准不同致 retention 失准。统一为 `time.monotonic()`。
+- **归档解压防路径穿越**（`app/engine.py`）：`_extract_binary` 对 zip/tar 成员先校验解压目标落在目录内再 `extractall`，防“zip slip”。新增 2 个回归测试。
+- **CSV 公式注入防护**（`static/app.js`）：新增 `csvCell`，对 `= + - @`（及 Tab/CR）前缀单元格加前导单引号中和。
+- **server_port 数字强制**（`static/app.js`）：节点表服务器列对来自订阅解析的 `server_port` 用 `Number()` 强制，作为 XSS 纵深防御。
+
+### 测试脆弱性修复
+
+- `tests/test_api.py::test_api_fastest_proxy_returns_best_alive_mapping` 原隐式依赖仓库 `config/app.json` 的 `proxy_listen_host=0.0.0.0` 才能断言回落请求 host。监听地址收敛后暴露此耦合。按项目既有范式用 `monkeypatch` 显式固定 `current_proxy_listen_host`/`current_proxy_public_host`，不再依赖磁盘配置。生产逻辑本身正确。
+
+### 未处理（需部署方决策）
+
+- `config/app.json` 中的明文 admin JWT 及 `GET /api/proxy-admin/config` 明文返回：绑回本机后外部已不可达，但 token 轮换与接口脱敏需结合部署环境决定，未在本轮改动。
+- Go pool-router 连接空闲超时/上限：触及核心转发路径且无 Go 测试覆盖，绑回本机后紧迫性降低，本轮未改。
+
+验证：
+
+```text
+node --check static/app.js -> passed
+python -m pytest -q -> 173 passed
+```
