@@ -31,6 +31,9 @@ class PoolRouterManager:
         self.last_error: str | None = None
         self._orphan_pids: list[int] = []
         self._runtime_checked_at: float | None = None
+        # Serialize start(); concurrent starts spawn duplicate processes that
+        # fight over the same listener ports.
+        self._start_lock = asyncio.Lock()
 
     def binary_path(self) -> Path:
         configured = os.environ.get("PPM_POOL_ROUTER_PATH")
@@ -130,6 +133,10 @@ class PoolRouterManager:
                 continue
 
     async def start(self, config_path: Path | None = None) -> None:
+        async with self._start_lock:
+            await self._start_unlocked(config_path)
+
+    async def _start_unlocked(self, config_path: Path | None = None) -> None:
         path = config_path or self.config_path
         if not path.exists():
             raise PoolRouterError(f"Pool router config does not exist: {path}")

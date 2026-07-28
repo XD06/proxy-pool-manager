@@ -22,11 +22,31 @@ TRAFFIC_DB_PATH = CONFIG_DIR / "traffic.db"
 
 def _load_app_config() -> dict:
     if not APP_CONFIG_PATH.exists():
+        _APP_CONFIG_CACHE.update(path=None, mtime=None, config={})
         return {}
     try:
-        return json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
+        mtime = APP_CONFIG_PATH.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if (
+        mtime is not None
+        and _APP_CONFIG_CACHE["path"] == str(APP_CONFIG_PATH)
+        and _APP_CONFIG_CACHE["mtime"] == mtime
+    ):
+        return dict(_APP_CONFIG_CACHE["config"])  # type: ignore[arg-type]
+    try:
+        config = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    if not isinstance(config, dict):
+        config = {}
+    _APP_CONFIG_CACHE.update(path=str(APP_CONFIG_PATH), mtime=mtime, config=dict(config))
+    return dict(config)
+
+
+# (path, mtime)-keyed cache: runtime_setting()/current_performance_settings()
+# are called on hot request paths and must not re-read app.json every time.
+_APP_CONFIG_CACHE: dict[str, object] = {"path": None, "mtime": None, "config": {}}
 
 
 def _setting(config: dict, key: str, env_name: str, default: str) -> str:
@@ -106,7 +126,6 @@ class PerformanceSettings:
     max_port_test_concurrency: int
     max_proxycheck_concurrency: int
     max_geoip_concurrency: int
-    max_proxy_admin_concurrency: int
     state_save_debounce_ms: int
     job_retention_minutes: int
     max_jobs_per_type: int
@@ -157,14 +176,6 @@ def current_performance_settings() -> PerformanceSettings:
             2 if low else 4,
             minimum=1,
             maximum=32,
-        ),
-        max_proxy_admin_concurrency=_int_setting(
-            config,
-            "max_proxy_admin_concurrency",
-            "PPM_MAX_PROXY_ADMIN_CONCURRENCY",
-            8 if low else 30,
-            minimum=1,
-            maximum=64,
         ),
         state_save_debounce_ms=_int_setting(
             config,

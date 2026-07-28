@@ -307,7 +307,9 @@ def _port_is_free(port: int) -> bool:
 def allocate_test_ports(count: int, start_port: int = TEST_START_PORT) -> list[int]:
     ports: list[int] = []
     port = start_port
-    while len(ports) < count and port <= 65000:
+    # Stay below 49152 so test listeners never collide with the Windows
+    # ephemeral (dynamic) port range used by outbound connections.
+    while len(ports) < count and port <= 49000:
         if _port_is_free(port):
             ports.append(port)
         port += 1
@@ -356,7 +358,35 @@ async def preflight_nodes(nodes: list[ProxyNode]) -> dict[str, str]:
     return await check_subset(nodes)
 
 
+# Global guard: two concurrent temporary test engines would kill each other's
+# sing-box instance (both use SING_BOX_TEST_CONFIG_PATH) and race test ports.
+_TEST_ENGINE_LOCK = asyncio.Lock()
+
+
 async def test_nodes_with_temporary_engine(
+    nodes: list[ProxyNode],
+    on_result=None,
+    target_url: str | None = None,
+    target_urls: list[str] | None = None,
+    include_exit_ip: bool = False,
+    should_cancel=None,
+    concurrency: int = 12,
+    batch_size: int | None = None,
+) -> dict[str, LatencyResult]:
+    async with _TEST_ENGINE_LOCK:
+        return await _test_nodes_with_temporary_engine_unlocked(
+            nodes,
+            on_result=on_result,
+            target_url=target_url,
+            target_urls=target_urls,
+            include_exit_ip=include_exit_ip,
+            should_cancel=should_cancel,
+            concurrency=concurrency,
+            batch_size=batch_size,
+        )
+
+
+async def _test_nodes_with_temporary_engine_unlocked(
     nodes: list[ProxyNode],
     on_result=None,
     target_url: str | None = None,

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import json
+import logging
 import os
 import platform
 import re
@@ -19,6 +20,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("proxy_pool_manager")
 
 from .engine import EngineError, EngineManager
 from .jobs import JobManager
@@ -56,10 +59,6 @@ from .schemas import (
     PortTestRequest,
     PoolDrainRequest,
     PoolUpsertRequest,
-    ProxyAdminConfig,
-    ProxyAdminJob,
-    ProxyAdminRemoveRequest,
-    ProxyAdminRequest,
     SubscriptionConfigRequest,
     SubscriptionSourceRequest,
     NodeGroupRequest,
@@ -75,13 +74,6 @@ from .utils import (
     _write_json_if_changed,
     default_port_validation_urls,
     run_doctor_script,
-)
-from .proxy_admin import (
-    proxy_admin_client_scope,
-    proxy_admin_import,
-    proxy_admin_list_all,
-    proxy_admin_quality_check,
-    proxy_admin_remove_ids,
 )
 from .proxy_check import check_proxy_quality
 from .settings import (
@@ -131,11 +123,6 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     port_test_job_lock = port_test_mgr.lock
     active_port_test_job: dict[str, str | None] = {"id": None}
     canceled_port_test_jobs = port_test_mgr.canceled
-    proxy_admin_mgr = JobManager()
-    proxy_admin_jobs = proxy_admin_mgr.jobs
-    proxy_admin_job_lock = proxy_admin_mgr.lock
-    active_proxy_admin_job: dict[str, str | None] = {"id": None}
-    canceled_proxy_admin_jobs = proxy_admin_mgr.canceled
     local_proxy_check_mgr = JobManager()
     local_proxy_check_jobs = local_proxy_check_mgr.jobs
     local_proxy_check_job_lock = local_proxy_check_mgr.lock
@@ -206,7 +193,17 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 engine_runtime_task.cancel()
             if router_runtime_task:
                 router_runtime_task.cancel()
-            await pool_router.stop()
+            try:
+                await engine_manager.stop(SING_BOX_CONFIG_PATH)
+            except TypeError:
+                # Test doubles may expose a zero-argument stop().
+                await engine_manager.stop()
+            except Exception:
+                logger.exception("Failed to stop sing-box engine on shutdown")
+            try:
+                await pool_router.stop()
+            except Exception:
+                logger.exception("Failed to stop pool router on shutdown")
             await flush_save()
 
     app = FastAPI(title="Proxy Pool Manager", lifespan=lifespan)
@@ -284,7 +281,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             await asyncio.sleep(performance.state_save_debounce_ms / 1000)
             if save_dirty["value"]:
                 save_dirty["value"] = False
-                await asyncio.to_thread(save_now)
+                try:
+                    await asyncio.to_thread(save_now)
+                except Exception:
+                    # Keep the dirty flag so the next debounce retries the write.
+                    save_dirty["value"] = True
+                    logger.exception("Debounced state save failed")
         finally:
             try:
                 current_task = asyncio.current_task()
@@ -309,7 +311,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             await asyncio.gather(task, return_exceptions=True)
         if save_dirty["value"]:
             save_dirty["value"] = False
-            await asyncio.to_thread(save_now)
+            try:
+                await asyncio.to_thread(save_now)
+            except Exception:
+                save_dirty["value"] = True
+                logger.exception("Flush state save failed")
 
     def touch_job(job) -> None:
         job.touched_at = time.monotonic()
@@ -334,7 +340,6 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         retention = performance.job_retention_minutes * 60
         test_mgr.cleanup(active_test_job["id"], retention, performance.max_jobs_per_type)
         port_test_mgr.cleanup(active_port_test_job["id"], retention, performance.max_jobs_per_type)
-        proxy_admin_mgr.cleanup(active_proxy_admin_job["id"], retention, performance.max_jobs_per_type)
         local_proxy_check_mgr.cleanup(active_local_proxy_check_job["id"], retention, performance.max_jobs_per_type)
 
     async def job_cleanup_loop() -> None:
@@ -451,7 +456,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 source.last_count = result.count
                 source.updated_at = utc_now_iso()
                 sync_legacy_subscription()
-                save()
+                await save_async()
                 return {
                     **source_payload(source),
                     "imported": result.count,
@@ -465,7 +470,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 source.last_error = str(exc)
                 source.updated_at = utc_now_iso()
                 sync_legacy_subscription()
-                save()
+                await save_async()
                 raise
 
     async def refresh_subscription_now() -> dict:
@@ -477,50 +482,76 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
 
     async def subscription_refresh_loop() -> None:
         while True:
-            refresh_state_from_disk()
-            active_ids = {source.id for source in app_state.subscription_sources}
-            for source_id in list(subscription_next_refresh_at):
-                if source_id not in active_ids:
-                    subscription_next_refresh_at.pop(source_id, None)
-            now = time.time()
-            for source in app_state.subscription_sources:
-                interval = int(source.refresh_interval_minutes or 0)
-                if interval <= 0:
-                    subscription_next_refresh_at.pop(source.id, None)
-                    continue
-                due_at = subscription_next_refresh_at.setdefault(source.id, now + interval * 60)
-                if due_at > now:
-                    continue
-                try:
-                    await refresh_subscription_source(source)
-                except Exception:
-                    pass
-                finally:
-                    subscription_next_refresh_at[source.id] = time.time() + interval * 60
-            sync_legacy_subscription()
+            try:
+                await _subscription_refresh_tick()
+            except Exception:
+                logger.exception("Subscription refresh loop iteration failed")
             await asyncio.sleep(15)
 
+    async def _subscription_refresh_tick() -> None:
+        refresh_state_from_disk()
+        active_ids = {source.id for source in app_state.subscription_sources}
+        for source_id in list(subscription_next_refresh_at):
+            if source_id not in active_ids:
+                subscription_next_refresh_at.pop(source_id, None)
+        now = time.time()
+        for source in app_state.subscription_sources:
+            interval = int(source.refresh_interval_minutes or 0)
+            if interval <= 0:
+                subscription_next_refresh_at.pop(source.id, None)
+                continue
+            due_at = subscription_next_refresh_at.setdefault(source.id, now + interval * 60)
+            if due_at > now:
+                continue
+            try:
+                await refresh_subscription_source(source)
+            except Exception:
+                logger.warning("Auto refresh failed for subscription %s", source.id, exc_info=True)
+            finally:
+                subscription_next_refresh_at[source.id] = time.time() + interval * 60
+        sync_legacy_subscription()
+
+    # (path, mtime)-keyed cache so hot paths (auth middleware, status) do not
+    # re-read and re-parse app.json from disk on every request.
+    _app_config_cache: dict[str, object] = {"path": None, "mtime": None, "config": {}}
+
     def load_app_config() -> dict:
-        if not APP_CONFIG_PATH.exists():
+        path = APP_CONFIG_PATH
+        if not path.exists():
+            _app_config_cache.update(path=str(path), mtime=None, config={})
             return {}
         try:
-            return json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        if (
+            mtime is not None
+            and _app_config_cache["path"] == str(path)
+            and _app_config_cache["mtime"] == mtime
+        ):
+            return dict(_app_config_cache["config"])  # type: ignore[arg-type]
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return {}
+        if not isinstance(config, dict):
+            config = {}
+        _app_config_cache.update(path=str(path), mtime=mtime, config=dict(config))
+        return dict(config)
 
     def save_app_config(config: dict) -> None:
         APP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        APP_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps(config, ensure_ascii=False, indent=2)
+        tmp_path = APP_CONFIG_PATH.with_name(APP_CONFIG_PATH.name + ".tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, APP_CONFIG_PATH)
+        _app_config_cache.update(path=None, mtime=None, config={})
 
     def auth_payload(request: Request) -> dict:
         return {
             "enabled": auth_enabled(),
             "authenticated": is_authenticated(request),
         }
-
-    def proxy_admin_config_payload() -> dict:
-        config = load_app_config().get("proxy_admin") or {}
-        return ProxyAdminConfig.model_validate(config).model_dump()
 
     def geoip_config() -> GeoIpConfig:
         config = load_app_config().get("geoip") or {}
@@ -646,15 +677,20 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             )
         return config_written, router_written
 
+    # Serialize full runtime restarts; concurrent restarts would race the
+    # engine/router stop-start sequence and can strand orphan processes.
+    runtime_restart_lock = asyncio.Lock()
+
     async def restart_runtime() -> tuple[bool, bool]:
-        config_written, router_written = write_runtime_configs()
-        await pool_router.stop()
-        await engine_manager.start(SING_BOX_CONFIG_PATH)
-        if router_mode():
-            await pool_router.start(POOL_ROUTER_CONFIG_PATH)
-            await refresh_router_listener_ports()
-        await wait_for_mapped_ports()
-        return config_written, router_written
+        async with runtime_restart_lock:
+            config_written, router_written = write_runtime_configs()
+            await pool_router.stop()
+            await engine_manager.start(SING_BOX_CONFIG_PATH)
+            if router_mode():
+                await pool_router.start(POOL_ROUTER_CONFIG_PATH)
+                await refresh_router_listener_ports()
+            await wait_for_mapped_ports()
+            return config_written, router_written
 
     _configured_ports_cache: dict[str, object] = {"mtime": None, "ports": []}
 
@@ -969,43 +1005,6 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             )
         return {"ports": ports, "skipped": skipped}
 
-    def proxy_urls_for_ports(payload: ProxyAdminRequest, request: Request) -> list[dict]:
-        selected_ports = payload.ports or mapped_ports()
-        host = (payload.proxy_host or proxy_connect_host(request)).strip()
-        replace_from = (payload.replace_from or "").strip()
-        replace_to = (payload.replace_to or "").strip()
-        name_prefix = (payload.proxy_name_prefix or "代理").strip() or "代理"
-        by_tag = node_by_tag()
-
-        def location_label(port: int) -> str:
-            mapping = app_state.port_mappings.get(str(port))
-            node = by_tag.get(mapping.node_tag) if mapping else None
-            latency = app_state.latency_cache.get(node.tag) if node else None
-            geoip = latency.geoip if latency else None
-            if not geoip:
-                exit_cache = app_state.exit_ip_cache.get(str(port))
-                geoip = exit_cache.geoip if exit_cache else None
-            if not geoip or geoip.get("error"):
-                return "none"
-            country = str(geoip.get("country_code") or geoip.get("country") or "").strip()
-            city = str(geoip.get("city") or geoip.get("region") or "").strip()
-            compact = ".".join(part.replace(" ", "") for part in [country, city] if part)
-            return compact or "none"
-
-        items = []
-        for index, port in enumerate(selected_ports, start=1):
-            export_host = replace_to if replace_from and replace_to and host == replace_from else host
-            items.append(
-                {
-                    "url": f"http://{host}:{port}",
-                    "host": export_host,
-                    "port": int(port),
-                    "name": f"{name_prefix}{index}",
-                    "name_suffix": location_label(int(port)),
-                }
-            )
-        return items
-
     async def wait_for_mapped_ports(timeout_seconds: float = 8.0) -> None:
         expected = runtime_ports()
         if not expected:
@@ -1102,19 +1101,25 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         monitor_failures = 0
         while True:
             await asyncio.sleep(5)
-            was_running = bool(pool_router.process and pool_router.process.poll() is None)
-            await refresh_pool_router_runtime()
-            if was_running and pool_router.process is None and router_mode():
-                monitor_failures += 1
-                if monitor_failures >= 3:
-                    pool_router.last_error = "Pool router crashed repeatedly; auto-restart disabled"
-                    continue
-                try:
-                    await pool_router.start(POOL_ROUTER_CONFIG_PATH)
-                    await refresh_router_listener_ports()
-                    monitor_failures = 0
-                except PoolRouterError:
-                    pass
+            try:
+                was_running = bool(pool_router.process and pool_router.process.poll() is None)
+                await refresh_pool_router_runtime()
+                if was_running and pool_router.process is None and router_mode():
+                    monitor_failures += 1
+                    if monitor_failures >= 3:
+                        # Slow down instead of giving up forever so the router can
+                        # still self-heal after transient crash storms.
+                        pool_router.last_error = "Pool router crashed repeatedly; retrying every 60s"
+                        logger.error("Pool router crashed %d times in a row; retry slowed to 60s", monitor_failures)
+                        await asyncio.sleep(55)
+                    try:
+                        await pool_router.start(POOL_ROUTER_CONFIG_PATH)
+                        await refresh_router_listener_ports()
+                        monitor_failures = 0
+                    except PoolRouterError:
+                        logger.warning("Pool router auto-restart failed", exc_info=True)
+            except Exception:
+                logger.exception("Router runtime loop iteration failed")
 
     async def engine_runtime_loop() -> None:
         while True:
@@ -1123,7 +1128,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 await refresh_listening_ports_cache()
             except Exception:
                 # Keep the loop alive; a single probe failure must not stop status updates.
-                pass
+                logger.warning("Engine runtime probe failed", exc_info=True)
             await asyncio.sleep(5)
 
     async def traffic_sampling_loop() -> None:
@@ -1133,7 +1138,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             except PoolRouterError:
                 pass
             except Exception:
-                pass
+                logger.warning("Traffic sampling failed", exc_info=True)
             await asyncio.sleep(15)
 
     def assigned_tags_for_ports(ports: list[int] | None = None) -> list[tuple[str, int]]:
@@ -1301,7 +1306,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 app_state.node_groups = [item for item in app_state.node_groups if item.id != source.group_id]
                 subscription_next_refresh_at.pop(source.id, None)
             sync_legacy_subscription()
-            save()
+            await save_async()
             return subscription_payload()
         if source is None:
             source = SubscriptionSource(name=source_display_name(url), url=url)
@@ -1316,7 +1321,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         else:
             subscription_next_refresh_at.pop(source.id, None)
         sync_legacy_subscription()
-        save()
+        await save_async()
         return subscription_payload()
 
     @app.post("/api/subscription/refresh")
@@ -1346,7 +1351,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if source.refresh_interval_minutes:
             subscription_next_refresh_at[source.id] = time.time() + source.refresh_interval_minutes * 60
         sync_legacy_subscription()
-        save()
+        await save_async()
         return {"ok": True, "source": source_payload(source)}
 
     @app.put("/api/subscriptions/{source_id}")
@@ -1369,7 +1374,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         else:
             subscription_next_refresh_at.pop(source.id, None)
         sync_legacy_subscription()
-        save()
+        await save_async()
         return {"ok": True, "source": source_payload(source)}
 
     @app.delete("/api/subscriptions/{source_id}")
@@ -1381,7 +1386,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         app_state.node_groups = [item for item in app_state.node_groups if item.id != source.group_id]
         subscription_next_refresh_at.pop(source_id, None)
         sync_legacy_subscription()
-        save()
+        await save_async()
         return {"ok": True}
 
     @app.post("/api/subscriptions/{source_id}/refresh")
@@ -1429,7 +1434,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 node_tags=[node.tag for node in result.nodes],
             )
             app_state.node_groups.append(group)
-        save()
+        await save_async()
         return {"ok": True, "group_id": group.id, **result.model_dump()}
 
     def group_payload(group: NodeGroup) -> dict:
@@ -1465,7 +1470,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             raise HTTPException(status_code=400, detail=f"Unknown group node: {', '.join(missing)}")
         group = NodeGroup(name=payload.name.strip(), kind=kind, node_tags=tags)
         app_state.node_groups.append(group)
-        save()
+        await save_async()
         return {"ok": True, "group": group_payload(group)}
 
     @app.put("/api/groups/{group_id}")
@@ -1480,7 +1485,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         group.name = payload.name.strip()
         group.node_tags = tags
         group.updated_at = utc_now_iso()
-        save()
+        await save_async()
         return {"ok": True, "group": group_payload(group)}
 
     @app.delete("/api/groups/{group_id}")
@@ -1493,7 +1498,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if source:
                 source.group_id = None
         app_state.node_groups = [item for item in app_state.node_groups if item.id != group_id]
-        save()
+        await save_async()
         return {"ok": True}
 
     @app.get("/api/nodes")
@@ -1586,7 +1591,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             for port, cache in app_state.exit_ip_cache.items()
             if app_state.port_mappings.get(port) and app_state.port_mappings[port].node_tag in assigned_tags
         }
-        save()
+        await save_async()
         return {"ok": True, "removed": before - len(app_state.nodes)}
 
     @app.post("/api/test")
@@ -1640,7 +1645,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     group.node_tags = [tag for tag in group.node_tags if tag in kept_tags]
                     group.updated_at = utc_now_iso()
             app_state.nodes = sort_nodes_by_test_result(app_state.nodes, app_state.latency_cache)
-            save()
+            await save_async()
             return {"results": results, "removed": removed, "node_count": len(app_state.nodes)}
 
     @app.post("/api/test/start")
@@ -1811,7 +1816,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 app_state.nodes = sort_nodes_by_test_result(app_state.nodes, app_state.latency_cache)
                 job.status = "done"
                 touch_test_job(job)
-                save()
+                await save_async()
                 if engine_manager.status().running and app_state.pools:
                     await restart_runtime()
                     await asyncio.to_thread(traffic_store.event, "pool_health_refreshed", "Applied latest node health to node pools")
@@ -1850,7 +1855,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if port and detail:
                 details[str(port)] = detail
                 store_port_test_result(tag, port, result, detail)
-        save()
+        await save_async()
         return {"results": results, "details": details}
 
     @app.post("/api/test-ports/start")
@@ -1974,7 +1979,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             for port, result in app_state.local_proxy_check_results.items()
             if same_port_node(port)
         }
-        save()
+        await save_async()
         restarted = False
         stopped = False
         if engine_manager.status().running:
@@ -2076,7 +2081,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         require_pool_router()
         pool = validate_pool_request(payload)
         app_state.pools.append(pool)
-        save()
+        await save_async()
         try:
             await restart_for_pool_change()
         except (ConfigError, EngineError, PoolRouterError) as exc:
@@ -2092,7 +2097,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             raise HTTPException(status_code=404, detail="Pool not found")
         pool = validate_pool_request(payload, pool_id=pool_id)
         app_state.pools[index] = pool
-        save()
+        await save_async()
         try:
             await restart_for_pool_change()
         except (ConfigError, EngineError, PoolRouterError) as exc:
@@ -2125,7 +2130,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         pool.updated_at = utc_now_iso()
         if pool.enabled and not any(item.enabled and not item.draining for item in pool.members):
             raise HTTPException(status_code=400, detail="A pool requires at least one active member")
-        save()
+        await save_async()
         try:
             await restart_for_pool_change()
         except (ConfigError, EngineError, PoolRouterError) as exc:
@@ -2140,7 +2145,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if not pool:
             raise HTTPException(status_code=404, detail="Pool not found")
         app_state.pools = [item for item in app_state.pools if item.id != pool_id]
-        save()
+        await save_async()
         try:
             await restart_for_pool_change()
         except (ConfigError, EngineError, PoolRouterError) as exc:
@@ -2263,44 +2268,13 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             payload.exclude,
         )
 
-    @app.post("/api/proxy-admin/check/start")
-    async def start_proxy_admin_check(payload: ProxyAdminRequest, request: Request):
-        if active_proxy_admin_job["id"] is not None or proxy_admin_job_lock.locked():
-            raise HTTPException(status_code=409, detail="A ProxyAdmin check job is already running")
-        cleanup_all_jobs()
-        proxy_items = proxy_urls_for_ports(payload, request)
-        if payload.check_only:
-            id_map = payload.proxy_ids_by_port or {}
-            for item in proxy_items:
-                item["id"] = int(id_map.get(str(item["port"])) or 0)
-            missing = [str(item["port"]) for item in proxy_items if int(item.get("id") or 0) <= 0]
-            if missing:
-                raise HTTPException(status_code=400, detail=f"Missing ProxyAdmin ids for ports: {', '.join(missing)}")
-        job = ProxyAdminJob(id=str(uuid.uuid4()))
-        job.total = len(proxy_items)
-        proxy_admin_jobs[job.id] = job
-        active_proxy_admin_job["id"] = job.id
-        asyncio.create_task(run_proxy_admin_job(job.id, payload, proxy_items))
-        return job.model_dump()
-
-    @app.get("/api/proxy-admin/config")
-    async def get_proxy_admin_config():
-        return proxy_admin_config_payload()
-
-    @app.put("/api/proxy-admin/config")
-    async def save_proxy_admin_config(payload: ProxyAdminConfig):
-        config = load_app_config()
-        config["proxy_admin"] = payload.model_dump()
-        save_app_config(config)
-        return {"ok": True, "config": proxy_admin_config_payload()}
-
     @app.post("/api/proxy-check")
     async def local_proxy_check(payload: LocalProxyCheckRequest):
         try:
             result = await run_local_proxy_check(payload)
             if payload.port:
                 app_state.local_proxy_check_results[str(payload.port)] = result
-                save()
+                await save_async()
             return result
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2398,115 +2372,6 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     active_local_proxy_check_job["id"] = None
                 canceled_local_proxy_check_jobs.discard(job_id)
 
-    @app.get("/api/proxy-admin/jobs/{job_id}")
-    async def get_proxy_admin_job(job_id: str):
-        job = proxy_admin_jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="ProxyAdmin job not found")
-        return job.model_dump()
-
-    @app.post("/api/proxy-admin/jobs/{job_id}/cancel")
-    async def cancel_proxy_admin_job(job_id: str):
-        job = proxy_admin_mgr.request_cancel(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="ProxyAdmin job not found")
-        return job.model_dump()
-
-    async def run_proxy_admin_job(job_id: str, payload: ProxyAdminRequest, proxy_items: list[dict]) -> None:
-        job = proxy_admin_jobs[job_id]
-        async with proxy_admin_job_lock:
-            try:
-                effective_concurrency = max(
-                    1,
-                    min(int(payload.concurrency or 1), performance.max_proxy_admin_concurrency),
-                )
-                effective_payload = payload.model_copy(update={"concurrency": effective_concurrency})
-                imported = proxy_items if effective_payload.check_only else await proxy_admin_import(effective_payload, proxy_items)
-                job.imported = imported
-                check_items = [item for item in imported if int(item.get("id") or 0) > 0]
-                upload_failures = [item for item in imported if int(item.get("id") or 0) <= 0]
-                job.total = len(imported)
-                for item in upload_failures:
-                    if job_id in canceled_proxy_admin_jobs:
-                        job.status = "canceled"
-                        return
-                    result = {
-                        "id": item.get("id") or 0,
-                        "exit_ip": "",
-                        "country": "",
-                        "score": 0,
-                        "grade": "ERR",
-                        "items": [],
-                        "error": item.get("upload_error") or "ProxyAdmin upload failed",
-                    }
-                    job.results[str(result["id"])] = result
-                    job.completed += 1
-                    touch_job(job)
-                if not check_items:
-                    job.status = "done"
-                    touch_job(job)
-                    return
-                idx = 0
-                concurrency = max(1, min(effective_payload.concurrency, len(check_items)))
-
-                async def worker():
-                    nonlocal idx
-                    while idx < len(check_items):
-                        if job_id in canceled_proxy_admin_jobs:
-                            return
-                        item = check_items[idx]
-                        idx += 1
-                        proxy_id = int(item.get("id") or 0)
-                        try:
-                            result = await proxy_admin_quality_check(effective_payload, proxy_id)
-                        except Exception as exc:
-                            result = {
-                                "id": proxy_id,
-                                "exit_ip": "",
-                                "country": "",
-                                "score": 0,
-                                "grade": "ERR",
-                                "items": [],
-                                "error": str(exc),
-                            }
-                        job.results[str(proxy_id)] = result
-                        job.completed += 1
-                        touch_job(job)
-
-                async with proxy_admin_client_scope():
-                    await asyncio.gather(*(worker() for _ in range(concurrency)))
-                job.status = "canceled" if job_id in canceled_proxy_admin_jobs else "done"
-                touch_job(job)
-            except Exception as exc:
-                if job_id in canceled_proxy_admin_jobs:
-                    job.status = "canceled"
-                else:
-                    job.status = "error"
-                    job.error = str(exc)
-                touch_job(job)
-            finally:
-                if active_proxy_admin_job["id"] == job_id:
-                    active_proxy_admin_job["id"] = None
-                canceled_proxy_admin_jobs.discard(job_id)
-
-    @app.post("/api/proxy-admin/remove")
-    async def remove_proxy_admin_items(payload: ProxyAdminRemoveRequest):
-        ids = list(payload.ids or [])
-        effective_concurrency = max(1, min(int(payload.concurrency or 1), performance.max_proxy_admin_concurrency))
-        effective_payload = payload.model_copy(update={"concurrency": effective_concurrency})
-        async with proxy_admin_client_scope():
-            if payload.unused:
-                proxy_map = await proxy_admin_list_all(effective_payload)
-                ids = [
-                    int(item.get("id"))
-                    for item in proxy_map.values()
-                    if int(item.get("account_count") or 0) == 0 and item.get("id")
-                ]
-            if not ids:
-                return {"removed": [], "count": 0}
-            results = await proxy_admin_remove_ids(effective_payload, ids)
-        return {"removed": results, "count": len(results)}
-
     @app.get("/api/ports/{port}/ip")
     async def port_ip(port: int):
         if str(port) not in app_state.port_mappings:
@@ -2515,7 +2380,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         geoip = await enrich_geoip_now(result.ip) if result.ip else None
         result.geoip = geoip
         app_state.exit_ip_cache[str(port)] = result
-        save()
+        await save_async()
         return {
             "port": port,
             "node_tag": app_state.port_mappings[str(port)].node_tag,
@@ -2572,7 +2437,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                         success_count = 1
                     delay = latency.delay if latency.delay is not None else 10**9
                     checked_candidates.append((success_count, delay, port, mapping, latency))
-            save()
+            await save_async()
             candidates = sorted(checked_candidates, key=lambda item: (-item[0], item[1], item[2]))
             if not candidates:
                 raise HTTPException(status_code=404, detail="No live proxy mapping passed real-time validation")

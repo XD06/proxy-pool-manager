@@ -6,7 +6,6 @@ import socket
 import time
 
 from app import api as api_module
-from app import proxy_admin as proxy_admin_module
 from app.api import create_app
 from app.models import AppState, EngineStatus, ExitIpCache, GeoIpResult, ImportResult, LatencyResult, PortMapping, ProxyNode
 from app.settings import ASSET_VERSION, PerformanceSettings
@@ -1059,271 +1058,6 @@ def test_api_assign_rejects_reserved_web_and_router_ports(tmp_path, monkeypatch)
         assert "不可用" in detail or "reserved" in detail.lower() or "端口" in detail
 
 
-def test_api_proxy_admin_check_job_streams_results(tmp_path, monkeypatch):
-    created = []
-
-    class FakeResponse:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self.payload
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def request(self, method, url, headers=None, json=None):
-            if method == "POST" and url.endswith("/api/v1/admin/proxies"):
-                created.append(json)
-                proxy_id = 500 + len(created)
-                return FakeResponse(
-                    {
-                        "code": 0,
-                        "message": "ok",
-                        "data": {
-                            "id": proxy_id,
-                            "name": json["name"],
-                            "protocol": json["protocol"],
-                            "host": json["host"],
-                            "port": json["port"],
-                        },
-                    }
-                )
-            if "/api/v1/admin/proxies?page=" in url:
-                return FakeResponse(
-                    {
-                        "code": 0,
-                        "message": "ok",
-                        "data": {
-                            "items": [
-                                {"id": 499, "name": "代理1", "host": "127.0.0.1", "port": 17999, "account_count": 0},
-                            ],
-                            "pages": 1,
-                        },
-                    }
-                )
-            if url.endswith("/quality-check"):
-                proxy_id = int(url.split("/")[-2])
-                return FakeResponse(
-                    {
-                        "code": 0,
-                        "message": "ok",
-                        "data": {
-                            "proxy_id": proxy_id,
-                            "exit_ip": f"203.0.113.{proxy_id - 500}",
-                            "country": "TEST",
-                            "score": 90,
-                            "grade": "A",
-                            "items": [{"target": "openai", "status": "pass", "latency_ms": 123, "message": "ok"}],
-                        },
-                    }
-                )
-            raise AssertionError(url)
-
-    monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: True)
-    store = StateStore(tmp_path / "assignments.json")
-    app = create_app(store=store, engine=StoppedEngine())
-
-    with TestClient(app) as client:
-        imported = client.post(
-            "/api/import",
-            json={
-                "text": "\n".join(
-                    [
-                        "vless://00000000-0000-0000-0000-000000000001@example-a.com:443?security=tls#A",
-                        "vless://00000000-0000-0000-0000-000000000002@example-b.com:443?security=tls#B",
-                    ]
-                )
-            },
-        )
-        tags = [node["tag"] for node in imported.json()["nodes"]]
-        assigned = client.put("/api/assign", json={"mappings": {"18001": tags[0], "18002": tags[1]}})
-        assert assigned.status_code == 200
-        state = app.state.proxy_pool_state
-        state.latency_cache[tags[0]] = LatencyResult(alive=True, delay=100, geoip={"country_code": "JP", "city": "Tokyo"})
-        state.latency_cache[tags[1]] = LatencyResult(alive=True, delay=120, geoip={"country_code": "US", "city": "Los Angeles"})
-
-        started = client.post(
-            "/api/proxy-admin/check/start",
-            json={
-                "base_url": "http://127.0.0.1:8081",
-                "token": "token",
-                "proxy_host": "127.0.0.1",
-                "ports": [18001, 18002],
-                "concurrency": 2,
-            },
-        )
-        assert started.status_code == 200
-        job_id = started.json()["id"]
-
-        for _ in range(20):
-            job = client.get(f"/api/proxy-admin/jobs/{job_id}")
-            if job.json()["status"] == "done":
-                break
-            time.sleep(0.05)
-
-        payload = job.json()
-        assert payload["status"] == "done"
-        assert payload["completed"] == 2
-        assert payload["results"]["501"]["items"][0]["status"] == "pass"
-        assert {item["name"] for item in created} == {"代理2-JP.Tokyo", "代理3-US.LosAngeles"}
-
-
-def test_api_proxy_admin_upload_failure_does_not_stop_batch(tmp_path, monkeypatch):
-    class FakeResponse:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self.payload
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def request(self, method, url, headers=None, json=None):
-            if "/api/v1/admin/proxies?page=" in url:
-                return FakeResponse({"code": 0, "message": "ok", "data": {"items": [], "pages": 1}})
-            if method == "POST" and url.endswith("/api/v1/admin/proxies"):
-                if json["port"] == 18001:
-                    raise RuntimeError("upload failed")
-                return FakeResponse({"code": 0, "message": "ok", "data": {"id": 502, "name": json["name"], "port": json["port"]}})
-            if url.endswith("/quality-check"):
-                return FakeResponse(
-                    {
-                        "code": 0,
-                        "message": "ok",
-                        "data": {
-                            "proxy_id": 502,
-                            "exit_ip": "203.0.113.2",
-                            "country": "TEST",
-                            "score": 80,
-                            "grade": "B",
-                            "items": [{"target": "openai", "status": "pass", "latency_ms": 123, "message": "ok"}],
-                        },
-                    }
-                )
-            raise AssertionError(url)
-
-    monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
-    store = StateStore(tmp_path / "assignments.json")
-    app = create_app(store=store, engine=StoppedEngine())
-
-    with TestClient(app) as client:
-        started = client.post(
-            "/api/proxy-admin/check/start",
-            json={
-                "base_url": "http://127.0.0.1:8081",
-                "token": "token",
-                "proxy_host": "127.0.0.1",
-                "ports": [18001, 18002],
-                "concurrency": 2,
-            },
-        )
-        job_id = started.json()["id"]
-        for _ in range(20):
-            job = client.get(f"/api/proxy-admin/jobs/{job_id}")
-            if job.json()["status"] == "done":
-                break
-            time.sleep(0.05)
-
-        payload = job.json()
-        assert payload["status"] == "done"
-        assert payload["completed"] == 2
-        assert payload["results"]["-18001"]["grade"] == "ERR"
-        assert payload["results"]["502"]["grade"] == "B"
-
-
-def test_api_proxy_admin_retry_check_only_does_not_upload(tmp_path, monkeypatch):
-    checked_ids = []
-
-    async def fail_import(payload, proxy_items):
-        raise AssertionError("check_only retry should not upload proxies")
-
-    async def fake_proxy_admin_quality_check(payload, proxy_id):
-        checked_ids.append(proxy_id)
-        return {
-            "id": proxy_id,
-            "exit_ip": "203.0.113.7",
-            "country": "TEST",
-            "score": 100,
-            "grade": "A",
-            "items": [{"target": "openai", "status": "pass", "latency_ms": 100, "message": "ok"}],
-        }
-
-    monkeypatch.setattr(api_module, "proxy_admin_import", fail_import)
-    monkeypatch.setattr(api_module, "proxy_admin_quality_check", fake_proxy_admin_quality_check)
-    store = StateStore(tmp_path / "assignments.json")
-    app = create_app(store=store, engine=StoppedEngine())
-
-    with TestClient(app) as client:
-        started = client.post(
-            "/api/proxy-admin/check/start",
-            json={
-                "base_url": "http://127.0.0.1:8081",
-                "token": "token",
-                "proxy_host": "127.0.0.1",
-                "ports": [18007],
-                "check_only": True,
-                "proxy_ids_by_port": {"18007": 507},
-            },
-        )
-        assert started.status_code == 200
-        job_id = started.json()["id"]
-        for _ in range(20):
-            job = client.get(f"/api/proxy-admin/jobs/{job_id}")
-            if job.json()["status"] == "done":
-                break
-            time.sleep(0.05)
-
-        payload = job.json()
-        assert payload["status"] == "done"
-        assert payload["imported"][0]["id"] == 507
-        assert payload["results"]["507"]["grade"] == "A"
-        assert checked_ids == [507]
-
-
-def test_api_proxy_admin_check_only_requires_ids(tmp_path):
-    store = StateStore(tmp_path / "assignments.json")
-    app = create_app(store=store, engine=StoppedEngine())
-    client = TestClient(app)
-
-    response = client.post(
-        "/api/proxy-admin/check/start",
-        json={
-            "base_url": "http://127.0.0.1:8081",
-            "token": "token",
-            "proxy_host": "127.0.0.1",
-            "ports": [18007],
-            "check_only": True,
-            "proxy_ids_by_port": {},
-        },
-    )
-
-    assert response.status_code == 400
-    assert "Missing ProxyAdmin ids for ports: 18007" in response.json()["detail"]
-
-
 def test_api_local_proxy_check_uses_proxycheck_adapter(tmp_path, monkeypatch):
     called = {}
 
@@ -1526,7 +1260,6 @@ def test_local_proxy_check_job_debounces_state_saves(tmp_path, monkeypatch):
             max_port_test_concurrency=8,
             max_proxycheck_concurrency=3,
             max_geoip_concurrency=2,
-            max_proxy_admin_concurrency=8,
             state_save_debounce_ms=1000,
             job_retention_minutes=60,
             max_jobs_per_type=20,
@@ -1579,7 +1312,6 @@ def test_local_proxy_check_jobs_are_retained_by_limit(tmp_path, monkeypatch):
             max_port_test_concurrency=32,
             max_proxycheck_concurrency=1,
             max_geoip_concurrency=4,
-            max_proxy_admin_concurrency=30,
             state_save_debounce_ms=0,
             job_retention_minutes=60,
             max_jobs_per_type=1,
@@ -1620,91 +1352,6 @@ def test_local_proxy_check_jobs_are_retained_by_limit(tmp_path, monkeypatch):
         assert client.get(f"/api/proxy-check/jobs/{first_id}").status_code == 404
         assert client.get(f"/api/proxy-check/jobs/{second_id}").status_code == 200
         assert client.get(f"/api/proxy-check/jobs/{third_id}").status_code == 200
-
-
-def test_api_proxy_admin_remove_unused(tmp_path, monkeypatch):
-    class FakeResponse:
-        def __init__(self, payload):
-            self.payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self.payload
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def request(self, method, url, headers=None, json=None):
-            if "/api/v1/admin/proxies?page=" in url:
-                return FakeResponse(
-                    {
-                        "code": 0,
-                        "message": "ok",
-                        "data": {
-                            "items": [
-                                {"id": 501, "host": "127.0.0.1", "port": 18001, "account_count": 0},
-                                {"id": 502, "host": "127.0.0.1", "port": 18002, "account_count": 2},
-                            ],
-                            "pages": 1,
-                        },
-                    }
-                )
-            if method == "DELETE":
-                return FakeResponse({"code": 0, "message": "ok", "data": {}})
-            raise AssertionError(url)
-
-    monkeypatch.setattr(proxy_admin_module.httpx, "AsyncClient", FakeClient)
-    store = StateStore(tmp_path / "assignments.json")
-    app = create_app(store=store, engine=StoppedEngine())
-    client = TestClient(app)
-
-    response = client.post(
-        "/api/proxy-admin/remove",
-        json={"base_url": "http://127.0.0.1:8081", "token": "token", "unused": True},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["removed"] == [{"id": 501, "success": True}]
-
-
-def test_api_proxy_admin_config_persists_without_dropping_app_settings(tmp_path):
-    api_module.APP_CONFIG_PATH.write_text(
-        json.dumps({"host": "0.0.0.0", "port": 9000}),
-        encoding="utf-8",
-    )
-    store = StateStore(tmp_path / "assignments.json")
-    app = create_app(store=store, engine=StoppedEngine())
-    client = TestClient(app)
-
-    saved = client.put(
-        "/api/proxy-admin/config",
-        json={
-            "base_url": "http://127.0.0.1:8081",
-            "token": "secret",
-            "proxy_host": "43.156.235.29",
-            "replace_from": "127.0.0.1",
-            "replace_to": "172.17.0.1",
-            "proxy_name_prefix": "测试代理",
-            "concurrency": 12,
-        },
-    )
-    loaded = client.get("/api/proxy-admin/config")
-
-    assert saved.status_code == 200
-    assert loaded.json()["token"] == "secret"
-    config = json.loads(api_module.APP_CONFIG_PATH.read_text(encoding="utf-8"))
-    assert config["host"] == "0.0.0.0"
-    assert config["proxy_admin"]["concurrency"] == 12
-    assert config["proxy_admin"]["proxy_name_prefix"] == "测试代理"
 
 
 def test_api_test_ports_uses_only_custom_urls(tmp_path, monkeypatch):
@@ -1766,7 +1413,6 @@ def test_api_test_ports_respects_configured_concurrency(tmp_path, monkeypatch):
             max_port_test_concurrency=2,
             max_proxycheck_concurrency=10,
             max_geoip_concurrency=4,
-            max_proxy_admin_concurrency=30,
             state_save_debounce_ms=0,
             job_retention_minutes=60,
             max_jobs_per_type=20,

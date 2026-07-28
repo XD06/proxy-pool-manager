@@ -16,6 +16,9 @@ from ..schemas import LoginRequest
 AUTH_MAX_FAILURES = 5
 AUTH_LOCK_WINDOW_SECONDS = 60
 AUTH_SESSION_TTL_SECONDS = 8 * 3600
+# Upper bounds so the in-memory dicts cannot grow without limit under
+# brute-force attempts or repeated logins.
+AUTH_MAX_SESSIONS = 500
 
 
 def client_ip(request: Request, *, trust_proxy: bool = False) -> str:
@@ -45,6 +48,23 @@ class AuthContext:
         current = time.time() if now is None else now
         expired = [token for token, expires_at in self.sessions.items() if expires_at <= current]
         for token in expired:
+            self.sessions.pop(token, None)
+
+    def purge_stale_failures(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        for ip in list(self.failures):
+            recent = [t for t in self.failures[ip] if current - t < AUTH_LOCK_WINDOW_SECONDS]
+            if recent:
+                self.failures[ip] = recent
+            else:
+                self.failures.pop(ip, None)
+
+    def enforce_session_limit(self) -> None:
+        overflow = len(self.sessions) - AUTH_MAX_SESSIONS + 1
+        if overflow <= 0:
+            return
+        # Evict the sessions closest to expiry first.
+        for token, _ in sorted(self.sessions.items(), key=lambda item: item[1])[:overflow]:
             self.sessions.pop(token, None)
 
     def is_authenticated(self, request: Request) -> bool:
@@ -83,8 +103,8 @@ def create_auth_router(ctx: AuthContext) -> APIRouter:
             return {"enabled": False, "authenticated": True}
         ip = client_ip(request, trust_proxy=ctx.trust_proxy())
         now = time.monotonic()
+        ctx.purge_stale_failures(now)
         failures = ctx.failures.get(ip, [])
-        failures = [t for t in failures if now - t < AUTH_LOCK_WINDOW_SECONDS]
         if len(failures) >= AUTH_MAX_FAILURES:
             retry_after = int(AUTH_LOCK_WINDOW_SECONDS - (now - failures[0]))
             raise HTTPException(
@@ -102,6 +122,7 @@ def create_auth_router(ctx: AuthContext) -> APIRouter:
             )
         ctx.failures.pop(ip, None)
         ctx.purge_expired_sessions()
+        ctx.enforce_session_limit()
         token = secrets.token_urlsafe(32)
         ttl = max(60, int(ctx.session_ttl_seconds))
         ctx.sessions[token] = time.time() + ttl

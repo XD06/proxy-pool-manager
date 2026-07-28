@@ -22,10 +22,21 @@ if ($listener) {
 }
 
 if (-not $KeepEngine) {
+  # Match every project-owned config (sing-box.json, sing-box-test.json, ...)
+  # so temporary speed-test engines are not left running.
   $processes = Get-CimInstance Win32_Process -Filter "name = 'sing-box.exe'" |
-    Where-Object { $_.CommandLine -like "*$Root\config\sing-box.json*" }
+    Where-Object { $_.CommandLine -like "*$Root\config\*" }
   foreach ($process in $processes) {
     Stop-Process -Id $process.ProcessId -Force
     Write-Output "Stopped project sing-box (pid $($process.ProcessId))."
   }
+}
+
+# Pool router is a separate helper process; leaving it running keeps its
+# listener ports occupied and breaks the next start.
+$routers = Get-CimInstance Win32_Process -Filter "name = 'pool-router.exe'" |
+  Where-Object { $_.CommandLine -like "*$Root\config\pool-router.json*" }
+foreach ($process in $routers) {
+  Stop-Process -Id $process.ProcessId -Force
+  Write-Output "Stopped project pool-router (pid $($process.ProcessId))."
 }

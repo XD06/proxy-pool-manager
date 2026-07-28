@@ -515,6 +515,10 @@ class EngineManager:
             await self._stop_unlocked(config_path=config_path)
 
     async def _stop_unlocked(self, config_path: Path | None = None) -> None:
+        # An intentional stop clears the crash streak so the monitor does not
+        # try to auto-recover an engine the operator shut down on purpose.
+        self.fatal = False
+        self._monitor_failures = 0
         if not self.process:
             await asyncio.to_thread(self._kill_managed_orphans, config_path=config_path)
             return
@@ -580,6 +584,15 @@ class EngineManager:
         while True:
             await asyncio.sleep(5)
             if not self.process:
+                if self.fatal:
+                    # Crash streak: keep retrying slowly instead of giving up
+                    # forever; a successful start() resets the fatal flag.
+                    await asyncio.sleep(55)
+                    if self.fatal and not self.process:
+                        try:
+                            await self.start(config_path)
+                        except Exception as exc:
+                            self.last_error = str(exc)
                 continue
             if self.process.poll() is None:
                 if not self.fatal and self._monitor_failures > 0:

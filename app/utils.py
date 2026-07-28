@@ -6,6 +6,7 @@ These functions don't depend on create_app() closures and can live at module lev
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import socket
@@ -96,7 +97,11 @@ def _write_json_if_changed(path: Path, data: dict) -> bool:
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialized, encoding="utf-8")
+    # Atomic replace so a crash mid-write cannot leave a truncated config that
+    # sing-box / pool-router would then refuse to start with.
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(serialized, encoding="utf-8")
+    os.replace(tmp_path, path)
     return True
 
 

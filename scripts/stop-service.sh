@@ -13,10 +13,18 @@ if [ -f tmp/server.pid ]; then
   rm -f tmp/server.pid
 fi
 
-CONFIG_PATH="$ROOT/config/sing-box.json"
+CONFIG_DIR="$ROOT/config"
 if command -v pgrep >/dev/null 2>&1; then
-  pgrep -f "sing-box.*$CONFIG_PATH" | while read -r pid; do
+  # Match every project-owned config (sing-box.json, sing-box-test.json, ...)
+  # so temporary speed-test engines are not left running.
+  pgrep -f "sing-box.*$CONFIG_DIR/" | while read -r pid; do
     kill "$pid" || true
     echo "Stopped project sing-box, pid $pid"
+  done
+  # Pool router is a separate helper process; leaving it running keeps its
+  # listener ports occupied and breaks the next start.
+  pgrep -f "pool-router.*$CONFIG_DIR/pool-router.json" | while read -r pid; do
+    kill "$pid" || true
+    echo "Stopped project pool-router, pid $pid"
   done
 fi

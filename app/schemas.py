@@ -83,37 +83,6 @@ class PortAllocateRequest(BaseModel):
     exclude: list[int] = []
 
 
-class ProxyAdminRequest(BaseModel):
-    base_url: str
-    token: str
-    proxy_host: str | None = None
-    replace_from: str | None = None
-    replace_to: str | None = None
-    proxy_name_prefix: str | None = "代理"
-    ports: list[int] | None = None
-    concurrency: int = 10
-    check_only: bool = False
-    proxy_ids_by_port: dict[str, int] | None = None
-
-
-class ProxyAdminRemoveRequest(BaseModel):
-    base_url: str
-    token: str
-    ids: list[int] | None = None
-    unused: bool = False
-    concurrency: int = 5
-
-
-class ProxyAdminConfig(BaseModel):
-    base_url: str = ""
-    token: str = ""
-    proxy_host: str = ""
-    replace_from: str = "127.0.0.1"
-    replace_to: str = ""
-    proxy_name_prefix: str = "代理"
-    concurrency: int = 10
-
-
 class LocalProxyCheckRequest(BaseModel):
     port: int | None = None
     proxy_url: str | None = None
@@ -160,17 +129,6 @@ class PortTestJob(BaseModel):
     completed: int = 0
     results: dict[str, dict] = {}
     details: dict[str, dict] = {}
-    error: str | None = None
-    touched_at: float = Field(default_factory=time.monotonic, exclude=True)
-
-
-class ProxyAdminJob(BaseModel):
-    id: str
-    status: str = "running"
-    total: int = 0
-    completed: int = 0
-    imported: list[dict] = []
-    results: dict[str, dict] = {}
     error: str | None = None
     touched_at: float = Field(default_factory=time.monotonic, exclude=True)
 

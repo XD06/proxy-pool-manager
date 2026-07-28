@@ -9,9 +9,6 @@ let validatingPorts = new Set();
 let nodeSearchQuery = "";
 let nodeStatusFilter = "all";
 let _nodeTableFingerprint = "";
-let proxyAdminResults = {};
-let proxyAdminImported = [];
-let proxyAdminConfigLoaded = false;
 let singBoxInfoLoaded = false;
 let localProxyCheckResults = {};
 let localProxyCheckingPorts = new Set();
@@ -20,7 +17,6 @@ let nodeTestProgress = null;
 let nodeTestRevision = 0;
 let activePortValidationJobId = null;
 let activeLocalProxyCheckJobId = null;
-let activeProxyAdminJobId = null;
 let pools = [];
 let trafficRange = localStorage.getItem("proxyPoolManager.trafficRange") || "24h";
 let trafficEntityType = "port";
@@ -62,6 +58,25 @@ async function request(path, options = {}) {
   }
   if (!response.ok) throw new Error(data.detail || JSON.stringify(data));
   return data;
+}
+
+// Job polling helpers: a transient network hiccup must not abort progress
+// tracking of a running job. fetch rejects with TypeError on network errors,
+// while HTTP errors surface as plain Error and should fail fast.
+async function requestJobWithRetry(path, maxAttempts = 6) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await request(path);
+    } catch (error) {
+      if (!(error instanceof TypeError) || attempt >= maxAttempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * attempt, 5000)));
+    }
+  }
+}
+
+function pollDelay(ms) {
+  // Hidden tabs poll slower to save server round-trips.
+  return new Promise((resolve) => setTimeout(resolve, document.hidden ? Math.max(ms * 4, 3000) : ms));
 }
 
 let _noticeTimer = null;
@@ -531,6 +546,18 @@ function renderNodeTable() {
   renderNodePagination();
 }
 
+// Unsaved edits in the assign table. Live speed-test polling re-renders this
+// table every second; without these drafts the user's in-progress checkbox
+// and port edits would be silently wiped by the innerHTML replacement.
+const assignDraftPorts = new Map();
+const assignDraftChecks = new Map();
+let _assignTableHtml = "";
+
+function clearAssignDrafts() {
+  assignDraftPorts.clear();
+  assignDraftChecks.clear();
+}
+
 function renderAssignTable() {
   const sourceNodes = assignFilterTags ? nodes.filter((node) => assignFilterTags.has(node.tag)) : nodes;
   const assignNodes = sourceNodes
@@ -544,15 +571,19 @@ function renderAssignTable() {
       if (leftPort !== rightPort) return leftPort - rightPort;
       return left.index - right.index;
     });
-  const isSelected = ({ node, assignedPort }) => Boolean(
-    assignedPort || (autoSelectAliveForAssign && node.latency?.alive)
-  );
+  const isSelected = ({ node, assignedPort }) => (assignDraftChecks.has(node.tag)
+    ? assignDraftChecks.get(node.tag)
+    : Boolean(assignedPort || (autoSelectAliveForAssign && node.latency?.alive)));
+  const portValue = ({ node, assignedPort }) => (assignDraftPorts.has(node.tag)
+    ? assignDraftPorts.get(node.tag)
+    : assignedPort);
   const allSelected = assignNodes.length > 0 && assignNodes.every(isSelected);
   if (!assignNodes.length) {
+    _assignTableHtml = "";
     $("assignTable").innerHTML = `<div class="empty"><strong>没有可分配节点</strong><span>先到节点页导入并测速，再回来分配端口。</span></div>`;
     return;
   }
-  $("assignTable").innerHTML = `
+  const html = `
     <table>
       <thead>
         <tr>
@@ -564,11 +595,12 @@ function renderAssignTable() {
           <th>状态</th>
         </tr>
       </thead>
-      <tbody>${assignNodes.map(({ node, assignedPort }) => {
-        const checked = isSelected({ node, assignedPort }) ? "checked" : "";
+      <tbody>${assignNodes.map((entry) => {
+        const { node } = entry;
+        const checked = isSelected(entry) ? "checked" : "";
         return `<tr>
           <td data-label="使用"><input type="checkbox" class="assign-check" data-tag="${escapeHtml(node.tag)}" aria-label="分配节点 ${escapeHtml(node.name)}" ${checked}></td>
-          <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${assignedPort}" min="1024" max="65535"></td>
+          <td data-label="端口"><input class="port-input" type="number" data-port-for="${escapeHtml(node.tag)}" value="${escapeHtml(String(portValue(entry)))}" min="1024" max="65535"></td>
           <td data-label="节点">${escapeHtml(node.name)}</td>
           <td data-label="出口 IP" class="mono">${escapeHtml(node.latency?.exit_ip || "-")}</td>
           <td data-label="地区">${geoChipHtml(geoContextForNode(node))}</td>
@@ -576,6 +608,20 @@ function renderAssignTable() {
         </tr>`;
       }).join("")}</tbody>
     </table>`;
+  if (html === _assignTableHtml) {
+    syncAssignSelectionControl();
+    return;
+  }
+  _assignTableHtml = html;
+  // Preserve keyboard focus on a port input across the innerHTML swap.
+  const active = document.activeElement;
+  const focusTag = active?.classList?.contains("port-input") && $("assignTable").contains(active)
+    ? active.dataset.portFor
+    : null;
+  $("assignTable").innerHTML = html;
+  if (focusTag) {
+    document.querySelector(`[data-port-for="${CSS.escape(focusTag)}"]`)?.focus();
+  }
   syncAssignSelectionControl();
   attachPortInputListeners();
 }
@@ -593,14 +639,17 @@ function syncAssignSelectionControl() {
   if (label) label.textContent = allSelected ? "全不选" : "全选";
 }
 
+let _portsTableHtml = "";
+
 function renderPortsTable() {
   const entries = sortedPortEntries();
   const curlTarget = activeValidationUrl();
   if (!entries.length) {
+    _portsTableHtml = "";
     $("portsTable").innerHTML = `<div class="empty"><strong>还没有端口映射</strong><span>到「分配」页勾选节点、填端口并保存映射。</span></div>`;
     return;
   }
-  $("portsTable").innerHTML = `
+  const html = `
     <table>
       <thead>
         <tr>
@@ -647,6 +696,12 @@ function renderPortsTable() {
         </tr>`;
       }).join("")}</tbody>
     </table>`;
+  // Skip identical re-renders: polling redraws this table up to ~1x/sec and
+  // rebuilding the DOM would eat in-flight clicks and hover states.
+  if (html !== _portsTableHtml) {
+    _portsTableHtml = html;
+    $("portsTable").innerHTML = html;
+  }
   renderValidationResults();
 }
 
@@ -764,29 +819,36 @@ async function runLocalProxyCheckForPorts(portList, concurrency = 3) {
 
 async function pollLocalProxyCheckJob(jobId, portList) {
   let finalJob = null;
-  for (;;) {
-    const job = await request(`/api/proxy-check/jobs/${jobId}`);
-    finalJob = job;
-    Object.entries(job.results || {}).forEach(([port, result]) => {
-      localProxyCheckResults[String(port)] = result;
-      localProxyCheckingPorts.delete(String(port));
-    });
-    if (job.status === "done" || job.status === "error" || job.status === "canceled") {
-      portList.forEach((port) => localProxyCheckingPorts.delete(String(port)));
+  try {
+    for (;;) {
+      const job = await requestJobWithRetry(`/api/proxy-check/jobs/${jobId}`);
+      finalJob = job;
+      Object.entries(job.results || {}).forEach(([port, result]) => {
+        localProxyCheckResults[String(port)] = result;
+        localProxyCheckingPorts.delete(String(port));
+      });
+      if (job.status === "done" || job.status === "error" || job.status === "canceled") {
+        portList.forEach((port) => localProxyCheckingPorts.delete(String(port)));
+      }
+      renderPortsTable();
+
+      renderLocalProxyCheckProgress(`检测中 ${job.completed}/${job.total}`);
+      if (job.status === "done") break;
+      if (job.status === "canceled") break;
+      if (job.status === "error") {
+        const message = job.error || "本地检测任务失败";
+        renderLocalProxyCheckProgress(message, "bad");
+        throw new Error(message);
+      }
+      await pollDelay(700);
     }
+  } catch (error) {
+    // Network drop / job error: release checking state so the UI can recover.
+    portList.forEach((port) => localProxyCheckingPorts.delete(String(port)));
+    activeLocalProxyCheckJobId = null;
+    setCancelButton("cancelLocalProxyCheckBtn", false);
     renderPortsTable();
-    
-    renderLocalProxyCheckProgress(`检测中 ${job.completed}/${job.total}`);
-    if (job.status === "done") break;
-    if (job.status === "canceled") break;
-    if (job.status === "error") {
-      activeLocalProxyCheckJobId = null;
-      setCancelButton("cancelLocalProxyCheckBtn", false);
-      const message = job.error || "本地检测任务失败";
-      renderLocalProxyCheckProgress(message, "bad");
-      throw new Error(message);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    throw error;
   }
   activeLocalProxyCheckJobId = null;
   setCancelButton("cancelLocalProxyCheckBtn", false);
@@ -796,43 +858,6 @@ async function pollLocalProxyCheckJob(jobId, portList) {
     passed: results.filter((result) => !localProxyCheckFailed(result)).length,
     failed: results.filter((result) => localProxyCheckFailed(result)).length
   };
-}
-
-function proxyAdminResultByPort() {
-  const resultById = new Map(Object.values(proxyAdminResults).map((result) => [String(result.id), result]));
-  const byPort = new Map();
-  proxyAdminImported.forEach((item) => {
-    const result = resultById.get(String(item.id));
-    if (result) byPort.set(String(item.port), { imported: item, result });
-  });
-  return byPort;
-}
-
-function proxyAdminPortSummary(port) {
-  const entry = proxyAdminResultByPort().get(String(port));
-  const local = localProxyPortSummary(port);
-  if (!entry) return local || '<span class="muted">-</span>';
-  const { result } = entry;
-  const failed = result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail");
-  const targets = (result.items || []).slice(0, 4);
-  const failedMessage = result.error || (result.items || []).find((item) => item.status === "fail")?.message || "";
-  const compactFailedMessage = compactCheckMessage(failedMessage || result.summary || "失败");
-  const title = (result.items || [])
-    .map((item) => `${item.target}: ${item.status} ${item.http_status || "-"} ${item.latency_ms || "-"}ms ${item.message || ""}`)
-    .join("\n");
-  return `
-    <div class="proxy-admin-inline" title="${escapeHtml(title || result.error || "")}">
-      <span class="badge ${failed ? "bad" : "ok"}">${escapeHtml(result.grade || "-")} · ${escapeHtml(result.score ?? "-")}</span>
-      ${failed ? `<span>${escapeHtml(compactFailedMessage)}</span>` : `
-        <span class="mono">${escapeHtml(result.exit_ip || "-")}</span>
-        <span>${escapeHtml(result.country || "-")}</span>
-        <span class="proxy-admin-mini-targets">
-          ${targets.map((item) => `<b class="${escapeHtml(item.status || "err")}">${escapeHtml(shortTargetName(item.target))}</b>`).join("")}
-        </span>
-      `}
-    </div>
-    ${local}
-  `;
 }
 
 function localProxyPortSummary(port) {
@@ -873,23 +898,15 @@ function shortTargetName(target) {
   return names[target] || target || "-";
 }
 
-function proxyAdminResultFailed(result) {
-  return result?.grade === "ERR" || (result?.items || []).some((item) => item.status === "fail");
-}
-
 function qualityFromResult(result) {
   if (!result) return { bucket: 1, gradeRank: 99, score: -1 };
-  if (proxyAdminResultFailed(result)) return { bucket: 2, gradeRank: 99, score: Number(result.score || 0) };
+  if (result?.grade === "ERR" || (result?.items || []).some((item) => item.status === "fail")) return { bucket: 2, gradeRank: 99, score: Number(result.score || 0) };
   const gradeOrder = { A: 0, B: 1, C: 2, D: 3, F: 4 };
   return {
     bucket: 0,
     gradeRank: gradeOrder[String(result.grade || "").toUpperCase()] ?? 50,
     score: Number(result.score || 0)
   };
-}
-
-function proxyAdminQuality(entry) {
-  return qualityFromResult(entry?.result);
 }
 
 function latencySortValue(latency) {
@@ -913,26 +930,6 @@ function sortedPortEntries() {
     if (leftLatency.rank !== rightLatency.rank) return leftLatency.rank - rightLatency.rank;
     if (leftLatency.delay !== rightLatency.delay) return leftLatency.delay - rightLatency.delay;
     return Number(leftPort) - Number(rightPort);
-  });
-}
-
-async function removeProxyAdminProxyForPort(port) {
-  await runTask(`移除端口 ${port} 远端代理`, async () => {
-    await saveProxyAdminConfig();
-    const entry = proxyAdminResultByPort().get(String(port));
-    const id = Number(entry?.imported?.id || entry?.result?.id);
-    if (!id || id <= 0) throw new Error("这个端口还没有有效的 ProxyAdmin 远端记录");
-    const result = await request("/api/proxy-admin/remove", {
-      method: "POST",
-      body: JSON.stringify(proxyAdminPayload({ ids: [id], concurrency: 1 }))
-    });
-    const removed = (result.removed || []).find((item) => Number(item.id) === id);
-    if (removed && !removed.success) throw new Error(removed.error || "远端删除失败");
-    delete proxyAdminResults[String(id)];
-    proxyAdminImported = proxyAdminImported.filter((item) => Number(item.id) !== id);
-    renderProxyAdminResults();
-    renderPortsTable();
-    return `端口 ${port} 的远端代理已移除`;
   });
 }
 
@@ -998,81 +995,6 @@ function renderValidationResults() {
     });
   });
 }
-
-function proxyAdminPayload(extra = {}) {
-  const baseUrl = $("proxyAdminBaseUrl").value.trim();
-  const token = $("proxyAdminToken").value.trim();
-  if (!baseUrl) throw new Error("请填写 ProxyAdmin API 地址");
-  if (!token) throw new Error("请填写 Bearer Token");
-  return {
-    base_url: baseUrl,
-    token,
-    proxy_host: $("proxyAdminHost").value.trim() || null,
-    replace_from: $("proxyAdminReplaceFrom").value.trim() || null,
-    replace_to: $("proxyAdminReplaceTo").value.trim() || null,
-    proxy_name_prefix: $("proxyAdminNamePrefix").value.trim() || "代理",
-    concurrency: Number($("proxyAdminConcurrency").value || 10),
-    ...extra
-  };
-}
-
-function renderProxyAdminResults() {
-  const results = Object.values(proxyAdminResults).sort((a, b) => {
-    const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
-    if (scoreDiff) return scoreDiff;
-    return String(a.id).localeCompare(String(b.id));
-  });
-  $("proxyAdminSummary").textContent = results.length
-    ? `已返回 ${results.length}/${proxyAdminImported.filter((item) => item.id).length}`
-    : proxyAdminImported.length
-      ? `已导入 ${proxyAdminImported.length} 个，等待检测`
-      : "未检测";
-  if (!proxyAdminImported.length && !results.length) {
-    $("proxyAdminResults").innerHTML = "";
-    return;
-  }
-  const failed = results.filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail")).length;
-  const passed = results.length - failed;
-  $("proxyAdminResults").innerHTML = `
-    <div class="proxy-admin-compact">
-      <span class="badge ok">通过 ${passed}</span>
-      <span class="badge bad">失败 ${failed}</span>
-      <span class="muted">详细结果已合并到下方端口表对应行。</span>
-    </div>
-  `;
-}
-
-async function pollProxyAdminJob(jobId) {
-  activeProxyAdminJobId = jobId;
-  setCancelButton("proxyAdminCancelBtn", true);
-  for (;;) {
-    const job = await request(`/api/proxy-admin/jobs/${jobId}`);
-    proxyAdminImported = job.imported || proxyAdminImported;
-    proxyAdminResults = job.results || proxyAdminResults;
-    renderProxyAdminResults();
-    renderPortsTable();
-    if (job.status === "done") {
-      showQuickResult("ProxyAdmin 检测", `完成 ${job.completed}/${job.total}`, true);
-      activeProxyAdminJobId = null;
-      setCancelButton("proxyAdminCancelBtn", false);
-      return;
-    }
-    if (job.status === "canceled") {
-      showQuickResult("ProxyAdmin 检测", `已取消，完成 ${job.completed}/${job.total}`, false);
-      activeProxyAdminJobId = null;
-      setCancelButton("proxyAdminCancelBtn", false);
-      return;
-    }
-    if (job.status === "error") {
-      showQuickResult("ProxyAdmin 检测", job.error || "检测失败", false);
-      activeProxyAdminJobId = null;
-      setCancelButton("proxyAdminCancelBtn", false);
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 800));
-  }
-}
-
 
 function shortAssetVersion(version) {
   const text = String(version || "");
@@ -1366,8 +1288,13 @@ function nodeWorkspaceQuery() {
   return params.toString();
 }
 
+let _nodeWorkspaceReqSeq = 0;
+
 async function refreshNodeWorkspace() {
+  const seq = ++_nodeWorkspaceReqSeq;
   const data = await request(`/api/nodes?${nodeWorkspaceQuery()}`);
+  // A newer request superseded this one; drop the stale response.
+  if (seq !== _nodeWorkspaceReqSeq) return;
   nodePageItems = data.nodes || [];
   nodePagination = { ...nodePagination, ...(data.pagination || {}) };
   renderNodeGroups();
@@ -1375,7 +1302,6 @@ async function refreshNodeWorkspace() {
 }
 
 async function refresh() {
-  await loadProxyAdminConfig();
   const [status, nodeData, portData, poolData, groupData, sourceData, nodePageData] = await Promise.all([
     request("/api/status"),
     request("/api/nodes"),
@@ -1412,53 +1338,29 @@ async function refresh() {
   }
 }
 
-async function loadProxyAdminConfig() {
-  if (proxyAdminConfigLoaded) return;
-  proxyAdminConfigLoaded = true;
-  try {
-    const config = await request("/api/proxy-admin/config");
-    $("proxyAdminBaseUrl").value = config.base_url || "";
-    $("proxyAdminToken").value = config.token || "";
-    $("proxyAdminHost").value = config.proxy_host || "";
-    $("proxyAdminReplaceFrom").value = config.replace_from || "127.0.0.1";
-    $("proxyAdminReplaceTo").value = config.replace_to || "";
-    $("proxyAdminNamePrefix").value = config.proxy_name_prefix || "代理";
-    $("proxyAdminConcurrency").value = config.concurrency || 10;
-  } catch {
-    proxyAdminConfigLoaded = false;
-  }
-}
-
-async function saveProxyAdminConfig() {
-  const payload = proxyAdminPayload();
-  const config = {
-    base_url: payload.base_url,
-    token: payload.token,
-    proxy_host: payload.proxy_host || "",
-    replace_from: payload.replace_from || "127.0.0.1",
-    replace_to: payload.replace_to || "",
-    proxy_name_prefix: payload.proxy_name_prefix || "代理",
-    concurrency: payload.concurrency || 10
-  };
-  await request("/api/proxy-admin/config", {
-    method: "PUT",
-    body: JSON.stringify(config)
-  });
-}
-
 async function refreshStatusOnly() {
   statusSnapshot = await request("/api/status");
   renderSummary();
   if ($("monitor")?.classList.contains("active")) await refreshTraffic();
 }
 
+const _runningTaskLabels = new Set();
+
 async function runTask(label, task) {
+  // Guard against double-clicks: the same action must not run concurrently.
+  if (_runningTaskLabels.has(label)) {
+    showNotice(`「${label}」正在执行中，请稍候`, "info");
+    return;
+  }
+  _runningTaskLabels.add(label);
   showNotice(`${label}...`);
   try {
     const message = await task();
     showNotice(message || `${label}完成`, "ok");
   } catch (error) {
     showNotice(error.message, "bad");
+  } finally {
+    _runningTaskLabels.delete(label);
   }
 }
 
@@ -1508,7 +1410,7 @@ function selectedNodeTestUrls() {
 
 async function pollTestJob(jobId) {
   while (true) {
-    const job = await request(`/api/test/jobs/${jobId}?since=${nodeTestRevision}`);
+    const job = await requestJobWithRetry(`/api/test/jobs/${jobId}?since=${nodeTestRevision}`);
     Object.entries(job.results || {}).forEach(([tag, result]) => {
       updateNodeLatency(tag, result);
       testingTags.delete(tag);
@@ -1549,7 +1451,7 @@ async function pollTestJob(jobId) {
       showNotice(job.error || "测速失败", "bad");
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await pollDelay(1000);
   }
 }
 function selectedNodeTags() {
@@ -1591,7 +1493,11 @@ function collectMappings() {
 }
 
 async function saveMappings(mappings) {
-  return request("/api/assign", { method: "PUT", body: JSON.stringify({ mappings }) });
+  const result = await request("/api/assign", { method: "PUT", body: JSON.stringify({ mappings }) });
+  // Server state is now the source of truth; stale drafts would otherwise
+  // shadow the freshly saved values on the next render.
+  clearAssignDrafts();
+  return result;
 }
 
 function compactPortMappings(startPort) {
@@ -1720,7 +1626,7 @@ async function runAllPortValidation() {
 
 async function pollPortTestJob(jobId, urls) {
   while (true) {
-    const job = await request(`/api/test-ports/jobs/${jobId}`);
+    const job = await requestJobWithRetry(`/api/test-ports/jobs/${jobId}`);
     applyPortValidationResults(job);
     renderPortsTable();
     renderValidationResults();
@@ -1745,7 +1651,7 @@ async function pollPortTestJob(jobId, urls) {
       showQuickResult("验证全部端口", job.error || "验证失败", false);
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await pollDelay(800);
   }
 }
 
@@ -2202,7 +2108,11 @@ $("assignTable").addEventListener("change", (event) => {
   if (target.id === "checkAllAssign") {
     document.querySelectorAll(".assign-check").forEach((box) => {
       box.checked = target.checked;
+      assignDraftChecks.set(box.dataset.tag, target.checked);
     });
+  }
+  if (target.classList.contains("assign-check")) {
+    assignDraftChecks.set(target.dataset.tag, target.checked);
   }
   if (target.id === "checkAllAssign" || target.classList.contains("assign-check")) {
     syncAssignSelectionControl();
@@ -2263,7 +2173,10 @@ $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用�
     targets = aliveBoxes.length ? aliveBoxes : visibleBoxes;
     targets.forEach((box) => {
       const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
-      if (!input.value) box.checked = true;
+      if (!input.value) {
+        box.checked = true;
+        assignDraftChecks.set(box.dataset.tag, true);
+      }
     });
     targets = targets.filter((box) => {
       const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
@@ -2282,6 +2195,7 @@ $("autoAssignBtn").addEventListener("click", () => runTask("自动分配可用�
   targets.forEach((box, index) => {
     const input = document.querySelector(`[data-port-for="${CSS.escape(box.dataset.tag)}"]`);
     input.value = allocation.ports[index];
+    assignDraftPorts.set(box.dataset.tag, String(allocation.ports[index]));
     usedPorts.add(allocation.ports[index]);
   });
   const skipped = allocation.skipped || {};
@@ -2324,6 +2238,7 @@ $("compactPortsBtn").addEventListener("click", () => runTask("重排端口", asy
 $("clearAssignBtn").addEventListener("click", () => confirmTask("清空端口分配", `将清空所有端口映射（共 ${Object.keys(ports).length} 个），此操作不可撤销。`, async () => {
   autoSelectAliveForAssign = false;
   assignFilterTags = null;
+  clearAssignDrafts();
   document.querySelectorAll(".assign-check").forEach((box) => {
     box.checked = false;
   });
@@ -2345,6 +2260,8 @@ function attachPortInputListeners() {
   document.querySelectorAll(".port-input").forEach((input) => {
     input.addEventListener("blur", () => checkPortInputAvailability(input));
     input.addEventListener("input", () => {
+      // Record the draft so poll-driven re-renders keep the user's edit.
+      assignDraftPorts.set(input.dataset.portFor, input.value);
       input.classList.remove("port-busy");
       const hint = input.parentElement.querySelector(".port-hint");
       if (hint) hint.remove();
@@ -2542,93 +2459,6 @@ $("exportBtn").addEventListener("click", () => {
   }
 });
 
-$("proxyAdminCheckBtn").addEventListener("click", () => runTask("ProxyAdmin 导入并检测", async () => {
-  await saveProxyAdminConfig();
-  proxyAdminResults = {};
-  proxyAdminImported = [];
-  renderProxyAdminResults();
-  const started = await request("/api/proxy-admin/check/start", {
-    method: "POST",
-    body: JSON.stringify(proxyAdminPayload())
-  });
-  $("proxyAdminSummary").textContent = `任务已启动：${started.id}`;
-  await pollProxyAdminJob(started.id);
-  return "ProxyAdmin 检测完成";
-}));
-
-$("proxyAdminSaveConfigBtn").addEventListener("click", () => runTask("保存 ProxyAdmin 配置", async () => {
-  await saveProxyAdminConfig();
-  return "ProxyAdmin 配置已保存";
-}));
-
-$("proxyAdminRetryFailedBtn").addEventListener("click", () => runTask("ProxyAdmin 重试失败", async () => {
-  await saveProxyAdminConfig();
-  const failedIds = Object.values(proxyAdminResults)
-    .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
-    .map((result) => Number(result.id))
-    .filter((id) => id > 0);
-  if (!failedIds.length) throw new Error("没有失败结果可重试");
-  const retryPorts = proxyAdminImported
-    .filter((item) => failedIds.includes(Number(item.id)))
-    .map((item) => Number(item.port));
-  const proxyIdsByPort = Object.fromEntries(
-    proxyAdminImported
-      .filter((item) => failedIds.includes(Number(item.id)))
-      .map((item) => [String(item.port), Number(item.id)])
-  );
-  const started = await request("/api/proxy-admin/check/start", {
-    method: "POST",
-    body: JSON.stringify(proxyAdminPayload({
-      ports: retryPorts,
-      check_only: true,
-      proxy_ids_by_port: proxyIdsByPort
-    }))
-  });
-  await pollProxyAdminJob(started.id);
-  return "ProxyAdmin 失败项已重试";
-}));
-
-$("proxyAdminDeleteFailedBtn").addEventListener("click", () => confirmTask("ProxyAdmin 删除失败", `将从远端 ProxyAdmin 平台删除所有检测失败的代理，此操作不可撤销。`, async () => {
-  await saveProxyAdminConfig();
-  const ids = Object.values(proxyAdminResults)
-    .filter((result) => result.grade === "ERR" || (result.items || []).some((item) => item.status === "fail"))
-    .map((result) => Number(result.id))
-    .filter((id) => id > 0);
-  if (!ids.length) throw new Error("没有失败节点可删除");
-  const result = await request("/api/proxy-admin/remove", {
-    method: "POST",
-    body: JSON.stringify(proxyAdminPayload({ ids, concurrency: Number($("proxyAdminConcurrency").value || 5) }))
-  });
-  (result.removed || []).forEach((item) => {
-    if (item.success) {
-      delete proxyAdminResults[String(item.id)];
-      proxyAdminImported = proxyAdminImported.filter((imported) => Number(imported.id) !== Number(item.id));
-    }
-  });
-  renderProxyAdminResults();
-  renderPortsTable();
-  showQuickResult("ProxyAdmin 删除失败", `处理 ${result.count} 个`, true);
-  return `ProxyAdmin 删除失败完成：${result.count} 个`;
-}));
-
-$("proxyAdminDeleteUnusedBtn").addEventListener("click", () => confirmTask("ProxyAdmin 删除未使用", `将从远端 ProxyAdmin 平台删除所有未使用的代理，此操作不可撤销。`, async () => {
-  await saveProxyAdminConfig();
-  const result = await request("/api/proxy-admin/remove", {
-    method: "POST",
-    body: JSON.stringify(proxyAdminPayload({ unused: true, concurrency: Number($("proxyAdminConcurrency").value || 5) }))
-  });
-  (result.removed || []).forEach((item) => {
-    if (item.success) {
-      delete proxyAdminResults[String(item.id)];
-      proxyAdminImported = proxyAdminImported.filter((imported) => Number(imported.id) !== Number(item.id));
-    }
-  });
-  renderProxyAdminResults();
-  renderPortsTable();
-  showQuickResult("ProxyAdmin 删除未使用", `处理 ${result.count} 个`, true);
-  return `ProxyAdmin 删除未使用完成：${result.count} 个`;
-}));
-
 $("refreshBtn").addEventListener("click", () => runTask("刷新", refresh));
 
 $("doctorBtn").addEventListener("click", () => runTask("系统自检", async () => {
@@ -2641,12 +2471,6 @@ $("doctorBtn").addEventListener("click", () => runTask("系统自检", async () 
   });
   renderDoctorResult(result);
   return result.fail ? `自检发现 ${result.fail} 个失败项` : "自检完成";
-}));
-
-$("proxyAdminCancelBtn").addEventListener("click", () => runTask("取消 ProxyAdmin 检测", async () => {
-  if (!activeProxyAdminJobId) throw new Error("没有正在运行的 ProxyAdmin 检测任务");
-  await request(`/api/proxy-admin/jobs/${activeProxyAdminJobId}/cancel`, { method: "POST", body: "{}" });
-  return "已发送取消 ProxyAdmin 检测请求";
 }));
 
 $("localProxyCheckBtn").addEventListener("click", () => runTask("本地检测", async () => {

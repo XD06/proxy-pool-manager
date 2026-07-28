@@ -150,8 +150,6 @@ def test_frontend_api_paths_exist_on_backend(client):
         "/api/test/jobs/job-1/cancel",
         "/api/test-ports/jobs/job-1",
         "/api/test-ports/jobs/job-1/cancel",
-        "/api/proxy-admin/jobs/job-1",
-        "/api/proxy-admin/jobs/job-1/cancel",
         "/api/proxy-check/jobs/job-1",
         "/api/proxy-check/jobs/job-1/cancel",
         "/api/ports/8001/ip",

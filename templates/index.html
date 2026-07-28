@@ -379,52 +379,6 @@
         </div>
       <div id="quickResult" class="quick-result hidden" role="status" aria-live="polite"></div>
       <div id="doctorResult" class="doctor-result hidden" role="status" aria-live="polite"></div>
-      <details class="advanced-box hidden" hidden>
-        <summary>
-          <strong>高级 · ProxyAdmin</strong>
-          <span id="proxyAdminSummary" class="muted">未检测</span>
-        </summary>
-        <div class="proxy-admin-box">
-          <div class="proxy-admin-controls">
-            <label class="inline-field wide">
-              API 地址
-              <input id="proxyAdminBaseUrl" type="url" placeholder="http://127.0.0.1:8081">
-            </label>
-            <label class="inline-field wide">
-              Bearer Token
-              <input id="proxyAdminToken" type="password" placeholder="Bearer Token">
-            </label>
-            <label class="inline-field">
-              代理 Host
-              <input id="proxyAdminHost" type="text" placeholder="自动">
-            </label>
-            <label class="inline-field">
-              替换 From
-              <input id="proxyAdminReplaceFrom" type="text" placeholder="127.0.0.1">
-            </label>
-            <label class="inline-field">
-              替换 To
-              <input id="proxyAdminReplaceTo" type="text" placeholder="服务器 IP">
-            </label>
-            <label class="inline-field">
-              名称前缀
-              <input id="proxyAdminNamePrefix" type="text" value="代理" placeholder="代理">
-            </label>
-            <label class="inline-field">
-              并发
-              <input id="proxyAdminConcurrency" type="number" value="10" min="1" max="30">
-            </label>
-            <button id="proxyAdminCheckBtn">导入并检测</button>
-            <button id="proxyAdminSaveConfigBtn">保存配置</button>
-            <button id="proxyAdminRetryFailedBtn">重试失败</button>
-            <button id="proxyAdminCancelBtn" class="hidden">取消检测</button>
-            <button id="proxyAdminDeleteFailedBtn">删除失败</button>
-            <button id="proxyAdminDeleteUnusedBtn">删除未使用</button>
-          </div>
-          <p class="proxy-admin-note">配置会保存到本机 config/app.json；如果 Web 面板暴露到公网，请不要保存长期有效 Token。</p>
-          <div id="proxyAdminResults" class="proxy-admin-results"></div>
-        </div>
-      </details>
       <div id="portsTable" class="table-card"></div>
       <textarea id="exportOutput" class="export-output hidden" rows="8" readonly></textarea>
       <div id="validationResults" class="validation-results"></div>
