@@ -141,9 +141,13 @@ def current_performance_settings() -> PerformanceSettings:
             config,
             "max_node_test_concurrency",
             "PPM_MAX_NODE_TEST_CONCURRENCY",
-            6 if low else 6,
+            # Probes are one connection each and cost the event loop almost
+            # nothing (shared SSL context), so throughput scales with slots:
+            # dead nodes hold a slot for the full timeout and dominate large
+            # batches unless plenty of probes run at once.
+            16 if low else 64,
             minimum=1,
-            maximum=64,
+            maximum=256,
         ),
         node_test_batch_size=_int_setting(
             config,
@@ -157,7 +161,9 @@ def current_performance_settings() -> PerformanceSettings:
             config,
             "max_port_test_concurrency",
             "PPM_MAX_PORT_TEST_CONCURRENCY",
-            4 if low else 8,
+            # Assigned-port validation goes through the already-running
+            # engine; 8 slots made 170 mapped nodes take 5+ minutes.
+            8 if low else 32,
             minimum=1,
             maximum=128,
         ),

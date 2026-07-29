@@ -331,7 +331,13 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if not log_path.exists():
             return []
         try:
-            content = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            # Read only the tail: this runs on the event loop once per test
+            # result, and slurping a multi-MB log 100+ times per batch adds up.
+            with open(log_path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 64 * 1024))
+                content = handle.read().decode("utf-8", errors="replace").splitlines()
         except Exception:
             return []
         return content[-max(1, lines):]
@@ -749,6 +755,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         router = pool_router.payload()
         if payload["running"] and router["running"]:
             listening = sorted(set(expected) & router_listener_ports)
+        elif payload["running"] and router_mode():
+            # Router mode with the router down: no public port is served, even
+            # when a foreign process answers on one of them (a blind connect
+            # probe once counted iCloud on 8081 as "1/314 listening").
+            listening = []
         elif payload["running"]:
             # Never scan sockets on the request path; the runtime loop refreshes
             # listening_ports_cache every few seconds.
@@ -779,9 +790,14 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             listening_ports_cache["expected"] = expected
             listening_ports_cache["checked_at"] = time.time()
             return []
-        if router_mode() and pool_router.payload()["running"]:
-            await refresh_router_listener_ports()
-            listening = set(expected) & router_listener_ports
+        if router_mode():
+            if pool_router.payload()["running"]:
+                await refresh_router_listener_ports()
+                listening = set(expected) & router_listener_ports
+            else:
+                # Router down: a blind connect probe would attribute foreign
+                # listeners on our public ports to this project.
+                listening = set()
         else:
             listening = set(await asyncio.to_thread(_listening_local_ports, expected))
         listening_ports_cache["ports"] = listening
@@ -1014,6 +1030,8 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if pool_router.payload()["running"]:
                 await refresh_router_listener_ports()
                 listening = sorted(set(expected) & router_listener_ports)
+            elif router_mode():
+                listening = []
             else:
                 listening = await asyncio.to_thread(_listening_local_ports, expected)
             listening_ports_cache["ports"] = set(listening)
@@ -1097,27 +1115,48 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             "telemetry_sampled_at": now,
         })
 
+    router_monitor_failures = 0
+
+    async def router_runtime_tick() -> None:
+        nonlocal router_monitor_failures
+        await refresh_pool_router_runtime()
+        # The router must serve whenever the engine runs in router mode with
+        # mapped ports. The previous poll-window check (`was_running and
+        # process is None`) missed deaths between iterations and never healed.
+        should_run = (
+            router_mode()
+            and engine_manager.status().running
+            and bool(runtime_ports())
+        )
+        if not should_run or pool_router.payload()["running"]:
+            router_monitor_failures = 0
+            return
+        if runtime_restart_lock.locked():
+            # A full restart is already rewriting configs and restarting.
+            return
+        router_monitor_failures += 1
+        if router_monitor_failures >= 3:
+            # Slow down instead of giving up forever so the router can
+            # still self-heal after transient crash storms.
+            pool_router.last_error = "Pool router crashed repeatedly; retrying every 60s"
+            logger.error("Pool router crashed %d times in a row; retry slowed to 60s", router_monitor_failures)
+            await asyncio.sleep(55)
+        try:
+            # Regenerate configs from current state first so a stale or
+            # corrupted pool-router.json on disk cannot resurrect the router
+            # with the wrong listener set.
+            write_runtime_configs()
+            await pool_router.start(POOL_ROUTER_CONFIG_PATH)
+            await refresh_router_listener_ports()
+            router_monitor_failures = 0
+        except (ConfigError, PoolRouterError):
+            logger.warning("Pool router auto-restart failed", exc_info=True)
+
     async def router_runtime_loop() -> None:
-        monitor_failures = 0
         while True:
             await asyncio.sleep(5)
             try:
-                was_running = bool(pool_router.process and pool_router.process.poll() is None)
-                await refresh_pool_router_runtime()
-                if was_running and pool_router.process is None and router_mode():
-                    monitor_failures += 1
-                    if monitor_failures >= 3:
-                        # Slow down instead of giving up forever so the router can
-                        # still self-heal after transient crash storms.
-                        pool_router.last_error = "Pool router crashed repeatedly; retrying every 60s"
-                        logger.error("Pool router crashed %d times in a row; retry slowed to 60s", monitor_failures)
-                        await asyncio.sleep(55)
-                    try:
-                        await pool_router.start(POOL_ROUTER_CONFIG_PATH)
-                        await refresh_router_listener_ports()
-                        monitor_failures = 0
-                    except PoolRouterError:
-                        logger.warning("Pool router auto-restart failed", exc_info=True)
+                await router_runtime_tick()
             except Exception:
                 logger.exception("Router runtime loop iteration failed")
 
@@ -1782,8 +1821,15 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                     return
                 if include_geoip and performance.profile != "low":
                     ips = sorted({result.exit_ip for result in app_state.latency_cache.values() if result.exit_ip})
-                    for ip in ips:
-                        geoip = await enrich_geoip_now(ip)
+
+                    # Look up IPs concurrently (bounded by the shared GeoIP
+                    # semaphore); a serial loop once added minutes for large
+                    # node sets with many distinct exit IPs.
+                    async def enrich_one(ip: str) -> tuple[str, dict | None]:
+                        async with geoip_semaphore:
+                            return ip, await enrich_geoip_now(ip)
+
+                    for ip, geoip in await asyncio.gather(*(enrich_one(ip) for ip in ips)):
                         if not geoip:
                             continue
                         for tag, result in app_state.latency_cache.items():
@@ -2233,21 +2279,37 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             checked = {}
             reserved = reserved_ports()
             engine_running = engine_manager.status().running
-            # Fresh probe for explicit check requests; keep it off the event loop.
-            project_listening = (
-                set(_listening_local_ports(mapped_ports())) if engine_running else set()
-            )
+            if not engine_running:
+                project_listening: set[int] = set()
+            elif router_mode():
+                # Public ports are served by the router; a blind connect probe
+                # would attribute foreign listeners to this project.
+                project_listening = (
+                    set(router_listener_ports) if pool_router.payload()["running"] else set()
+                )
+            else:
+                # Fresh probe for explicit check requests; keep it off the event loop.
+                project_listening = set(_listening_local_ports(mapped_ports()))
             owned = set(runtime_ports())
             for port in payload.ports:
                 if port in owned and str(port) in app_state.port_mappings:
                     # Already mapped ports are "in use by this project" even when
                     # the engine is stopped (bind would otherwise look free).
                     if not engine_running or port not in project_listening:
-                        checked[str(port)] = {
-                            "available": False,
-                            "reason": "project-mapped",
-                            "label": "已分配端口",
-                        }
+                        if engine_running and not _can_bind_tcp_port(port):
+                            # Mapped but not served and not bindable: a foreign
+                            # process holds the port, so the runtime skipped it.
+                            checked[str(port)] = {
+                                "available": False,
+                                "reason": "project-mapped-conflict",
+                                "label": "已分配但被其他程序占用",
+                            }
+                        else:
+                            checked[str(port)] = {
+                                "available": False,
+                                "reason": "project-mapped",
+                                "label": "已分配端口",
+                            }
                         continue
                 checked[str(port)] = port_diagnostic(
                     port,
@@ -2497,6 +2559,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     app.state.proxy_pool_state = app_state
     app.state.proxy_pool_store = state_store
     app.state.proxy_pool_engine = engine_manager
+    app.state.proxy_pool_router_tick = router_runtime_tick
     return app
 
 

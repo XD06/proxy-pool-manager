@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from .httpclient import shared_ssl_context
 from .settings import ROOT_DIR, current_pool_router_control_addr
 
 
@@ -238,7 +239,7 @@ class PoolRouterManager:
 
     async def status(self) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
+            async with httpx.AsyncClient(timeout=1.5, verify=shared_ssl_context()) as client:
                 response = await client.get(f"{self.control_url()}/status")
                 response.raise_for_status()
                 return response.json()
@@ -257,7 +258,7 @@ class PoolRouterManager:
 
     async def advance(self, listener_id: str) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=3) as client:
+            async with httpx.AsyncClient(timeout=3, verify=shared_ssl_context()) as client:
                 response = await client.post(f"{self.control_url()}/listeners/{listener_id}/advance")
                 response.raise_for_status()
                 return response.json()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import platform
 import re
@@ -18,8 +19,11 @@ from typing import Any
 
 import httpx
 
+from .httpclient import shared_ssl_context
 from .models import EngineStatus
 from .settings import BIN_DIR, SING_BOX_CONFIG_PATH
+
+logger = logging.getLogger(__name__)
 
 
 class EngineError(RuntimeError):
@@ -33,6 +37,9 @@ class EngineManager:
         self.started_at: float | None = None
         self.last_error: str | None = None
         self.fatal = False
+        # Proxy inbound ports skipped at the last start because they were held
+        # by a foreign process. Surfaced in status; recomputed every start.
+        self.skipped_ports: list[int] = []
         self._lock = asyncio.Lock()
         self._update_lock = asyncio.Lock()
         self._monitor_failures = 0
@@ -195,7 +202,7 @@ class EngineManager:
         last_error: httpx.HTTPError | None = None
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=shared_ssl_context()) as client:
                     response = await client.get(api_url, headers={"User-Agent": "ProxyPoolManager"})
                     response.raise_for_status()
                     return response.json()
@@ -227,7 +234,7 @@ class EngineManager:
                 last_error: httpx.HTTPError | None = None
                 for attempt in range(3):
                     try:
-                        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+                        async with httpx.AsyncClient(timeout=120, follow_redirects=True, verify=shared_ssl_context()) as client:
                             response = await client.get(asset["browser_download_url"])
                             response.raise_for_status()
                             archive_path.write_bytes(response.content)
@@ -536,6 +543,7 @@ class EngineManager:
         await asyncio.to_thread(self._kill_managed_orphans, config_path=config_path)
 
     async def _wait_for_config_ports_available(self, config_path: Path, timeout_seconds: float = 6.0) -> None:
+        self.skipped_ports = []
         ports = _config_listen_ports(config_path)
         if not ports:
             return
@@ -544,12 +552,33 @@ class EngineManager:
         while unavailable and time.monotonic() < deadline:
             await asyncio.sleep(0.2)
             unavailable = _unavailable_ports(ports)
-        if unavailable:
-            joined = ", ".join(str(port) for port in unavailable)
+        if not unavailable:
+            return
+        # Some configured ports are still held by a foreign process. Rather than
+        # refusing to start the whole engine (one taken port would block every
+        # node), skip just the occupied proxy inbounds and launch with the rest.
+        # Control ports (clash_api) cannot be dropped, so those stay fatal, and
+        # if nothing bindable remains there is nothing to run. The full port set
+        # is regenerated on the next restart, so freed ports are retried.
+        unavailable_set = set(unavailable)
+        config = _read_config_dict(config_path)
+        inbound_ports = _config_inbound_ports(config)
+        unavailable_control = unavailable_set - inbound_ports
+        remaining_inbounds = inbound_ports - unavailable_set
+        if unavailable_control or not remaining_inbounds:
+            joined = ", ".join(str(port) for port in sorted(unavailable_set))
             raise EngineError(
                 f"Ports are not available: {joined}. "
                 "Stop the process using them, wait a few seconds, or change the port mapping."
             )
+        trimmed, dropped = _drop_unavailable_inbounds(config, unavailable_set)
+        _atomic_write_json(config_path, trimmed)
+        self.skipped_ports = dropped
+        logger.warning(
+            "Skipped %d occupied proxy port(s) at engine start: %s",
+            len(dropped),
+            ", ".join(str(port) for port in dropped),
+        )
 
     def status(self) -> EngineStatus:
         running = self.process is not None and self.process.poll() is None
@@ -561,6 +590,7 @@ class EngineManager:
                     uptime_seconds=None,
                     fatal=self.fatal,
                     last_error=None,
+                    skipped_ports=list(self.skipped_ports),
                 )
         return EngineStatus(
             running=running,
@@ -568,6 +598,7 @@ class EngineManager:
             uptime_seconds=int(time.time() - self.started_at) if running and self.started_at else None,
             fatal=self.fatal,
             last_error=self.last_error,
+            skipped_ports=list(self.skipped_ports),
         )
 
     async def refresh_runtime_status(self, config_path: Path | None = None) -> EngineStatus:
@@ -634,6 +665,71 @@ def _config_listen_ports(config_path: Path) -> list[int]:
 
 def _unavailable_ports(ports: list[int]) -> list[int]:
     return [port for port in ports if not _can_bind_tcp_port(port)]
+
+
+def _read_config_dict(config_path: Path) -> dict:
+    try:
+        data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _config_inbound_ports(config: dict) -> set[int]:
+    ports: set[int] = set()
+    for inbound in config.get("inbounds", []) or []:
+        if isinstance(inbound, dict) and isinstance(inbound.get("listen_port"), int):
+            ports.add(inbound["listen_port"])
+    return ports
+
+
+def _drop_unavailable_inbounds(config: dict, unavailable: set[int]) -> tuple[dict, list[int]]:
+    """Return a config copy with inbounds bound to unavailable ports removed.
+
+    Route rules referencing a dropped inbound tag are pruned too, so sing-box
+    does not fail on a rule pointing at a missing inbound. Outbounds are left
+    untouched: sing-box tolerates unreferenced outbounds, and pool members can
+    share one outbound across several inbounds.
+    """
+    dropped_tags: set[str] = set()
+    dropped_ports: list[int] = []
+    kept_inbounds: list = []
+    for inbound in config.get("inbounds", []) or []:
+        port = inbound.get("listen_port") if isinstance(inbound, dict) else None
+        if isinstance(port, int) and port in unavailable:
+            dropped_ports.append(port)
+            tag = inbound.get("tag")
+            if isinstance(tag, str):
+                dropped_tags.add(tag)
+            continue
+        kept_inbounds.append(inbound)
+    new_config = dict(config)
+    new_config["inbounds"] = kept_inbounds
+    route = config.get("route")
+    if isinstance(route, dict) and dropped_tags:
+        kept_rules: list = []
+        for rule in route.get("rules", []) or []:
+            rule_inbounds = rule.get("inbound") if isinstance(rule, dict) else None
+            if isinstance(rule_inbounds, list):
+                filtered = [tag for tag in rule_inbounds if tag not in dropped_tags]
+                if not filtered:
+                    # Rule only targeted dropped inbounds; drop the rule too.
+                    continue
+                if len(filtered) != len(rule_inbounds):
+                    rule = {**rule, "inbound": filtered}
+            kept_rules.append(rule)
+        new_route = dict(route)
+        new_route["rules"] = kept_rules
+        new_config["route"] = new_route
+    return new_config, sorted(dropped_ports)
+
+
+def _atomic_write_json(config_path: Path, data: dict) -> None:
+    path = Path(config_path)
+    serialized = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(serialized, encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def _can_bind_tcp_port(port: int) -> bool:

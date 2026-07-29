@@ -145,3 +145,6 @@ class EngineStatus(BaseModel):
     uptime_seconds: int | None = None
     fatal: bool = False
     last_error: str | None = None
+    # Proxy inbound ports that were occupied by a foreign process at start and
+    # skipped so the rest of the engine could launch. Regenerated each restart.
+    skipped_ports: list[int] = Field(default_factory=list)

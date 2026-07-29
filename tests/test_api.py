@@ -12,14 +12,16 @@ from app.settings import ASSET_VERSION, PerformanceSettings
 from app.store import StateStore
 
 
+# Path/process isolation lives in tests/conftest.py. This file additionally
+# guarantees no test ever spawns the real Go router binary (tests here often
+# flip available() to True, which once made an assign call fork the binary
+# and clobber the production pool-router.json).
 @pytest.fixture(autouse=True)
-def isolate_sing_box_config(monkeypatch, tmp_path):
-    monkeypatch.setattr(api_module, "SING_BOX_CONFIG_PATH", tmp_path / "sing-box.json")
-    monkeypatch.setattr(api_module, "APP_CONFIG_PATH", tmp_path / "app.json")
-    monkeypatch.setattr(api_module, "TRAFFIC_DB_PATH", tmp_path / "traffic.db")
-    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: False)
-    monkeypatch.setattr(api_module.PoolRouterManager, "_managed_processes", lambda self: [])
-    monkeypatch.setattr(api_module.PoolRouterManager, "_stop_managed_orphans", lambda self, keep_pid=None: None)
+def never_spawn_pool_router(monkeypatch):
+    async def _no_spawn_start(self, config_path=None):
+        return None
+
+    monkeypatch.setattr(api_module.PoolRouterManager, "start", _no_spawn_start)
 
 
 class RunningEngine:
@@ -1685,6 +1687,121 @@ def test_api_router_status_uses_control_plane_without_proxy_probe(tmp_path, monk
     assert status["listening_ports"] == [8001]
 
 
+def test_api_status_router_down_ignores_foreign_listeners(tmp_path, monkeypatch):
+    # Router mode with the router dead: a foreign process answering on a
+    # mapped port (iCloud on 8081) must not count toward "listening".
+    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: True)
+    store = StateStore(tmp_path / "assignments.json")
+    store.save(
+        AppState(
+            nodes=[
+                ProxyNode(
+                    tag="node-a",
+                    name="A",
+                    type="vless",
+                    server="a.example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "a.example.com", "server_port": 443, "uuid": "u", "tag": "node-a"},
+                )
+            ],
+            port_mappings={"8081": PortMapping(node_tag="node-a")},
+        )
+    )
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    # Poison the blind-probe cache as if a foreign listener answered on 8081.
+    listening_ports_cache = _listening_ports_cache_from_app(app)
+    listening_ports_cache["ports"] = {8081}
+    listening_ports_cache["expected"] = [8081]
+    listening_ports_cache["checked_at"] = time.time()
+
+    status = client.get("/api/status").json()["engine"]
+
+    assert status["running"] is True
+    assert status["listening_ports"] == []
+    assert status["missing_ports"] == [8081]
+    assert status["ready"] is False
+
+
+def test_router_runtime_tick_restarts_router_and_regenerates_config(tmp_path, monkeypatch):
+    # The runtime tick must restart a dead router and rebuild pool-router.json
+    # from current state so a corrupted file on disk cannot come back to life.
+    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: True)
+    started = []
+
+    async def record_start(self, config_path=None):
+        started.append(config_path)
+
+    async def fake_status(self):
+        return {"listeners": [{"id": "port-8001", "listen": "127.0.0.1:8001", "backends": []}]}
+
+    monkeypatch.setattr(api_module.PoolRouterManager, "start", record_start)
+    monkeypatch.setattr(api_module.PoolRouterManager, "status", fake_status)
+    api_module.POOL_ROUTER_CONFIG_PATH.write_text(
+        json.dumps({"listeners": [{"id": "port-9999", "listen": "127.0.0.1:9999"}]}),
+        encoding="utf-8",
+    )
+    store = StateStore(tmp_path / "assignments.json")
+    store.save(
+        AppState(
+            nodes=[
+                ProxyNode(
+                    tag="node-a",
+                    name="A",
+                    type="vless",
+                    server="a.example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "a.example.com", "server_port": 443, "uuid": "u", "tag": "node-a"},
+                )
+            ],
+            port_mappings={"8001": PortMapping(node_tag="node-a")},
+        )
+    )
+    app = create_app(store=store, engine=RunningEngine())
+
+    asyncio.run(app.state.proxy_pool_router_tick())
+
+    assert started == [api_module.POOL_ROUTER_CONFIG_PATH]
+    config = json.loads(api_module.POOL_ROUTER_CONFIG_PATH.read_text(encoding="utf-8"))
+    listens = [str(listener.get("listen", "")) for listener in config["listeners"]]
+    assert any(listen.endswith(":8001") for listen in listens)
+    assert not any(listen.endswith(":9999") for listen in listens)
+
+
+def test_api_ports_check_flags_mapped_port_held_by_foreign_process(tmp_path, monkeypatch):
+    # A mapped port the runtime skipped because a foreign process owns it must
+    # be reported as a conflict, not as a plain "already assigned" port.
+    monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: True)
+    monkeypatch.setattr(api_module, "_can_bind_tcp_port", lambda port: False)
+    store = StateStore(tmp_path / "assignments.json")
+    store.save(
+        AppState(
+            nodes=[
+                ProxyNode(
+                    tag="node-a",
+                    name="A",
+                    type="vless",
+                    server="a.example.com",
+                    server_port=443,
+                    outbound={"type": "vless", "server": "a.example.com", "server_port": 443, "uuid": "u", "tag": "node-a"},
+                )
+            ],
+            port_mappings={"8081": PortMapping(node_tag="node-a")},
+        )
+    )
+    app = create_app(store=store, engine=RunningEngine())
+    client = TestClient(app)
+
+    response = client.post("/api/ports/check", json={"ports": [8081]})
+
+    assert response.status_code == 200
+    checked = response.json()["ports"]["8081"]
+    assert checked["available"] is False
+    assert checked["reason"] == "project-mapped-conflict"
+    assert checked["label"] == "已分配但被其他程序占用"
+
+
 def test_api_traffic_returns_stale_snapshot_when_router_control_times_out(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module.PoolRouterManager, "available", lambda self: True)
     monkeypatch.setattr(
@@ -1986,8 +2103,8 @@ def test_current_performance_settings_prefers_lower_batch_defaults(monkeypatch):
 
     settings = api_module.current_performance_settings()
 
-    assert settings.max_node_test_concurrency == 6
-    assert settings.max_port_test_concurrency == 8
+    assert settings.max_node_test_concurrency == 64
+    assert settings.max_port_test_concurrency == 32
     assert settings.state_save_debounce_ms == 500
 
 

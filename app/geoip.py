@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+from .httpclient import shared_ssl_context
 from .models import AppState, GeoIpResult
 
 
@@ -232,7 +233,7 @@ async def lookup_geoip(
 
     errors: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True, verify=shared_ssl_context()) as client:
             for name, provider in _PROVIDERS:
                 try:
                     result = await provider(client, ip)

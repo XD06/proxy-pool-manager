@@ -12,6 +12,12 @@ config/*.json
 config/*.log
 config/*.db
 config/*.tmp
+# Local recovery snapshots and SQLite sidecar files leak past the patterns
+# above because of their suffixes (assignments.json.bak-*, traffic.db-wal, ...).
+config/assignments.json.*
+config/*.db-shm
+config/*.db-wal
+config/*.db-journal
 bin/*
 !bin/.gitkeep
 .playwright-cli/

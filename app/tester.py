@@ -15,6 +15,7 @@ import httpx
 
 from .engine import EngineError, EngineManager, _can_bind_tcp_port
 from .generator import generate_config
+from .httpclient import shared_ssl_context
 from .models import AppState, ExitIpCache, LatencyResult, PortMapping, ProxyNode
 from .settings import SING_BOX_TEST_CONFIG_PATH, TEST_START_PORT
 
@@ -82,7 +83,7 @@ async def query_exit_ip(port: int, state: AppState, engine: EngineManager) -> Ex
     last_error = None
     for proxy in proxies:
         try:
-            async with httpx.AsyncClient(proxy=proxy, timeout=10) as client:
+            async with httpx.AsyncClient(proxy=proxy, timeout=10, verify=shared_ssl_context()) as client:
                 for url in EXIT_IP_URLS:
                     try:
                         response = await client.get(url)
@@ -120,7 +121,7 @@ async def _query_exit_ip_with_budget(client: httpx.AsyncClient, *, timeout_secon
 async def measure_port_latency(port: int) -> LatencyResult:
     proxy = f"socks5://127.0.0.1:{port}"
     try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=8) as client:
+        async with httpx.AsyncClient(proxy=proxy, timeout=8, verify=shared_ssl_context()) as client:
             result = await _fetch_first_test_url(client, FALLBACK_TEST_URLS)
         return LatencyResult(
             alive=True,
@@ -163,7 +164,9 @@ async def validate_proxy_targets(port: int, urls: list[str] | None = None) -> li
                 "error": str(exc),
             }
 
-    async with httpx.AsyncClient(proxy=proxy, timeout=8, follow_redirects=False) as client:
+    # Relays commonly need 8-12s for a cold handshake (verified in the test
+    # engine log); 5s killed nodes that pass when tested alone.
+    async with httpx.AsyncClient(proxy=proxy, timeout=8, follow_redirects=False, verify=shared_ssl_context()) as client:
         return await asyncio.gather(*(fetch_target(client, url) for url in targets))
 
 
@@ -179,11 +182,13 @@ async def validate_proxy_port(
     test_urls = selected_urls or ([target_url] if target_url else DEFAULT_NODE_TEST_URLS)
     use_fallback = not selected_urls and not target_url
     try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=5, follow_redirects=False) as client:
+        async with httpx.AsyncClient(proxy=proxy, timeout=8, follow_redirects=False, verify=shared_ssl_context()) as client:
             if len(test_urls) > 1 and not use_fallback:
-                target_results = []
-                for url in test_urls:
-                    target_results.append(await _fetch_one_test_url(client, url))
+                # Explicit multi-target checks fetch concurrently; gather keeps
+                # the request order for the per-URL report.
+                target_results = list(
+                    await asyncio.gather(*(_fetch_one_test_url(client, url) for url in test_urls))
+                )
                 ok_results = [item for item in target_results if item["ok"]]
                 if not ok_results:
                     raise RuntimeError("; ".join(item.get("error") or f"{item['url']}: HTTP {item.get('status_code')}" for item in target_results))
@@ -258,39 +263,74 @@ async def _fetch_one_test_url(client, url: str) -> dict:
         }
 
 
+_TEST_URL_STAGGER_SECONDS = 2.0
+
+# Max simultaneous probes against a single upstream server. Real node sets
+# concentrate dozens of siblings on one relay host, and each dead sibling
+# holds its slot for the full timeout, so a tight cap collapses throughput
+# (2 turned a 120-node batch into ~10 minutes). With staggered URLs a node
+# opens one connection, so 16 stays under the relay 503 threshold that the
+# old 3-way URL racing tripped while keeping a 60-sibling host draining.
+_PER_HOST_TEST_CONCURRENCY = 16
+
+
 async def _fetch_first_test_url(client, urls: list[str]) -> dict:
-    errors: list[str] = []
-    for index, url in enumerate(urls):
-        started = time.perf_counter()
-        try:
-            response = await client.get(url)
-            elapsed = int((time.perf_counter() - started) * 1000)
-            body = response.text.strip().replace("\r", "")[:160]
-            if 200 <= response.status_code < 400:
-                notice = None
-                if index > 0:
-                    notice = f"primary test URL failed; switched to {url}"
-                    print(f"[测速] {notice}")
-                return {
-                    "url": url,
-                    "status_code": response.status_code,
-                    "elapsed_ms": max(elapsed, 1),
-                    "body_preview": body,
-                    "fallback_notice": notice,
-                    "target_results": [
-                        {
-                            "url": url,
-                            "ok": True,
-                            "status_code": response.status_code,
-                            "elapsed_ms": max(elapsed, 1),
-                            "error": None,
-                        }
-                    ],
-                }
-            errors.append(f"{url}: HTTP {response.status_code}")
-        except Exception as exc:
-            errors.append(f"{url}: {exc}")
-    raise RuntimeError("; ".join(errors) or "all test URLs failed")
+    """Try candidate URLs with staggered starts, returning the first success.
+
+    Racing every URL at once opened 3 upstream connections per node; at batch
+    concurrency that overloaded relays (503s, 8-12s cold handshakes) and
+    mass-timed-out nodes that pass when tested alone. Staggering keeps a
+    healthy node at one connection while slow primaries still get fallbacks.
+    """
+    tasks: list[asyncio.Task] = []
+    pending: set[asyncio.Task] = set()
+    queue = list(urls)
+    failures: dict[str, str] = {}
+    winner: dict | None = None
+    try:
+        while winner is None and (queue or pending):
+            if queue:
+                task = asyncio.create_task(_fetch_one_test_url(client, queue.pop(0)))
+                tasks.append(task)
+                pending.add(task)
+            # Launch the next candidate only after the stagger window passes
+            # (or a candidate fails outright); never cancel a slow leader.
+            timeout = _TEST_URL_STAGGER_SECONDS if queue else None
+            done, pending = await asyncio.wait(pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            for finished in done:
+                item = finished.result()
+                if item["ok"]:
+                    winner = item
+                    break
+                failures[item["url"]] = item["error"] or "request failed"
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if winner is None:
+        errors = [f"{url}: {failures[url]}" for url in urls if url in failures]
+        raise RuntimeError("; ".join(errors) or "all test URLs failed")
+    notice = None
+    if winner["url"] != urls[0] and urls[0] in failures:
+        notice = f"primary test URL failed; switched to {winner['url']}"
+        print(f"[测速] {notice}")
+    return {
+        "url": winner["url"],
+        "status_code": winner["status_code"],
+        "elapsed_ms": winner["elapsed_ms"],
+        "body_preview": winner["body_preview"],
+        "fallback_notice": notice,
+        "target_results": [
+            {
+                "url": winner["url"],
+                "ok": True,
+                "status_code": winner["status_code"],
+                "elapsed_ms": winner["elapsed_ms"],
+                "error": None,
+            }
+        ],
+    }
 
 
 def _port_is_free(port: int) -> bool:
@@ -471,8 +511,9 @@ async def _test_node_batch_with_temporary_engine(
         await engine.start(SING_BOX_TEST_CONFIG_PATH, check=False, settle_seconds=settle_seconds)
         async def run_one(tag: str, port: int):
             try:
-                url_count = len(target_urls or ([target_url] if target_url else DEFAULT_NODE_TEST_URLS))
-                timeout = (10 if include_exit_ip else 6) + max(0, url_count - 1) * 5
+                # Budget: staggered fallbacks start up to 4s late plus an 8s
+                # request timeout; cold relay handshakes alone take 8-12s.
+                timeout = 15 if include_exit_ip else 12
                 result = await asyncio.wait_for(
                     validate_proxy_port(port, target_url=target_url, target_urls=target_urls, include_exit_ip=include_exit_ip),
                     timeout=timeout,
@@ -489,9 +530,24 @@ async def _test_node_batch_with_temporary_engine(
 
         semaphore = asyncio.Semaphore(max(1, int(concurrency or 12)))
 
+        # Relays rate-limit sibling nodes probed at once (503s and stalled
+        # handshakes in the test log killed nodes that pass when tested
+        # alone), so also cap in-flight probes per upstream server.
+        node_hosts = {node.tag: (node.server or "").lower() or node.tag for node in valid_nodes}
+        host_semaphores: dict[str, asyncio.Semaphore] = {}
+
+        def host_semaphore(tag: str) -> asyncio.Semaphore:
+            host = node_hosts.get(tag) or tag
+            if host not in host_semaphores:
+                host_semaphores[host] = asyncio.Semaphore(_PER_HOST_TEST_CONCURRENCY)
+            return host_semaphores[host]
+
         async def limited_run_one(tag: str, port: int):
-            async with semaphore:
-                return await run_one(tag, port)
+            # Acquire the host slot first so queued siblings do not pin
+            # global slots while they wait.
+            async with host_semaphore(tag):
+                async with semaphore:
+                    return await run_one(tag, port)
 
         tasks = [asyncio.create_task(limited_run_one(node.tag, ports[index])) for index, node in enumerate(valid_nodes)]
         try:

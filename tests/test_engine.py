@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.engine import EngineError, EngineManager, _config_listen_ports
+from app.engine import EngineError, EngineManager, _config_listen_ports, _drop_unavailable_inbounds
 from app.models import EngineStatus
 
 
@@ -139,6 +139,90 @@ def test_start_fails_before_popen_when_config_ports_are_unavailable(monkeypatch,
 
     asyncio.run(run())
     assert not popen_called
+
+
+def test_drop_unavailable_inbounds_prunes_inbounds_and_rules():
+    config = {
+        "inbounds": [
+            {"type": "mixed", "tag": "port-8001", "listen_port": 8001},
+            {"type": "mixed", "tag": "port-8002", "listen_port": 8002},
+        ],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {
+            "rules": [
+                {"inbound": ["port-8001"], "action": "sniff"},
+                {"inbound": ["port-8001"], "action": "route", "outbound": "node-a"},
+                {"inbound": ["port-8002"], "action": "sniff"},
+                {"inbound": ["port-8002"], "action": "route", "outbound": "node-b"},
+            ],
+            "final": "direct",
+        },
+    }
+
+    trimmed, dropped = _drop_unavailable_inbounds(config, {8001})
+
+    assert dropped == [8001]
+    assert [inbound["listen_port"] for inbound in trimmed["inbounds"]] == [8002]
+    assert [rule["inbound"] for rule in trimmed["route"]["rules"]] == [["port-8002"], ["port-8002"]]
+    # The source config must not be mutated in place.
+    assert len(config["inbounds"]) == 2
+    assert len(config["route"]["rules"]) == 4
+
+
+def test_start_skips_occupied_inbound_and_launches_remaining(monkeypatch, tmp_path):
+    manager = EngineManager()
+    config_path = tmp_path / "sing-box.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "inbounds": [
+                    {"type": "mixed", "tag": "port-8001", "listen_port": 8001},
+                    {"type": "mixed", "tag": "port-8002", "listen_port": 8002},
+                ],
+                "route": {
+                    "rules": [
+                        {"inbound": ["port-8001"], "action": "route", "outbound": "a"},
+                        {"inbound": ["port-8002"], "action": "route", "outbound": "b"},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeProc:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    started = {}
+
+    def fake_popen(*args, **kwargs):
+        started["called"] = True
+        return FakeProc()
+
+    async def run():
+        monkeypatch.setattr(manager, "ensure_binary", lambda: asyncio.sleep(0, result=Path("sing-box.exe")))
+        monkeypatch.setattr(manager, "_kill_managed_orphans", lambda keep_pid=None, config_path=None: None)
+        # 8001 is held by a foreign process; 8002 is free.
+        monkeypatch.setattr("app.engine._unavailable_ports", lambda ports: [8001])
+        monkeypatch.setattr("app.engine.subprocess.Popen", fake_popen)
+        await manager.start(config_path, check=False, settle_seconds=0, port_wait_timeout=0)
+
+    asyncio.run(run())
+
+    assert started.get("called") is True
+    assert manager.skipped_ports == [8001]
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert [inbound["listen_port"] for inbound in written["inbounds"]] == [8002]
+    assert written["route"]["rules"] == [{"inbound": ["port-8002"], "action": "route", "outbound": "b"}]
+    assert manager.status().skipped_ports == [8001]
 
 
 def test_managed_processes_parses_linux_ps_output(monkeypatch):

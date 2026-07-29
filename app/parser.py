@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 import yaml
 
+from .httpclient import shared_ssl_context
 from .models import ImportDiagnostic, ImportResult, ProxyNode
 
 
@@ -835,6 +836,7 @@ async def import_nodes(url: str | None = None, text: str | None = None) -> Impor
             follow_redirects=True,
             headers=SUBSCRIPTION_HEADERS,
             event_hooks={"request": [_guard_subscription_request]},
+            verify=shared_ssl_context(),
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
