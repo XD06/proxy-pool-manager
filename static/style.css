@@ -2830,38 +2830,22 @@ line-height: 1.3;
 .pool-toggle {
   position: relative;
   flex: 0 0 auto;
-  width: 78px;
-  min-width: 78px;
-  height: 28px;
-  min-height: 28px;
-  padding: 3px;
+  width: 34px;
+  min-width: 34px;
+  height: 20px;
+  min-height: 20px;
+  padding: 2px;
   border: 1px solid #b8c4cf;
   border-radius: 999px;
   background: #eef2f5;
-  color: #637387;
   box-shadow: none;
-  font-size: 11px;
-  font-weight: 750;
-  text-align: left;
-}
-.pool-toggle-label {
-  position: absolute;
-  top: 0;
-  right: 6px;
-  bottom: 0;
-  left: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  white-space: nowrap;
-  transition: color 140ms ease;
 }
 .pool-toggle-knob {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 20px;
-  height: 20px;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px rgba(15, 23, 42, .22);
@@ -2869,8 +2853,7 @@ line-height: 1.3;
   transition: transform 160ms ease;
 }
 .pool-toggle.on { border-color: #0f9b90; background: var(--accent); color: #fff; }
-.pool-toggle.on .pool-toggle-label { right: 28px; left: 7px; justify-content: flex-start; }
-.pool-toggle.on .pool-toggle-knob { transform: translateX(50px); }
+.pool-toggle.on .pool-toggle-knob { transform: translateX(14px); }
 .pool-toggle:focus-visible { outline: 2px solid #0f9b90; outline-offset: 2px; }
 .pool-card p { margin: 0; color: var(--muted); font-size: 12px; }
 .pool-card footer { justify-content: flex-start; }
