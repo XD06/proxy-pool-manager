@@ -1149,6 +1149,22 @@ function renderPools() {
   }).join("");
 }
 
+function poolUpdatePayload(pool, enabled = pool.enabled) {
+  return {
+    name: pool.name,
+    listen_port: Number(pool.listen_port),
+    policy: pool.policy,
+    rotation_interval_seconds: Number(pool.rotation_interval_seconds || 600),
+    enabled,
+    members: (pool.members || []).map((member) => ({
+      node_tag: member.node_tag,
+      weight: Number(member.weight || 1),
+      enabled: member.enabled !== false,
+      draining: Boolean(member.draining)
+    }))
+  };
+}
+
 function renderPoolPolicyHint() {
   const policy = $("poolPolicy")?.value || "weighted_round_robin";
   const isWindow = policy === "time_window";
@@ -1872,9 +1888,13 @@ $("poolList").addEventListener("click", (event) => {
   if (!id) return;
   const pool = pools.find((item) => item.id === id);
   if (button.dataset.poolToggle) runTask(pool?.enabled ? "停用节点池" : "启用节点池", async () => {
-    await request(`/api/pools/${encodeURIComponent(id)}/enabled`, { method: "PATCH", body: JSON.stringify({ enabled: !pool?.enabled }) });
+    if (!pool) throw new Error("节点池已不存在，请刷新页面后重试");
+    // PUT is supported by both the running legacy backend and the upgraded
+    // backend, so the quick switch remains usable during a rolling update.
+    const enabled = !pool.enabled;
+    await request(`/api/pools/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(poolUpdatePayload(pool, enabled)) });
     await refresh();
-    return pool?.enabled ? `节点池「${pool?.name || id}」已停用` : `节点池「${pool?.name || id}」已启用`;
+    return enabled ? `节点池「${pool.name}」已启用` : `节点池「${pool.name}」已停用`;
   });
   if (button.dataset.poolEdit) openPoolEditor(pool);
   if (button.dataset.poolAdvance) runTask("切换下一节点", async () => {
