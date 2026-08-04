@@ -1719,6 +1719,22 @@ function activateTab(tabId, persist = true) {
   return true;
 }
 
+function wireExclusiveNodeActionMenus() {
+  // These are sibling command menus. Nested details such as the import text
+  // expander deliberately stay outside this group so they cannot close import.
+  const menus = [...document.querySelectorAll("#test .test-actions > details")];
+  menus.forEach((menu) => {
+    menu.addEventListener("toggle", () => {
+      if (!menu.open) return;
+      menus.forEach((other) => {
+        if (other !== menu) other.open = false;
+      });
+    });
+  });
+}
+
+wireExclusiveNodeActionMenus();
+
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
     activateTab(button.dataset.tab);
