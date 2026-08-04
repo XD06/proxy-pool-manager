@@ -47,6 +47,10 @@ def _runtime_inbound_plan(
         if pool.listen_port in public_ports:
             raise ConfigError(f"Pool {pool.name} uses an already assigned port: {pool.listen_port}")
         public_ports.add(pool.listen_port)
+        # A disabled pool owns its public port in persistent state but must not
+        # create internal sing-box listeners or outbound routes at runtime.
+        if not pool.enabled:
+            continue
         if pool.enabled and not any(member.enabled and not member.draining for member in pool.members):
             raise ConfigError(f"Pool {pool.name} has no active members")
         for member in sorted(pool.members, key=lambda item: item.node_tag):

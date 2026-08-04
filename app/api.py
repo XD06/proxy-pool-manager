@@ -58,6 +58,7 @@ from .schemas import (
     PortTestJob,
     PortTestRequest,
     PoolDrainRequest,
+    PoolEnabledRequest,
     PoolUpsertRequest,
     SubscriptionConfigRequest,
     SubscriptionSourceRequest,
@@ -695,7 +696,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             if router_mode():
                 await pool_router.start(POOL_ROUTER_CONFIG_PATH)
                 await refresh_router_listener_ports()
-            await wait_for_mapped_ports()
+            await wait_for_runtime_ports()
             return config_written, router_written
 
     _configured_ports_cache: dict[str, object] = {"mtime": None, "ports": []}
@@ -1021,7 +1022,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             )
         return {"ports": ports, "skipped": skipped}
 
-    async def wait_for_mapped_ports(timeout_seconds: float = 8.0) -> None:
+    async def wait_for_runtime_ports(timeout_seconds: float = 8.0) -> None:
         expected = runtime_ports()
         if not expected:
             return
@@ -2111,7 +2112,11 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             return
         if node_test_running():
             raise HTTPException(status_code=409, detail="A node test is running. Wait for it to finish before restarting the engine.")
-        await restart_runtime()
+        if runtime_ports():
+            await restart_runtime()
+        else:
+            await pool_router.stop()
+            await engine_manager.stop()
 
     def require_pool_router() -> None:
         if not pool_router.available():
@@ -2149,6 +2154,28 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         except (ConfigError, EngineError, PoolRouterError) as exc:
             raise HTTPException(status_code=400, detail=f"Pool saved, but runtime restart failed: {exc}") from exc
         await asyncio.to_thread(traffic_store.event, "pool_updated", f"Updated pool {pool.name}", entity_type="pool", entity_id=pool.id)
+        return {"ok": True, "pool": pool_payload(pool, request)}
+
+    @app.patch("/api/pools/{pool_id}/enabled")
+    async def set_pool_enabled(pool_id: str, payload: PoolEnabledRequest, request: Request):
+        require_pool_router()
+        pool = next((item for item in app_state.pools if item.id == pool_id), None)
+        if not pool:
+            raise HTTPException(status_code=404, detail="Pool not found")
+        if payload.enabled and not any(member.enabled and not member.draining for member in pool.members):
+            raise HTTPException(status_code=400, detail="An enabled pool requires at least one active member")
+        if pool.enabled == payload.enabled:
+            return {"ok": True, "pool": pool_payload(pool, request)}
+        pool.enabled = payload.enabled
+        pool.updated_at = utc_now_iso()
+        await save_async()
+        try:
+            await restart_for_pool_change()
+        except (ConfigError, EngineError, PoolRouterError) as exc:
+            raise HTTPException(status_code=400, detail=f"Pool state saved, but runtime update failed: {exc}") from exc
+        action = "pool_enabled" if pool.enabled else "pool_disabled"
+        message = f"Enabled pool {pool.name}" if pool.enabled else f"Disabled pool {pool.name}"
+        await asyncio.to_thread(traffic_store.event, action, message, entity_type="pool", entity_id=pool.id)
         return {"ok": True, "pool": pool_payload(pool, request)}
 
     @app.post("/api/pools/{pool_id}/advance")
@@ -2534,7 +2561,12 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
     @app.post("/api/start")
     async def start():
         if not runtime_ports():
-            raise HTTPException(status_code=400, detail="No port mappings or pools configured")
+            detail = (
+                "No active port mappings or pools configured"
+                if not app_state.pools
+                else "No active public port: enable a node pool or add a port mapping"
+            )
+            raise HTTPException(status_code=400, detail=detail)
         if node_test_running():
             raise HTTPException(
                 status_code=409,

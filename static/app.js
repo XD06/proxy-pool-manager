@@ -1134,7 +1134,7 @@ function renderPools() {
   $("createPoolBtn").disabled = !router.available;
   $("createPoolBtn").title = router.available ? "" : "先运行安装脚本构建 Pool Router";
   routerNotice.className = `pool-router-notice ${router.available ? (router.running ? "ok" : "warn") : "bad"}`;
-  routerNotice.textContent = router.available ? (router.running ? "Pool Router 正在运行，统计与轮询已启用。" : "Pool Router 已安装；启动引擎后生效。") : "Pool Router 未安装：固定端口仍可使用；节点池和端口流量监控需要安装脚本构建 Go Router。";
+  routerNotice.textContent = router.available ? (router.running ? "Pool Router 正在运行，统计与轮询已启用。" : "Pool Router 已安装；启用节点池后可直接启动引擎，无需建立普通端口映射。") : "Pool Router 未安装：固定端口仍可使用；节点池和端口流量监控需要安装脚本构建 Go Router。";
   if (!pools.length) {
     list.innerHTML = `<div class="empty"><strong>还没有节点池</strong><span>创建后即可用一个代理端口在多个健康节点间轮询。</span></div>`;
     return;
@@ -1144,7 +1144,8 @@ function renderPools() {
     const preview = pool.members.slice(0, 12);
     const remaining = pool.members.length - preview.length;
     const policy = pool.policy === "time_window" ? `固定 ${pool.rotation_interval_seconds || 600} 秒` : pool.policy === "weighted_round_robin" ? "加权新连接" : "每条新连接";
-    return `<article class="pool-card"><header><div><strong>${escapeHtml(pool.name)}</strong><span class="mono">:${pool.listen_port}</span></div><span class="badge ${pool.enabled ? "ok" : "idle"}">${pool.enabled ? "启用" : "停用"}</span></header><p>${policy} · ${active}/${pool.members.length} 活跃成员</p><div class="pool-member-chips">${preview.map((member) => `<span class="${member.draining ? "draining" : member.alive === false ? "unhealthy" : ""}">${escapeHtml(member.node_name || member.node_tag)} ×${member.weight}${member.draining ? " · 排空" : ""}</span>`).join("")}${remaining ? `<span class="member-overflow">+ ${remaining} 个成员</span>` : ""}</div><footer><button data-copy="${escapeHtml(pool.http_proxy)}" data-copy-label="节点池 HTTP 地址">复制 HTTP</button><button data-pool-advance="${escapeHtml(pool.id)}">切换下一节点</button><button data-pool-edit="${escapeHtml(pool.id)}">编辑</button><button data-pool-delete="${escapeHtml(pool.id)}">删除</button></footer></article>`;
+    const switchLabel = `${pool.enabled ? "停用" : "启用"}节点池 ${pool.name}`;
+    return `<article class="pool-card"><header><div><strong>${escapeHtml(pool.name)}</strong><span class="mono">:${pool.listen_port}</span></div><div class="pool-card-state"><span class="badge ${pool.enabled ? "ok" : "idle"}">${pool.enabled ? "启用" : "停用"}</span><button type="button" class="pool-toggle ${pool.enabled ? "on" : ""}" role="switch" aria-checked="${pool.enabled ? "true" : "false"}" aria-label="${escapeHtml(switchLabel)}" title="${escapeHtml(switchLabel)}" data-pool-toggle="${escapeHtml(pool.id)}"><span aria-hidden="true"></span></button></div></header><p>${policy} · ${active}/${pool.members.length} 活跃成员</p><div class="pool-member-chips">${preview.map((member) => `<span class="${member.draining ? "draining" : member.alive === false ? "unhealthy" : ""}">${escapeHtml(member.node_name || member.node_tag)} ×${member.weight}${member.draining ? " · 排空" : ""}</span>`).join("")}${remaining ? `<span class="member-overflow">+ ${remaining} 个成员</span>` : ""}</div><footer><button data-copy="${escapeHtml(pool.http_proxy)}" data-copy-label="节点池 HTTP 地址">复制 HTTP</button><button data-pool-advance="${escapeHtml(pool.id)}">切换下一节点</button><button data-pool-edit="${escapeHtml(pool.id)}">编辑</button><button data-pool-delete="${escapeHtml(pool.id)}">删除</button></footer></article>`;
   }).join("");
 }
 
@@ -1731,6 +1732,14 @@ function wireExclusiveNodeActionMenus() {
       });
     });
   });
+  document.addEventListener("pointerdown", (event) => {
+    if (event.target instanceof Element && event.target.closest("#test .test-actions")) return;
+    menus.forEach((menu) => { menu.open = false; });
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    menus.forEach((menu) => { menu.open = false; });
+  });
 }
 
 wireExclusiveNodeActionMenus();
@@ -1859,9 +1868,14 @@ $("poolList").addEventListener("click", (event) => {
     copyText(button.dataset.copy, button.dataset.copyLabel || "地址");
     return;
   }
-  const id = button.dataset.poolEdit || button.dataset.poolAdvance || button.dataset.poolDelete;
+  const id = button.dataset.poolEdit || button.dataset.poolAdvance || button.dataset.poolDelete || button.dataset.poolToggle;
   if (!id) return;
   const pool = pools.find((item) => item.id === id);
+  if (button.dataset.poolToggle) runTask(pool?.enabled ? "停用节点池" : "启用节点池", async () => {
+    await request(`/api/pools/${encodeURIComponent(id)}/enabled`, { method: "PATCH", body: JSON.stringify({ enabled: !pool?.enabled }) });
+    await refresh();
+    return pool?.enabled ? `节点池「${pool?.name || id}」已停用` : `节点池「${pool?.name || id}」已启用`;
+  });
   if (button.dataset.poolEdit) openPoolEditor(pool);
   if (button.dataset.poolAdvance) runTask("切换下一节点", async () => {
     await request(`/api/pools/${encodeURIComponent(id)}/advance`, { method: "POST", body: "{}" });

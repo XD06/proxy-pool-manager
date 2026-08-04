@@ -51,6 +51,10 @@ class PoolUpsertRequest(BaseModel):
     members: list[PoolMember] = Field(default_factory=list)
 
 
+class PoolEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class PoolDrainRequest(BaseModel):
     draining: bool
 
