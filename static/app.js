@@ -287,9 +287,15 @@ function renderSummary() {
   setTone("engineState", tone);
   const engineToggle = $("engineToggleBtn");
   const engineRunning = Boolean(statusSnapshot.running);
+  const engineNeedsRecovery = engineRunning && (
+    statusSnapshot.config_matches_state === false
+    || statusSnapshot.ready === false
+    || (statusSnapshot.failed_listeners || []).length > 0
+  );
   engineToggle.classList.toggle("on", engineRunning);
   engineToggle.setAttribute("aria-checked", String(engineRunning));
-  engineToggle.setAttribute("aria-label", engineRunning ? "暂停 sing-box" : "启动 sing-box");
+  engineToggle.setAttribute("aria-label", engineNeedsRecovery ? "修复 sing-box" : engineRunning ? "暂停 sing-box" : "启动 sing-box");
+  engineToggle.title = engineToggle.getAttribute("aria-label");
   $("nodeCount").textContent = String(statusSnapshot.node_count ?? nodes.length);
   $("mappingCount").textContent = String(statusSnapshot.mapping_count ?? Object.keys(ports).length);
   $("listeningCount").textContent = `${listeningPorts.length}/${expectedPorts.length}`;
@@ -352,8 +358,6 @@ function renderEngineHealth(expectedPorts, listeningPorts, missingPorts) {
   if (!box) return;
   const configMismatch = statusSnapshot.config_matches_state === false;
   const hasIssue = configMismatch || missingPorts.length > 0 || (statusSnapshot.running && statusSnapshot.ready === false);
-  const repairButton = $("repairEngineBtn");
-  if (repairButton) repairButton.classList.toggle("hidden", !hasIssue);
 
   let statusText = "未运行";
   let tone = "idle";
@@ -2434,25 +2438,16 @@ $("saveAssignBtn").addEventListener("click", () => runTask("保存端口映射",
 
 $("engineToggleBtn").addEventListener("click", () => {
   const running = Boolean(statusSnapshot.running);
-  return runTask(running ? "暂停引擎" : "启动引擎", async () => {
-    await request(running ? "/api/stop" : "/api/start", { method: "POST", body: "{}" });
-    await refreshStatusOnly();
+  const needsRecovery = running && (
+    statusSnapshot.config_matches_state === false
+    || statusSnapshot.ready === false
+    || (statusSnapshot.failed_listeners || []).length > 0
+  );
+  return runTask(needsRecovery ? "修复引擎" : running ? "暂停引擎" : "启动引擎", async () => {
+    await request(needsRecovery || !running ? "/api/start" : "/api/stop", { method: "POST", body: "{}" });
+    await refresh();
   });
 });
-
-$("repairEngineBtn").addEventListener("click", () => runTask("重启修复引擎", async () => {
-  await request("/api/stop", { method: "POST", body: "{}" });
-  await request("/api/start", { method: "POST", body: "{}" });
-  await refresh();
-  const missingPorts = statusSnapshot.missing_ports || [];
-  const failedListeners = statusSnapshot.failed_listeners || [];
-  if (failedListeners.length) {
-    const skipped = failedListeners.map((item) => String(item.listen || "").split(":").pop()).join(", ");
-    return `引擎已重启，端口被跳过：${skipped}（已被其他程序占用）`;
-  }
-  if (missingPorts.length) return `引擎已重启，仍缺失端口：${missingPorts.join(", ")}`;
-  return "引擎已重启，端口监听正常";
-}));
 
 $("checkSingBoxUpdateBtn").addEventListener("click", () => runTask("检测 sing-box 更新", async () => {
   const info = await loadSingBoxInfo(true);
