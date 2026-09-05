@@ -50,7 +50,7 @@
 | 功能 | 状态 |
 |------|------|
 | FastAPI 管理服务 | ✅ |
-| 纯 HTML/CSS/JS Web UI（3 Tab） | ✅ |
+| 纯 HTML/CSS/JS Web UI（4 Tab：监控/节点/分配/运行） | ✅ |
 | 节点导入（VLESS/VMess/Shadowsocks/Trojan/Hysteria2/TUIC/AnyTLS/Clash/Base64） | ✅ |
 | 端口映射保存 | ✅ |
 | sing-box 配置生成 + 自动下载 + check 校验 | ✅ |
@@ -60,7 +60,7 @@
 | 运行后端口验证 | ✅ |
 | AI 连通性检测（GPT/Claude/Gemini） | ✅ |
 | HTTP + SOCKS5 混合代理端口 | ✅ |
-| 单元测试 + API smoke test（134 passed） | ✅ |
+| 单元测试 + API smoke + 前端契约测试（2026-09-05 实测 168 项：167 passed，1 failed，见测试节） | ✅ |
 | 流量统计 / 节点池轮询（HTTP + SOCKS5 TCP） | ✅ |
 | SSR / 多订阅合并 / TUN 模式 / 节点池 UDP | ❌ |
 
@@ -214,6 +214,29 @@ curl.exe --proxy "http://127.0.0.1:8001/" https://ipv4.webshare.io/
 
 > 运行页支持单端口「查出口」「验证」，以及导出为代理列表 / CSV / JSON / curl 命令。验证目标默认 `webshare.io` / `google/gstatic 204` / `cloudflare trace`，也可自定义 URL。
 
+## 技术栈
+
+- Python 3.12+（`Dockerfile` 用 `python:3.12-slim`）+ FastAPI + uvicorn + httpx（含 socks）+ PyYAML + pydantic（见 `requirements.txt`）
+- sing-box 1.13.x 引擎（`Dockerfile` 默认 `1.13.13`，`bin/` 放各平台二进制，`SING_BOX_PATH` 可覆盖）
+- Go 1.21+：`proxycheck-api/` 构建 `proxycheck`（连通质量检测）与 `pool-router`（节点池轮询入口），`Dockerfile` 用 `golang:1.22` 构建
+- 前端无构建：`templates/index.html` + `static/app.js` / `helpers.js` / `style.css`
+- 状态：`config/assignments.json`（节点/映射/测速缓存）+ `config/traffic.db`（SQLite 流量采样）；`config/sing-box.json` / `config/pool-router.json` 为生成配置，不要手改
+- `proxy-port-api/` 为独立 Node TS 辅助（仅 `scan` 脚本），非运行时依赖
+
+## 项目结构
+
+```text
+main.py               # 入口：create_app() + uvicorn（默认 127.0.0.1:9000）
+app/                  # FastAPI 管理面（见 ARCHITECTURE.md 各模块职责）
+config/               # app.json / assignments.json / sing-box.json / traffic.db（凭据与生成文件，不提交）
+bin/                  # sing-box 各平台二进制（不提交，见 .gitignore）
+static/ templates/    # 无构建前端（4 Tab：monitor / test / assign / dashboard）
+proxycheck-api/       # Go：proxycheck + pool-router
+tests/                # pytest（conftest 隔离真实 config/ 与进程，见 AGENTS.md）
+scripts/              # install / start / status / stop / doctor / update（分 .ps1 / .sh）
+docs/operation.md     # 安装/运行/部署/排障手册（SETUP 复杂故独立）
+```
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -239,6 +262,23 @@ python -m compileall -q main.py app tests
 python -m pytest -q
 ```
 
+2026-09-05 实测（Python 3.14.4）：168 项收集，167 passed，1 failed，耗时约 107 秒。
+已知失败：`tests/test_frontend_contract.py::test_engine_start_stop_is_one_accessible_switch`
+断言 `static/app.js` 含 `running ? "/api/stop" : "/api/start"`，实际已演进为
+`needsRecovery || !running ? "/api/start" : "/api/stop"`（`static/app.js:2447`）。
+HTML 开关契约（`engineToggleBtn` / `role="switch"` / 无 `startBtn`/`stopBtn`）仍通过。
+
+快速子集（0.3 秒）：
+
+```powershell
+python -m pytest tests/test_parser.py tests/test_generator.py tests/test_store.py -q
+# 50 passed
+```
+
+```powershell
+node --check static/app.js
+```
+
 当前测试覆盖：
 
 - 单节点链接解析。
@@ -257,6 +297,14 @@ python -m pytest -q
 - sing-box inbound 默认只监听 `127.0.0.1`。
 - `config/assignments.json` 会保存代理凭据，不要提交到 git。
 - 本项目不记录代理请求内容。
+
+## 相关文档
+
+- 架构说明：`ARCHITECTURE.md`
+- 更新日志：`CHANGELOG.md`
+- AI 协作规范：`AGENTS.md`（本地专用，不提交）
+- 运行/部署/排障：`docs/operation.md`
+- 历史归档：`docs/archive/`（本地专用，不提交）
 
 ## License
 

@@ -24,3 +24,7 @@ bin/*
 
 # Environment
 .env
+
+# Local-only: never commit
+AGENTS.md
+docs/archive/
