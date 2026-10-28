@@ -112,7 +112,9 @@ def create_auth_router(ctx: AuthContext) -> APIRouter:
                 detail=f"Too many failed attempts. Try again in {max(retry_after, 1)}s.",
             )
         expected = ctx.admin_key()
-        if not hmac.compare_digest(payload.key or "", expected):
+        # compare_digest rejects non-ASCII str; compare bytes so a non-ASCII
+        # admin key (or a malformed attempt) fails cleanly as 401, not a 500.
+        if not hmac.compare_digest((payload.key or "").encode("utf-8"), expected.encode("utf-8")):
             failures.append(now)
             ctx.failures[ip] = failures
             remaining = AUTH_MAX_FAILURES - len(failures)

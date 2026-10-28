@@ -30,12 +30,12 @@ Python 只做导入解析、配置生成、进程启停、状态聚合、Web 管
 - **`main.py`**：唯一入口。`create_app()` + `uvicorn.run`，默认单 worker。禁止加 `--workers`（状态/Job/会话/进程句柄全在进程内）。
 - **`app/api.py`**（组合根）：装配 `create_app()`、全部 REST 路由、后台循环（订阅刷新 / 定时清理 / 流量采样 / 引擎与路由自愈）、防抖落盘。路由只读 `app_state` + 调模块函数，禁止在路由里拼 sing-box JSON。
 - **`app/settings.py`**：唯一配置源。路径常量（`config/` / `bin/` / `templates/` / `static/`）+ 读取优先级 `环境变量 > config/app.json > 代码默认`。`host/port` 需重启 Web 生效；`proxy_listen_host` / `clash_api_addr` / `domain_resolve_strategy` 在下次生成配置时生效（运行时读取函数）。
-- **`app/parser.py`**：订阅/文本 → sing-box outbound 列表。支持 Clash YAML / Base64 订阅 / 单链接。坏行跳过 + warnings，绝不因一条坏链接丢掉整批。
+- **`app/parser.py`**：订阅/文本 → sing-box outbound 列表。支持 Clash YAML / Base64 订阅 / 单链接。坏行跳过 + warnings，绝不因一条坏链接丢掉整批。订阅下载流式限长 32MB（按解压后字节计），私网地址拦截覆盖重定向每一跳。
 - **`app/generator.py`**：纯函数，`AppState` → `sing-box.json` / `pool-router.json`。每个映射端口一个 `mixed` inbound + 一条 route rule；池内部分配 `18000+` 内部端口并避开已用端口。禁止在此启动进程。
 - **`app/engine.py` / `app/pool_router.py`**：唯一能 spawn/kill 子进程的模块。启动前必 `sing-box check`，启动后等端口就绪（最多约 8 秒）。进程归属按命令行中的配置文件路径判定，禁止按二进制路径粗暴匹配（曾误杀主引擎）。
 - **`app/tester.py` / `app/proxy_check.py`**：探测面。节点测速用临时引擎 + 动态空闲端口（不再固定 `19001`）；端口验证走已运行引擎；`proxycheck` 二进制做本地质量检测。测速与正式引擎禁止并发互踩（正式启动时测速运行中返回 409）。
-- **`app/traffic.py`**：`traffic.db` 累计计数器采样（约 15 秒），只存增量聚合，不存请求内容。router 重启后首个窗口少计属已知取舍。
-- **`app/geoip.py`**：出口 IP 地理缓存，失败 1 小时重试，后台信号量限流。
+- **`app/traffic.py`**：`traffic.db` 累计计数器采样（约 15 秒），只存增量聚合，不存请求内容。router 重启后首个窗口少计属已知取舍。超过 35 天的桶/事件由流量采样循环每小时清理。
+- **`app/geoip.py`**：出口 IP 地理缓存，失败 1 小时重试，后台信号量限流。过期条目由任务清理循环每小时淘汰，避免状态文件无限膨胀。
 - **`app/store.py`**：`assignments.json` 原子落盘（tmp + replace），损坏自动备份（`assignments.json.bak-*`），加载失败永不丢弃内存中的可用状态。
 - **`app/models.py` / `app/schemas.py`**：数据模型与请求/Job 模型。金额式“禁止裸类型”类规则在此层收敛校验（端口范围、保留端口、tag 存在性）。
 - **`app/jobs.py`**：三类后台 Job（节点测速 / 端口验证 / 本地检测），带保留时长与上限，超时清理。

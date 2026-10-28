@@ -28,6 +28,9 @@ SUBSCRIPTION_HEADERS = {
     "User-Agent": "Clash.Meta/1.18.0 ProxyPoolManager/1.0",
     "Accept": "text/plain, application/octet-stream, application/yaml, text/yaml, */*",
 }
+# Cap applies to decompressed bytes: a hostile subscription host must not be
+# able to exhaust memory by streaming a huge (or gzip-bomb) body.
+MAX_SUBSCRIPTION_BYTES = 32 * 1024 * 1024
 
 
 def _normalize_base64_text(value: str) -> str:
@@ -824,6 +827,29 @@ async def _guard_subscription_request(request: httpx.Request) -> None:
         )
 
 
+async def _download_subscription(url: str) -> str:
+    async with httpx.AsyncClient(
+        timeout=30,
+        follow_redirects=True,
+        headers=SUBSCRIPTION_HEADERS,
+        event_hooks={"request": [_guard_subscription_request]},
+        verify=shared_ssl_context(),
+    ) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            received = 0
+            async for chunk in response.aiter_bytes():
+                received += len(chunk)
+                if received > MAX_SUBSCRIPTION_BYTES:
+                    raise ValueError(
+                        f"Subscription response exceeds the {MAX_SUBSCRIPTION_BYTES // (1024 * 1024)} MB limit"
+                    )
+                chunks.append(chunk)
+            # Same decoding rules as httpx Response.text (charset header, else utf-8).
+            return b"".join(chunks).decode(response.charset_encoding or "utf-8", errors="replace")
+
+
 async def import_nodes(url: str | None = None, text: str | None = None) -> ImportResult:
     if not url and not text:
         raise ValueError("Either url or text is required")
@@ -831,16 +857,7 @@ async def import_nodes(url: str | None = None, text: str | None = None) -> Impor
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError(f"Unsupported subscription URL scheme: {parsed.scheme or '(none)'}")
-        async with httpx.AsyncClient(
-            timeout=30,
-            follow_redirects=True,
-            headers=SUBSCRIPTION_HEADERS,
-            event_hooks={"request": [_guard_subscription_request]},
-            verify=shared_ssl_context(),
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            text = response.text
+        text = await _download_subscription(url)
     assert text is not None
     return parse_text(text)
 

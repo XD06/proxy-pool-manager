@@ -87,6 +87,22 @@ def _asn_text(value: object) -> str | None:
     return text
 
 
+def prune_expired_geoip(state: AppState, ttl_hours: int = DEFAULT_GEOIP_TTL_HOURS) -> int:
+    """Drop cache entries past their TTL; failed lookups expire after 1h.
+
+    The cache persists in the state file and would otherwise only grow.
+    Uses the same freshness rules as the read path.
+    """
+    stale = [
+        ip
+        for ip, result in state.geoip_cache.items()
+        if not _fresh(result.checked_at, _cache_ttl_hours(result, ttl_hours))
+    ]
+    for ip in stale:
+        state.geoip_cache.pop(ip, None)
+    return len(stale)
+
+
 async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict:
     response = await client.get(url)
     response.raise_for_status()

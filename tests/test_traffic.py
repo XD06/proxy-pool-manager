@@ -25,3 +25,21 @@ def test_traffic_store_filters_events_without_storing_request_data(tmp_path):
     events = store.events(entity_type="pool", entity_id="pool-a")
 
     assert [item["event_type"] for item in events] == ["pool_advanced"]
+
+
+def test_traffic_prune_removes_only_rows_older_than_retention(tmp_path):
+    store = TrafficStore(tmp_path / "traffic.db")
+    now = int(time.time())
+    store.sample(source_key="listener:port-8001", entity_type="port", entity_id="8001", upload=10, download=5, active=1, now=now - 1)
+    store.sample(source_key="listener:port-8001", entity_type="port", entity_id="8001", upload=20, download=10, active=1, now=now)
+    store.sample(source_key="listener:port-8002", entity_type="port", entity_id="8002", upload=10, download=5, active=1, now=now - 40 * 86_400)
+    store.sample(source_key="listener:port-8002", entity_type="port", entity_id="8002", upload=20, download=10, active=1, now=now - 40 * 86_400 + 30)
+    store.event("pool_created", "old event", now=now - 40 * 86_400)
+    store.event("pool_created", "new event", now=now)
+
+    removed = store.prune(now=now)
+
+    assert removed == 1
+    assert store.detail("port", "8001", 86_400)["upload"] == 10
+    assert store.detail("port", "8002", 10_000_000)["series"] == []
+    assert [item["message"] for item in store.events(limit=10)] == ["new event"]

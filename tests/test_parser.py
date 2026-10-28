@@ -150,16 +150,22 @@ def test_parse_base64_subscription_with_trailing_noise():
     assert result.nodes[1].outbound["server_ports"] == ["20000:55000"]
 
 
-def test_import_nodes_url_uses_subscription_client_options(monkeypatch):
-    seen = {}
-
+def _fake_subscription_client(monkeypatch, seen, chunks, charset="utf-8"):
     class FakeResponse:
-        text = (
-            "hysteria2://e65273d3-d654-4f2a-b81c-23e82ecea918@203.10.98.187:443/"
-            "?insecure=1&sni=www.bing.com#JP"
-        )
+        charset_encoding = charset
 
         def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            for chunk in chunks:
+                yield chunk
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback):
             return None
 
     class FakeClient:
@@ -172,19 +178,46 @@ def test_import_nodes_url_uses_subscription_client_options(monkeypatch):
         async def __aexit__(self, exc_type, exc, traceback):
             return None
 
-        async def get(self, url):
+        def stream(self, method, url):
             seen["url"] = url
-            return FakeResponse()
+            seen["method"] = method
+            return FakeStream()
 
     monkeypatch.setattr(parser_module.httpx, "AsyncClient", FakeClient)
+
+
+def test_import_nodes_url_uses_subscription_client_options(monkeypatch):
+    seen = {}
+    _fake_subscription_client(
+        monkeypatch,
+        seen,
+        chunks=[(
+            "hysteria2://e65273d3-d654-4f2a-b81c-23e82ecea918@203.10.98.187:443/"
+            "?insecure=1&sni=www.bing.com#JP"
+        ).encode("utf-8")],
+    )
 
     result = asyncio.run(import_nodes(url="https://example.com/sub"))
 
     assert result.count == 1
     assert seen["url"] == "https://example.com/sub"
+    assert seen["method"] == "GET"
     assert seen["follow_redirects"] is True
     assert seen["timeout"] == 30
     assert "Clash.Meta" in seen["headers"]["User-Agent"]
+
+
+def test_import_nodes_rejects_subscription_body_over_size_cap(monkeypatch):
+    monkeypatch.setattr(parser_module, "MAX_SUBSCRIPTION_BYTES", 16)
+    seen = {}
+    _fake_subscription_client(monkeypatch, seen, chunks=[b"vless://uuid@example", b"more-bytes-here"])
+
+    try:
+        asyncio.run(import_nodes(url="https://example.com/sub"))
+    except ValueError as exc:
+        assert "MB limit" in str(exc)
+    else:
+        raise AssertionError("Expected subscription size cap to raise ValueError")
 
 
 def test_parse_clash_yaml():

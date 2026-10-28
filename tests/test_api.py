@@ -154,6 +154,22 @@ def test_api_admin_auth_gate_and_login(tmp_path, monkeypatch):
     assert logout.json()["authenticated"] is False
 
 
+def test_api_auth_login_handles_non_ascii_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("PPM_ADMIN_KEY", "secret-key")
+    store = StateStore(tmp_path / "assignments.json")
+    app = create_app(store=store, engine=StoppedEngine())
+    client = TestClient(app)
+
+    wrong = client.post("/api/auth/login", json={"key": "错误密钥"})
+    assert wrong.status_code == 401
+    assert "Invalid admin key" in wrong.json()["detail"]
+
+    monkeypatch.setenv("PPM_ADMIN_KEY", "中文密钥")
+    ok = client.post("/api/auth/login", json={"key": "中文密钥"})
+    assert ok.status_code == 200
+    assert ok.json()["authenticated"] is True
+
+
 def test_api_auth_rate_limit_uses_forwarded_for_when_trusted(tmp_path, monkeypatch):
     monkeypatch.setenv("PPM_ADMIN_KEY", "secret-key")
     monkeypatch.setenv("PPM_TRUST_PROXY", "1")

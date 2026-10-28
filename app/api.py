@@ -28,7 +28,7 @@ from .jobs import JobManager
 from .routes.auth import AUTH_SESSION_TTL_SECONDS, AuthContext, create_auth_router
 from .engine import _can_bind_tcp_port
 from .generator import ConfigError, generate_config, generate_pool_router_config
-from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip
+from .geoip import geoip_compact_summary, geoip_summary, lookup_geoip, prune_expired_geoip
 from .models import (
     AppState,
     ExitIpCache,
@@ -207,7 +207,15 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 logger.exception("Failed to stop pool router on shutdown")
             await flush_save()
 
-    app = FastAPI(title="Proxy Pool Manager", lifespan=lifespan)
+    # No default docs routes: the auth middleware only guards /api/*, so /docs
+    # and /openapi.json would otherwise stay reachable without a session.
+    app = FastAPI(
+        title="Proxy Pool Manager",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -353,6 +361,10 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         while True:
             await asyncio.sleep(60)
             cleanup_all_jobs()
+            removed = prune_expired_geoip(app_state, geoip_config().cache_ttl_hours)
+            if removed:
+                logger.info("Pruned %d expired geoip cache entries", removed)
+                save_later()
 
     def refresh_state_from_disk() -> bool:
         nonlocal state_loaded_mtime_ns
@@ -1172,6 +1184,7 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
             await asyncio.sleep(5)
 
     async def traffic_sampling_loop() -> None:
+        last_prune = {"at": 0.0}
         while True:
             try:
                 await sample_router_traffic()
@@ -1179,6 +1192,14 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
                 pass
             except Exception:
                 logger.warning("Traffic sampling failed", exc_info=True)
+            if time.time() - last_prune["at"] >= 3600:
+                last_prune["at"] = time.time()
+                try:
+                    removed = await asyncio.to_thread(traffic_store.prune)
+                    if removed:
+                        logger.info("Pruned %d expired traffic buckets", removed)
+                except Exception:
+                    logger.warning("Traffic prune failed", exc_info=True)
             await asyncio.sleep(15)
 
     def assigned_tags_for_ports(ports: list[int] | None = None) -> list[tuple[str, int]]:
@@ -2514,19 +2535,28 @@ def create_app(store: StateStore | None = None, engine: EngineManager | None = N
         if not candidates:
             raise HTTPException(status_code=404, detail="No tested alive proxy mapping is available")
         if check:
-            checked_candidates = []
             urls = [target_url] if target_url else None
-            for _, _, port, mapping, _ in candidates:
-                tag, checked_port, result, detail = await validate_assigned_tag(mapping.node_tag, port, urls)
+            # Same bounded concurrency as /api/test-ports; a serial loop over
+            # hundreds of mapped ports could hold this request for minutes.
+            semaphore = asyncio.Semaphore(performance.max_port_test_concurrency)
+
+            async def check_candidate(port: int, mapping: PortMapping) -> None:
+                async with semaphore:
+                    tag, checked_port, result, detail = await validate_assigned_tag(mapping.node_tag, port, urls)
                 store_port_test_result(tag, checked_port, result, detail)
-                latency = app_state.latency_cache.get(mapping.node_tag)
-                if latency and latency.alive:
-                    success_count = sum(1 for item in latency.target_results or [] if item.get("ok"))
-                    if not latency.target_results:
-                        success_count = 1
-                    delay = latency.delay if latency.delay is not None else 10**9
-                    checked_candidates.append((success_count, delay, port, mapping, latency))
+
+            await asyncio.gather(*(check_candidate(port, mapping) for _, _, port, mapping, _ in candidates))
             await save_async()
+            checked_candidates = []
+            for _, _, port, mapping, _ in candidates:
+                latency = app_state.latency_cache.get(mapping.node_tag)
+                if not latency or not latency.alive:
+                    continue
+                success_count = sum(1 for item in latency.target_results or [] if item.get("ok"))
+                if not latency.target_results:
+                    success_count = 1
+                delay = latency.delay if latency.delay is not None else 10**9
+                checked_candidates.append((success_count, delay, port, mapping, latency))
             candidates = sorted(checked_candidates, key=lambda item: (-item[0], item[1], item[2]))
             if not candidates:
                 raise HTTPException(status_code=404, detail="No live proxy mapping passed real-time validation")

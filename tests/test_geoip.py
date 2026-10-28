@@ -32,6 +32,30 @@ def test_geoip_summary_prefers_compact_fields():
     assert geoip_compact_summary(result) == "US · Mountain View · Google"
 
 
+def test_prune_expired_geoip_removes_only_stale_entries():
+    from datetime import datetime, timedelta, timezone
+
+    from app.geoip import prune_expired_geoip
+
+    now = datetime.now(timezone.utc)
+    iso = lambda dt: dt.isoformat().replace("+00:00", "Z")
+    state = AppState()
+    state.geoip_cache = {
+        "8.8.8.8": GeoIpResult(ip="8.8.8.8", country_code="US", checked_at=iso(now)),
+        "9.9.9.9": GeoIpResult(ip="9.9.9.9", country_code="US", checked_at=iso(now - timedelta(hours=200))),
+        "1.1.1.1": GeoIpResult(ip="1.1.1.1", error="lookup failed", checked_at=iso(now - timedelta(hours=2))),
+        "2.2.2.2": GeoIpResult(ip="2.2.2.2", error="lookup failed", checked_at=iso(now)),
+    }
+
+    removed = prune_expired_geoip(state)
+
+    assert removed == 2
+    assert "8.8.8.8" in state.geoip_cache
+    assert "2.2.2.2" in state.geoip_cache
+    assert "9.9.9.9" not in state.geoip_cache
+    assert "1.1.1.1" not in state.geoip_cache
+
+
 class _FakeResponse:
     def __init__(self, payload: dict, status_code: int = 200):
         self._payload = payload

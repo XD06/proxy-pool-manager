@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
+# 60s buckets would otherwise grow forever (~400k rows/day at 300 ports).
+# 35d comfortably covers the widest served range (30d) while bounding the DB.
+TRAFFIC_RETENTION_SECONDS = 35 * 86_400
+
+
 class TrafficStore:
     """Small SQLite time-series store fed by cumulative edge-router counters."""
 
@@ -96,6 +101,14 @@ class TrafficStore:
         upload = sum(int(row["upload"]) for row in rows)
         download = sum(int(row["download"]) for row in rows)
         return {"entity_type": entity_type, "entity_id": entity_id, "upload": upload, "download": download, "series": [dict(row) for row in rows]}
+
+    def prune(self, retention_seconds: int = TRAFFIC_RETENTION_SECONDS, now: int | None = None) -> int:
+        """Delete buckets and events older than the retention window."""
+        cutoff = int(now or time.time()) - retention_seconds
+        with self._connect() as db:
+            removed = db.execute("DELETE FROM traffic_bucket WHERE bucket_start < ?", (cutoff,)).rowcount
+            db.execute("DELETE FROM traffic_event WHERE created_at < ?", (cutoff,))
+        return removed
 
     def events(self, limit: int = 100, entity_type: str | None = None, entity_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT created_at, entity_type, entity_id, event_type, message FROM traffic_event"
